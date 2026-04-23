@@ -27,8 +27,14 @@ LDAP or Keycloak directly.
   `triggerChangedUsersSync` → PUT via the `isCreate=false` path), 3 (full
   sync → one POST per user, no duplicates), and 5 (fail-open on SCIM sink
   failure). Also covers the admin-REST event-listener path end-to-end:
-  admin create → POST, admin update → PUT, and `username-source=email`
-  emitting the email as the SCIM userName.
+  admin create → POST, admin update → PUT, admin delete → DELETE, and
+  `username-source=email` emitting the email as the SCIM userName.
+- Fixed a pre-existing NPE in `ScimEventListenerProvider`'s DELETE
+  handler: it was calling `getUser(userId)` post-commit (after the user
+  had already been deleted), then dereferencing `user.isEmailVerified()`.
+  Now uses `event.getUserId()` directly. The mapping table is authoritative
+  for whether a user was ever propagated; the `emailVerified` gate at
+  delete time was redundant.
 
 **Deferred / open**
 - Scenario 4 (deletion reconciliation). **Empirically confirmed as a gap
