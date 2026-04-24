@@ -233,6 +233,46 @@ class ScimPropagationFromLdapIT {
     }
 
     @Test
+    void scheduledReconcilerFiresOnItsOwn() throws Exception {
+        // Configures the reconciler on the SCIM component with a short interval
+        // (3s) and zero stale threshold, then creates a fresh realm so
+        // ScimStorageProviderFactory's RealmPostCreateEvent listener schedules
+        // the timer. Lazy-imports alice, deletes her from LDAP, then waits
+        // for the scheduled timer to tick — no HTTP endpoint call.
+        stubScimCreateOk();
+        stubScimDeleteOk();
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("reconciler-enabled", "true");
+            cfg.putSingle("reconciler-interval-seconds", "3");
+            cfg.putSingle("reconciler-stale-threshold-seconds", "0");
+        });
+
+        r.realm.users().search("alice", 0, 10);
+        awaitPostFor("alice");
+
+        deleteLdapEntry("uid=alice,ou=users,dc=test,dc=local");
+        try {
+            // Drop alice's local federation link so she becomes an orphan
+            // mapping (the state the reconciler targets). Same mechanism as
+            // the endpoint-driven test.
+            r.realm.users().search("alice", 0, 10);
+
+            // Wait up to 15s for the 3s timer to fire and produce a DELETE.
+            // Awaitility polls — if the first tick didn't catch it, later
+            // ticks will.
+            await().atMost(15, SECONDS).untilAsserted(() -> {
+                int deletes = wireMock.countRequestsMatching(
+                    deleteRequestedFor(urlPathMatching("/Users/.*")).build()
+                ).getCount();
+                assertTrue(deletes >= 1,
+                    "expected at least one SCIM DELETE from the scheduled reconciler, got " + deletes);
+            });
+        } finally {
+            reAddAlice();
+        }
+    }
+
+    @Test
     void reconcilerDeletesScimResourcesForMissingLdapUsers() throws Exception {
         // Closes the scenario-4 gap via the reconciler endpoint.
         stubScimCreateOk();

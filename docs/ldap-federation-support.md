@@ -372,23 +372,23 @@ complex than it needs to be. Retrofitting the filter later means
 adding a witness impl and including it in the AND, not restructuring
 the reconciler.
 
-### Config (planned; v1 ships without it)
-
-V1 of the reconciler takes its threshold via the endpoint's
-`thresholdHours` query param (default 48). When we add the scheduled
-`TimerProvider` task, these config properties land on the SCIM
-provider component:
+### Config (shipped on the SCIM provider component)
 
 - `reconciler-enabled` (bool, default `false`)
-- `reconciler-interval-hours` (int, default `24`)
-- `reconciler-stale-threshold-hours` (int, default `48`)
+- `reconciler-interval-seconds` (string, default `"86400"` — 24h)
+- `reconciler-stale-threshold-seconds` (string, default `"172800"` — 48h)
 
-Validation at component save time:
-`reconciler-stale-threshold-hours > reconciler-interval-hours` and
-both greater than the max periodic-sync period of any LDAP federation
-in the realm. If the threshold is shorter than a federation's sync
-period, the reconciler would delete users the federation simply
-hasn't had time to re-observe — refuse that configuration loudly.
+Values in seconds to match Keycloak's own federation-sync config
+convention (e.g. `fullSyncPeriod`). The endpoint also accepts a
+`thresholdHours` query param for operator-forced passes.
+
+Config validation at component save time (planned, not yet
+implemented): `reconciler-stale-threshold-seconds >
+reconciler-interval-seconds`, and both greater than the max
+periodic-sync period of any LDAP federation in the realm. If the
+threshold is shorter than a federation's sync period, the reconciler
+would delete users the federation simply hasn't had time to re-observe
+— refuse that configuration loudly.
 
 ### Manual trigger (shipped)
 
@@ -399,10 +399,25 @@ waiting for the timer. Optional `thresholdHours` query param overrides
 the default for a single call (useful for operator-forced cleanups).
 Returns `{"deleted": N}`.
 
-Currently this endpoint is the only way to trigger the reconciler —
-the scheduled `TimerProvider` task is not yet wired up. Operators can
-invoke it via cron or an external scheduler in the meantime. Adding
-the in-process timer is a follow-up.
+### Scheduled trigger (shipped)
+
+`ScimStorageProviderFactory` schedules a `TimerProvider` task per SCIM
+component when `reconciler-enabled=true`. Entry points:
+- `onCreate` fires when a component is added to a realm via the admin
+  console / REST, so operators who configure a new SCIM provider get
+  their timer scheduled without a restart.
+- `onUpdate` reschedules on config changes (interval, threshold,
+  enabled flag flipping).
+- `preRemove` cancels the timer when the component is deleted.
+- `postInit` does a boot-time scan so existing components get their
+  timers back after a Keycloak restart.
+
+The scheduled task runs in its own `KeycloakSession` via
+`KeycloakModelUtils.runJobInTransaction`. Because `ScimClient.delete`
+is idempotent (SCIM DELETE on a missing mapping is a no-op), clustered
+deployments where every Keycloak node schedules its own timer are safe
+— just slightly wasteful. Config knob to deduplicate cluster-wide is
+a potential follow-up.
 
 ### Upstream contribution path
 
