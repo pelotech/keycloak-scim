@@ -50,8 +50,6 @@ LDAP or Keycloak directly.
   configurable threshold. Verified end-to-end by
   `reconcilerDeletesScimResourcesForMissingLdapUsers`.
 - Role-gating: opt-in filter to restrict SCIM propagation to a configurable subset of users.
-- Upstream acceptance: open a PR against `mitodl/keycloak-scim` to avoid
-  maintaining a fork across Keycloak version upgrades.
 
 ## Problem
 
@@ -279,11 +277,11 @@ and the new mapper attached. Then exercise:
 
 ## Open questions
 
-- **Upstream acceptance.** If we build this, is mitodl interested in taking the PR?
-  Worth asking before forking — maintaining a fork for something this central is
-  expensive across Keycloak version upgrades.
-- **Keycloak version compatibility.** `LDAPStorageMapper` has had signature changes
-  across Keycloak majors. Pin the target version range explicitly in the PR.
+- **Keycloak version compatibility.** `LDAPStorageMapper` has had
+  signature changes across Keycloak majors. The current build targets
+  Keycloak 25.0.6 minimum and is binary-compatible with 26.x. Future
+  Keycloak majors will need verification, and the test harness's
+  Testcontainers setup gives us a fast path to do that.
 - **Role-gating.** Add an opt-in filter so the mapper only propagates users that carry
   a configured realm role. Decide whether to implement in the mapper or as a follow-up.
 
@@ -433,21 +431,23 @@ deployments where every Keycloak node schedules its own timer are safe
 — just slightly wasteful. Config knob to deduplicate cluster-wide is
 a potential follow-up.
 
-### Upstream contribution path
+### If upstream Keycloak ever fixes #35235
 
-The pattern maps cleanly to the `TODO` in
+The pattern this reconciler implements (timestamp-based liveness +
+threshold) maps cleanly to the `TODO` in Keycloak's own
 `LDAPStorageProviderFactory.sync`: "*Remove all existing keycloak
 users, which have federation links, but are not in LDAP. Perhaps
 don't check users, which were just added or updated during this
-sync?*" — the parenthetical is exactly the threshold logic above.
-Once production experience validates the approach, file a proposal on
-#35235 with the `FEDERATION_LAST_SEEN_AT` column, the
-`remove-stale-users` flag on the federation component, and a
-scheduled task that deletes local users (firing admin
-`USER/DELETE` events that existing listeners — including ours —
-catch). If adopted, the plugin-side reconciler self-deactivates: no
-mapping rows ever cross the staleness threshold because the
-event-listener path clears them first.
+sync?*" — the parenthetical is exactly the threshold logic.
+
+If Keycloak eventually adopts this pattern (e.g. a
+`FEDERATION_LAST_SEEN_AT` column on `USER_ENTITY` plus a scheduled
+task that deletes local users past a configured threshold), the
+plugin-side reconciler self-deactivates: Keycloak's task fires admin
+`USER/DELETE` events, our existing event listener catches them,
+mapping rows get cleared via the `delete()` path, and nothing remains
+for our reconciler to find on its next tick. No version detection
+needed; works on every supported Keycloak release.
 
 ## References
 
