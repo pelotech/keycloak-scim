@@ -36,6 +36,64 @@ It's also possible to build your own custom image if you run Keycloak in a [cont
 
 Other [installation options](/docs/installation.md) are available.
 
+### Installation on Kubernetes (ImageVolume)
+
+This fork publishes an OCI image whose payload is just the shaded JAR,
+intended to be mounted into a Keycloak pod as a Kubernetes
+[`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image).
+That gets the JAR into `/opt/keycloak/providers/` without baking it into the
+Keycloak image, without an init container, and without a writable volume.
+
+- **Image:** `ghcr.io/pelotech/keycloak-scim`
+- **Tags:** every release publishes `MAJOR.MINOR.PATCH`, `MAJOR.MINOR`, and
+  `latest`. Production deployments should pin by digest.
+- **Architectures:** `linux/amd64`, `linux/arm64`.
+- **Supply chain:** images are signed with cosign keyless (GitHub OIDC) and
+  ship with SPDX + CycloneDX SBOM attestations.
+- **Kubernetes minimum:** `1.36` (the `image` volume type went GA on 2026-04-22).
+
+Example pod spec:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: keycloak
+spec:
+  containers:
+    - name: keycloak
+      image: quay.io/keycloak/keycloak:25.0.6
+      args: ["start-dev"]
+      volumeMounts:
+        - name: scim-provider
+          mountPath: /opt/keycloak/providers
+          readOnly: true
+  volumes:
+    - name: scim-provider
+      image:
+        # Pin by digest in production. Tag shown for readability.
+        reference: ghcr.io/pelotech/keycloak-scim:1.0.0
+        pullPolicy: IfNotPresent
+```
+
+Verify the image's signature before deploying:
+
+```sh
+cosign verify \
+  --certificate-identity-regexp "https://github.com/pelotech/keycloak-scim/.+" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  ghcr.io/pelotech/keycloak-scim:1.0.0
+```
+
+Inspect the bundled SBOM:
+
+```sh
+cosign download attestation \
+  --predicate-type https://spdx.dev/Document \
+  ghcr.io/pelotech/keycloak-scim:1.0.0 \
+  | jq -r '.payload | @base64d | fromjson | .predicate'
+```
+
 ### Setup
 
 #### Add the event listerner
