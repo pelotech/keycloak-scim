@@ -21,6 +21,7 @@ import org.keycloak.storage.user.SynchronizationResult;
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.reconcile.ReconcilerScheduler;
 
 import de.captaingoldfish.scim.sdk.common.constants.HttpHeader;
 
@@ -28,6 +29,15 @@ public class ScimStorageProviderFactory
         implements UserStorageProviderFactory<ScimStorageProvider>, ImportSynchronization {
     final private Logger LOGGER = Logger.getLogger(ScimStorageProviderFactory.class);
     public final static String ID = "scim";
+
+    public static final String RECONCILER_ENABLED = "reconciler-enabled";
+    public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
+    public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
+
+    public static String reconcilerTaskName(String componentId) {
+        return "scim-reconciler-" + componentId;
+    }
+
     protected static final List<ProviderConfigProperty> configMetadata;
     static {
         configMetadata = ProviderConfigurationBuilder.create()
@@ -126,6 +136,27 @@ public class ScimStorageProviderFactory
                 .label("Group filter patterns")
                 .helpText("Comma-separated regex patterns for group names to sync (e.g. 'admins,team-.*'). Leave empty to sync all groups.")
                 .add()
+                .property()
+                .name(RECONCILER_ENABLED)
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .label("Enable LDAP-deletion reconciler")
+                .helpText("When enabled, a periodic task issues SCIM DELETE for mapped users whose local UserModel is gone or whose 'ldap-federation-last-seen' attribute is older than the stale threshold. Opt-in because it's a workaround for upstream Keycloak #35235.")
+                .defaultValue(false)
+                .add()
+                .property()
+                .name(RECONCILER_INTERVAL_SECONDS)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Reconciler interval (seconds)")
+                .helpText("How often the reconciler task runs, in seconds. Default 86400 (24h).")
+                .defaultValue("86400")
+                .add()
+                .property()
+                .name(RECONCILER_STALE_THRESHOLD_SECONDS)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Stale threshold (seconds)")
+                .helpText("Users whose 'ldap-federation-last-seen' attribute is older than this are considered absent. Must be larger than the federation's periodic sync period. Default 172800 (48h).")
+                .defaultValue("172800")
+                .add()
                 .build();
     }
 
@@ -133,6 +164,24 @@ public class ScimStorageProviderFactory
     public ScimStorageProvider create(KeycloakSession session, ComponentModel model) {
         LOGGER.info("create");
         return new ScimStorageProvider();
+    }
+
+    @Override
+    public void onCreate(KeycloakSession session, org.keycloak.models.RealmModel realm, ComponentModel model) {
+        ReconcilerScheduler.scheduleIfEnabled(
+            session.getKeycloakSessionFactory(), session, realm.getId(), model);
+    }
+
+    @Override
+    public void onUpdate(KeycloakSession session, org.keycloak.models.RealmModel realm,
+                         ComponentModel oldModel, ComponentModel newModel) {
+        ReconcilerScheduler.scheduleIfEnabled(
+            session.getKeycloakSessionFactory(), session, realm.getId(), newModel);
+    }
+
+    @Override
+    public void preRemove(KeycloakSession session, org.keycloak.models.RealmModel realm, ComponentModel model) {
+        ReconcilerScheduler.cancel(session, model);
     }
 
     @Override
@@ -175,6 +224,23 @@ public class ScimStorageProviderFactory
     public SynchronizationResult syncSince(Date lastSync, KeycloakSessionFactory sessionFactory, String realmId,
             UserStorageProviderModel model) {
         return this.sync(sessionFactory, realmId, model);
+    }
+
+    @Override
+    public void postInit(KeycloakSessionFactory factory) {
+        // Boot-time scan: schedule timers for components already configured
+        // across all realms. The runtime entry point for newly-added
+        // components is the create() method (RealmPostCreateEvent fires
+        // before any components exist, and Keycloak lacks a
+        // ComponentModelAdded event that's stable across majors).
+        KeycloakModelUtils.runJobInTransaction(factory, session ->
+            session.realms().getRealmsStream().forEach(realm ->
+                realm.getComponentsStream()
+                    .filter(c -> ID.equals(c.getProviderId()))
+                    .forEach(c -> ReconcilerScheduler.scheduleIfEnabled(
+                        factory, session, realm.getId(), c))
+            )
+        );
     }
 
 }
