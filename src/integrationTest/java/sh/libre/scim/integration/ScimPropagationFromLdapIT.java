@@ -204,30 +204,15 @@ class ScimPropagationFromLdapIT {
     }
 
     @Test
-    void ldapDeletionGapIsDocumented() throws Exception {
-        // Design-doc scenario 4. Empirically verified on Keycloak 25.0.6:
-        // when a user is removed from LDAP and triggerFullSync is run,
-        //   * Keycloak's LDAP federation does not automatically delete the
-        //     local UserModel (the default sync strategy imports but does
-        //     not reconcile removals), and
-        //   * consequently no admin USER/DELETE event reaches mitodl's
-        //     existing ScimEventListenerProvider, so no SCIM DELETE hits
-        //     the sink.
-        //
-        // Closing the gap requires either a diff-based reconciler, a
-        // custom sync strategy that deletes local users missing from
-        // LDAP, or an LDAPStorageMapper-level hook. Until then, deployments
-        // that expect LDAP deletions to propagate to SCIM must rely on an
-        // external reconciliation loop.
-        //
-        // This test pins the current behavior: 0 SCIM DELETEs. When the
-        // gap is closed and deletes start reaching the sink, this test
-        // will turn red — at that point flip the assertion to a positive
-        // one and update the Status section of the design doc.
+    void ldapSyncAloneDoesNotPropagateDeletion() throws Exception {
+        // Baseline of the upstream gap (Keycloak #35235): triggerFullSync
+        // alone does not propagate LDAP deletions — Keycloak doesn't remove
+        // the local UserModel, no admin USER/DELETE event fires, and the
+        // event-listener path sees nothing. This pins the gap's existence;
+        // the reconciler (next test) is what closes it.
         stubScimCreateOk();
         stubScimDeleteOk();
         var r = newRealmWithScimAndLdap();
-        enableScimEventListener(r.realm);
 
         r.realm.users().search("alice", 0, 10);
         awaitPostFor("alice");
@@ -235,21 +220,75 @@ class ScimPropagationFromLdapIT {
         deleteLdapEntry("uid=alice,ou=users,dc=test,dc=local");
         try {
             r.realm.userStorage().syncUsers(r.ldapId, "triggerFullSync");
-
-            // Give any async propagation a window, then assert the gap.
             sleepQuietly(3);
             int deletes = wireMock.countRequestsMatching(
                 deleteRequestedFor(urlPathMatching("/Users/.*")).build()
             ).getCount();
             assertEquals(0, deletes,
-                "gap documented: LDAP-triggered deletion does not propagate to SCIM. "
-                + "If this fails with deletes > 0, the reconciliation gap has been closed — "
-                + "invert the assertion and update docs/ldap-federation-support.md Status.");
+                "baseline: LDAP sync alone must not propagate deletion "
+                + "(upstream Keycloak #35235). The reconciler closes this.");
         } finally {
-            // Restore alice so later tests still find her in LDAP. The OpenLDAP
-            // container is shared across the class; deletions persist.
             reAddAlice();
         }
+    }
+
+    @Test
+    void reconcilerDeletesScimResourcesForMissingLdapUsers() throws Exception {
+        // Closes the scenario-4 gap via the reconciler endpoint.
+        stubScimCreateOk();
+        stubScimDeleteOk();
+        var r = newRealmWithScimAndLdap();
+
+        // Lazy-import alice; this stamps ldap-federation-last-seen and creates
+        // her SCIM mapping via onImportUserFromLDAP.
+        r.realm.users().search("alice", 0, 10);
+        awaitPostFor("alice");
+
+        deleteLdapEntry("uid=alice,ou=users,dc=test,dc=local");
+        try {
+            // Re-run the admin search: Keycloak's federation enumeration drops
+            // alice (she's no longer in LDAP). Our SCIM mapping persists,
+            // which is exactly the gap condition the reconciler targets —
+            // a local ScimResource row with no corresponding federation user.
+            r.realm.users().search("alice", 0, 10);
+
+            var scimComponentId = r.realm.components()
+                .query(null, "org.keycloak.storage.UserStorageProvider")
+                .stream()
+                .filter(c -> "scim".equals(c.getProviderId()))
+                .findFirst()
+                .orElseThrow()
+                .getId();
+
+            var resp = postReconcile(r.name, scimComponentId, 0);
+            assertEquals(200, resp.statusCode(),
+                "reconciler endpoint should succeed; body was: " + resp.body());
+            assertTrue(resp.body().contains("\"deleted\":1"),
+                "expected deleted=1 in reconciler response, got: " + resp.body());
+
+            await().atMost(20, SECONDS).untilAsserted(() -> {
+                int deletes = wireMock.countRequestsMatching(
+                    deleteRequestedFor(urlPathMatching("/Users/.*")).build()
+                ).getCount();
+                assertTrue(deletes >= 1,
+                    "expected at least one SCIM DELETE from reconciler, got " + deletes);
+            });
+        } finally {
+            reAddAlice();
+        }
+    }
+
+    private java.net.http.HttpResponse<String> postReconcile(
+            String realmName, String componentId, long thresholdHours) throws Exception {
+        var http = java.net.http.HttpClient.newHttpClient();
+        return http.send(
+            java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+                keycloak.getAuthServerUrl() + "/realms/" + realmName
+                    + "/scim-reconcile/" + componentId
+                    + "?thresholdHours=" + thresholdHours))
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody())
+                .build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
     }
 
     private void reAddAlice() throws NamingException {

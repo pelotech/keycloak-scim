@@ -13,8 +13,11 @@ import sh.libre.scim.core.ScimClient;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
 
+import java.time.Instant;
 import java.util.function.Consumer;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -78,5 +81,24 @@ class ScimLdapStorageMapperTest {
     @Test
     void getLdapProviderReturnsNull() {
         org.junit.jupiter.api.Assertions.assertNull(mapper.getLdapProvider());
+    }
+
+    @Test
+    void onImportStampsLastSeenAttribute() {
+        mapper.onImportUserFromLDAP(ldapObject, user, realm, true);
+
+        ArgumentCaptor<String> value = ArgumentCaptor.forClass(String.class);
+        verify(user).setSingleAttribute(eq(ScimLdapStorageMapper.LAST_SEEN_ATTRIBUTE), value.capture());
+
+        // Must be a parseable ISO-8601 instant — the reconciler reads it with Instant.parse.
+        assertNotNull(value.getValue());
+        assertDoesNotThrow(() -> Instant.parse(value.getValue()));
+    }
+
+    @Test
+    void onImportStampsLastSeenOnReplacePathToo() {
+        mapper.onImportUserFromLDAP(ldapObject, user, realm, false);
+        verify(user).setSingleAttribute(eq(ScimLdapStorageMapper.LAST_SEEN_ATTRIBUTE),
+            org.mockito.ArgumentMatchers.anyString());
     }
 }
