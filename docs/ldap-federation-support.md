@@ -42,10 +42,12 @@ LDAP or Keycloak directly.
   `ScimPropagationFromLdapIT`): removing a user from LDAP and running
   `triggerFullSync` does not remove the local `UserModel` and does not
   fire an admin `USER/DELETE` event, so no SCIM DELETE reaches the sink.
-  Closing this requires either a diff-based reconciler, a custom sync
-  strategy that deletes local users missing from LDAP, or an additional
-  hook in our mapper. The test pins the current behavior and will turn
-  red when the gap is closed.
+  Upstream Keycloak issue [#35235](https://github.com/keycloak/keycloak/issues/35235)
+  tracks the root cause; a `TODO` in
+  `LDAPStorageProviderFactory.sync` acknowledges the same gap in
+  Keycloak's own code. The test pins the current behavior and will turn
+  red when the gap is closed. Planned resolution is an opt-in
+  reconciler in this plugin — see "Reconciler design" below.
 - Admin DELETE does not propagate to SCIM. Pre-existing bug in mitodl's
   `ScimEventListenerProvider`: the DELETE handler does
   `getUser(event.getUserId())` which returns null for a user that has
@@ -290,6 +292,115 @@ and the new mapper attached. Then exercise:
   across Keycloak majors. Pin the target version range explicitly in the PR.
 - **Role-gating.** Add an opt-in filter so the mapper only propagates users that carry
   a configured realm role. Decide whether to implement in the mapper or as a follow-up.
+
+## Reconciler design (planned, not yet shipped)
+
+Closes the scenario-4 gap: LDAP-federated users who disappear from
+LDAP stay in Keycloak (upstream bug
+[#35235](https://github.com/keycloak/keycloak/issues/35235)) and
+therefore stay in the external SCIM sink. The reconciler periodically
+issues SCIM DELETEs for mappings whose federation-backed user hasn't
+been observed from LDAP in a configured window.
+
+### Principles
+
+- **Scope is outbound SCIM only.** We do not delete the local
+  `UserModel`; that's Keycloak's responsibility, tracked in #35235.
+  When upstream fixes it, admin `USER/DELETE` events fire and our
+  existing event-listener path propagates the delete — no change
+  required to the reconciler.
+- **Opt-in, default off.** Operators on affected Keycloak versions
+  enable it explicitly; on versions where upstream has fixed the bug,
+  leaving it off (or even on, idempotently) is fine.
+- **Uses only public SPIs.** No Hibernate integrators, no private
+  subclassing. `TimerProvider` for scheduling, `session.users()` /
+  `UserModel.getFederationLink()` for data access, the existing
+  `ScimDispatcher` / `ScimClient.delete` for the outbound call.
+- **Must be idempotent with the event-listener path.** Both can fire
+  for the same delete; the net effect must be one SCIM DELETE and one
+  cleared mapping. `ScimClient.delete` already handles the "mapping
+  missing" case via `NoResultException`, so concurrent races are safe.
+
+### Liveness signal: `ldap-federation-last-seen`
+
+Every `ScimLdapStorageMapper.onImportUserFromLDAP` invocation sets the
+`ldap-federation-last-seen` user attribute to the current timestamp.
+This covers lazy imports, periodic sync, and explicit
+`triggerFullSync` / `triggerChangedUsersSync` triggers — the same
+three paths our primary mapper hook covers. Attribute name is
+federation-type-specific (not SCIM-specific) so the same signal is
+reusable by future federation integrations.
+
+Storage: user attributes are persisted via Keycloak's existing
+`USER_ATTRIBUTE` table. No plugin-side schema migration.
+
+### Decision rule (pluggable witnesses)
+
+The reconciler evaluates each federation-linked user against one or
+more witnesses, framed as independent evidence. **Delete only when all
+active witnesses agree the user is absent.** Today there is one
+witness; the design leaves room for more without restructuring.
+
+Active witnesses at v1:
+
+- **Timestamp witness:** `ldap-federation-last-seen` older than
+  `reconciler-stale-threshold-hours`. Authoritative for "stale."
+
+Planned witnesses (future, not v1):
+
+- **Bloom-filter witness:** during sync, every
+  `onImportUserFromLDAP` call adds the username to an in-progress
+  Bloom filter scoped to the LDAP federation component. When the
+  reconciler considers a candidate, if the filter is fresh (its
+  `built_at` is within 2× the federation's sync period) and
+  `filter.mightContain(username)` is `false`, the witness votes
+  "absent." If the filter is stale, the witness abstains and the
+  decision falls back to timestamps alone (degrades gracefully).
+  Catches a narrow class of bug — silent timestamp-write failures
+  where the threshold buffer doesn't help — at modest cost
+  (~1–2 bytes/user; one `put` per user per sync).
+
+Why this shape: it gives a clear extension point if we observe false
+positives in production, without making the v1 implementation more
+complex than it needs to be. Retrofitting the filter later means
+adding a witness impl and including it in the AND, not restructuring
+the reconciler.
+
+### Config (on the SCIM provider component)
+
+- `reconciler-enabled` (bool, default `false`)
+- `reconciler-interval-hours` (int, default `24`)
+- `reconciler-stale-threshold-hours` (int, default `48`)
+
+Validation at component save time:
+`reconciler-stale-threshold-hours > reconciler-interval-hours` and
+both greater than the max periodic-sync period of any LDAP federation
+in the realm. If the threshold is shorter than a federation's sync
+period, the reconciler would delete users the federation simply
+hasn't had time to re-observe — refuse that configuration loudly.
+
+### Manual trigger
+
+A convenience endpoint via `RealmResourceProviderFactory`:
+`POST /realms/{realm}/scim-reconcile/{componentId}` forces an
+immediate reconciliation pass for the given SCIM provider, without
+waiting for the timer. Useful after a known LDAP cleanup.
+
+### Upstream contribution path
+
+The pattern maps cleanly to the `TODO` in
+`LDAPStorageProviderFactory.sync`: "*Remove all existing keycloak
+users, which have federation links, but are not in LDAP. Perhaps
+don't check users, which were just added or updated during this
+sync?*" — the parenthetical is exactly the threshold logic above.
+Once production experience validates the approach, file a proposal on
+#35235 with the `FEDERATION_LAST_SEEN_AT` column, the
+`remove-stale-users` flag on the federation component, and a
+scheduled task that deletes local users (firing admin
+`USER/DELETE` events that existing listeners — including ours —
+catch). If adopted, the plugin-side reconciler self-deactivates: no
+mapping rows ever cross the staleness threshold because the
+event-listener path clears them first.
 
 ## References
 
