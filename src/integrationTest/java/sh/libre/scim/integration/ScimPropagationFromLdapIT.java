@@ -234,17 +234,18 @@ class ScimPropagationFromLdapIT {
 
     @Test
     void scheduledReconcilerFiresOnItsOwn() throws Exception {
-        // Configures the reconciler on the SCIM component with a short interval
-        // (3s) and zero stale threshold, then creates a fresh realm so
-        // ScimStorageProviderFactory's RealmPostCreateEvent listener schedules
-        // the timer. Lazy-imports alice, deletes her from LDAP, then waits
-        // for the scheduled timer to tick — no HTTP endpoint call.
+        // Configures the reconciler on the SCIM component with short but
+        // validator-compliant timings (interval=2s, threshold=4s) and lets
+        // the scheduled timer drive the deletion — no HTTP endpoint call.
+        // Note: the orphan-mapping path (user gone from local) triggers a
+        // SCIM DELETE regardless of the threshold, so the test passes even
+        // before threshold-many seconds have elapsed.
         stubScimCreateOk();
         stubScimDeleteOk();
         var r = newRealmWithScimAndLdapAndConfig(cfg -> {
             cfg.putSingle("reconciler-enabled", "true");
-            cfg.putSingle("reconciler-interval-seconds", "3");
-            cfg.putSingle("reconciler-stale-threshold-seconds", "0");
+            cfg.putSingle("reconciler-interval-seconds", "2");
+            cfg.putSingle("reconciler-stale-threshold-seconds", "4");
         });
 
         r.realm.users().search("alice", 0, 10);
