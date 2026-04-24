@@ -382,13 +382,27 @@ Values in seconds to match Keycloak's own federation-sync config
 convention (e.g. `fullSyncPeriod`). The endpoint also accepts a
 `thresholdHours` query param for operator-forced passes.
 
-Config validation at component save time (planned, not yet
-implemented): `reconciler-stale-threshold-seconds >
-reconciler-interval-seconds`, and both greater than the max
-periodic-sync period of any LDAP federation in the realm. If the
-threshold is shorter than a federation's sync period, the reconciler
-would delete users the federation simply hasn't had time to re-observe
-— refuse that configuration loudly.
+Config validation at component save time (shipped, in
+`ReconcilerConfigValidator`):
+
+- When `reconciler-enabled=false`, no validation runs (operator hasn't
+  opted in).
+- Both `reconciler-interval-seconds` and
+  `reconciler-stale-threshold-seconds` must be positive.
+- `reconciler-stale-threshold-seconds` must be strictly greater than
+  `reconciler-interval-seconds`.
+- For every LDAP federation in the realm with `fullSyncPeriod > 0`,
+  `reconciler-stale-threshold-seconds` must be strictly greater than
+  that federation's `fullSyncPeriod` — otherwise the reconciler would
+  delete users the federation simply hasn't had time to re-observe.
+  Federations with periodic sync disabled (`fullSyncPeriod <= 0`) are
+  skipped from this check; operators who disable periodic sync are
+  accepting that the reconciler operates on lazy-import-only liveness
+  data.
+
+Violations throw `ComponentValidationException` at save time, so the
+admin console / REST surfaces the error and the bad config never
+reaches the timer.
 
 ### Manual trigger (shipped)
 

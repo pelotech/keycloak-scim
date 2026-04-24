@@ -21,6 +21,7 @@ import org.keycloak.storage.user.SynchronizationResult;
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.reconcile.ReconcilerConfigValidator;
 import sh.libre.scim.reconcile.ReconcilerScheduler;
 
 import de.captaingoldfish.scim.sdk.common.constants.HttpHeader;
@@ -185,6 +186,16 @@ public class ScimStorageProviderFactory
     }
 
     @Override
+    public void validateConfiguration(KeycloakSession session, org.keycloak.models.RealmModel realm,
+                                      ComponentModel model)
+            throws org.keycloak.component.ComponentValidationException {
+        var ldapFederations = realm.getComponentsStream()
+            .filter(c -> "ldap".equals(c.getProviderId()))
+            .toList();
+        ReconcilerConfigValidator.validate(model, ldapFederations);
+    }
+
+    @Override
     public String getId() {
         return ID;
     }
@@ -229,18 +240,27 @@ public class ScimStorageProviderFactory
     @Override
     public void postInit(KeycloakSessionFactory factory) {
         // Boot-time scan: schedule timers for components already configured
-        // across all realms. The runtime entry point for newly-added
-        // components is the create() method (RealmPostCreateEvent fires
-        // before any components exist, and Keycloak lacks a
-        // ComponentModelAdded event that's stable across majors).
-        KeycloakModelUtils.runJobInTransaction(factory, session ->
-            session.realms().getRealmsStream().forEach(realm ->
-                realm.getComponentsStream()
-                    .filter(c -> ID.equals(c.getProviderId()))
-                    .forEach(c -> ReconcilerScheduler.scheduleIfEnabled(
-                        factory, session, realm.getId(), c))
-            )
-        );
+        // across all realms. The runtime entry points for newly-added or
+        // updated components are onCreate / onUpdate; postInit only handles
+        // the case where Keycloak restarts with components already in place.
+        //
+        // Wrapped in try/catch because postInit on factories runs before the
+        // JPA layer is fully initialized in some startup orderings, and
+        // session.realms() will throw if it's called too early. A failed scan
+        // here is recoverable — onCreate / onUpdate / next-restart will pick
+        // things up — so we log and continue rather than abort startup.
+        try {
+            KeycloakModelUtils.runJobInTransaction(factory, session ->
+                session.realms().getRealmsStream().forEach(realm ->
+                    realm.getComponentsStream()
+                        .filter(c -> ID.equals(c.getProviderId()))
+                        .forEach(c -> ReconcilerScheduler.scheduleIfEnabled(
+                            factory, session, realm.getId(), c))
+                )
+            );
+        } catch (RuntimeException e) {
+            LOGGER.warnf(e, "Reconciler boot-time scan failed; will rely on onCreate/onUpdate/next-restart to schedule");
+        }
     }
 
 }
