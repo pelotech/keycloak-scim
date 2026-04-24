@@ -70,4 +70,25 @@ class KeycloakPluginLoadsIT {
             "SCIM LDAP mapper factory ('scim-ldap-sync') should be registered"
         );
     }
+
+    @Test
+    void scimReconcileResourceIsReachable() throws Exception {
+        // RealmResourceProviders aren't surfaced via serverInfo, so probe the
+        // route directly. POST with a bogus componentId: our handler returns
+        // 404 with a JSON error body, which distinguishes "route registered,
+        // component not found" from "route doesn't exist at all" (a plain
+        // Keycloak 404 HTML page).
+        var http = java.net.http.HttpClient.newHttpClient();
+        var response = http.send(
+            java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+                keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/nope"))
+                .POST(java.net.http.HttpRequest.BodyPublishers.noBody())
+                .build(),
+            java.net.http.HttpResponse.BodyHandlers.ofString());
+
+        org.junit.jupiter.api.Assertions.assertEquals(404, response.statusCode(),
+            "expected 404 for unknown componentId");
+        org.junit.jupiter.api.Assertions.assertTrue(response.body().contains("no SCIM provider component"),
+            "expected our handler's JSON error body, got: " + response.body());
+    }
 }
