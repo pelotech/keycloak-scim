@@ -104,6 +104,9 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
 
     @Override
     public void close() {
-        // no-op
+        // Releases the dispatcher's cached ScimClients. Important: at scale
+        // (10k+ user import) the dispatcher accumulates one client per SCIM
+        // provider component, each holding an Apache HttpClient pool.
+        dispatcher.close();
     }
 }

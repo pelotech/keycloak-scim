@@ -35,6 +35,10 @@ public class ScimEventListenerProvider implements EventListenerProvider {
 
     @Override
     public void close() {
+        // Releases the dispatcher's cached ScimClients (Apache HttpClient
+        // pools). Without this, every Keycloak session would leak whatever
+        // SCIM clients its dispatcher accumulated.
+        dispatcher.close();
     }
 
     @Override

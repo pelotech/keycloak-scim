@@ -144,7 +144,12 @@ public class ScimClient {
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
-        var retry = registry.retry("create-" + adapter.getId());
+        // Fixed retry name (was "create-" + adapter.getId()). With ScimClient
+        // instances now cached across many calls in ScimDispatcher, per-id
+        // names would let the RetryRegistry accumulate Retry instances
+        // unboundedly. Operation-name granularity is the right scope —
+        // resilience4j's per-Retry state isn't per-resource anyway.
+        var retry = registry.retry("create");
 
         ServerResponse<S> response = retry.executeSupplier(() -> {
             try {
@@ -177,7 +182,7 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
-            var retry = registry.retry("replace-" + adapter.getId());
+            var retry = registry.retry("replace");
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
                     LOGGER.info(adapter.getType());
@@ -244,7 +249,7 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
 
-            var retry = registry.retry("delete-" + id);
+            var retry = registry.retry("delete");
 
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
