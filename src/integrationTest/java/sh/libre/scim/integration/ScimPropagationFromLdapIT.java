@@ -286,6 +286,68 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
     }
 
     @Test
+    void scimSkipAttributeOptsUserOutOfPropagation() {
+        // The 'scim-skip=true' user attribute is a per-user opt-out. The
+        // mapper still fires for these users (they pass through Keycloak's
+        // normal flows) but UserAdapter.apply sets adapter.skip=true and
+        // ScimClient.create / .replace / .delete short-circuit. Verify
+        // end-to-end that no SCIM POST hits the sink for an opted-out user.
+        stubScimUserCreateOk();
+        var r = newRealmWithScimAndLdap();
+        enableScimEventListener(r.realm());
+        // Required so admin REST accepts the scim-skip attribute on the
+        // opted-out user. Without this, Keycloak 25's declarative user
+        // profile silently drops unknown attributes.
+        enableUnmanagedUserAttributes(r.realm());
+
+        // Reference user (no opt-out): goes through normally.
+        createAdminUser(r.realm(), "ref-user", "ref-user@test.local");
+        awaitUserPostFor("ref-user");
+        int beforeOptOut = wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
+
+        // Opted-out user: create with the scim-skip attribute. Note: the
+        // CREATE event itself has the attribute available on the persisted
+        // user, so the propagation should short-circuit immediately.
+        // (The previous Keycloak behavior of search() not returning
+        // attributes is unrelated — UserAdapter reads from the live
+        // UserModel during event handling, not from a search result.)
+        var optedOut = new org.keycloak.representations.idm.UserRepresentation();
+        optedOut.setUsername("opted-out");
+        optedOut.setEmail("opted-out@test.local");
+        optedOut.setEmailVerified(true);
+        optedOut.setEnabled(true);
+        optedOut.setAttributes(java.util.Map.of("scim-skip", java.util.List.of("true")));
+        String optedOutId;
+        try (var resp = r.realm().users().create(optedOut)) {
+            if (resp.getStatus() >= 400) {
+                throw new IllegalStateException("create opted-out failed: " + resp.getStatus());
+            }
+            String path = resp.getLocation().getPath();
+            optedOutId = path.substring(path.lastIndexOf('/') + 1);
+        }
+
+        // Sanity check: the attribute is actually on the persisted user.
+        // toRepresentation() (unlike list-search) includes attributes.
+        var fetched = r.realm().users().get(optedOutId).toRepresentation();
+        var skipAttr = fetched.getAttributes() != null
+            ? fetched.getAttributes().get("scim-skip")
+            : null;
+        assertTrue(skipAttr != null && skipAttr.contains("true"),
+            "test fixture: scim-skip=true must be persisted on the opted-out user, got attrs="
+                + fetched.getAttributes());
+
+        // Give any potential propagation a chance to misbehave.
+        sleepQuietly(2);
+
+        int afterOptOut = wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
+        assertEquals(beforeOptOut, afterOptOut,
+            "scim-skip=true must prevent SCIM POST for the opted-out user "
+            + "(was " + beforeOptOut + " before, now " + afterOptOut + ")");
+    }
+
+    @Test
     void scimSinkFailureDoesNotBlockLdapImport() {
         // No POST stub — WireMock will return 404 for /Users.
         // ScimDispatcher.runOne catches exceptions from the SCIM call, so the
