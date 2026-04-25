@@ -158,6 +158,26 @@ public abstract class IntegrationTestBase {
         return new TestRealm(realmName, ldapId, realm);
     }
 
+    /**
+     * LDAP-only realm with no SCIM provider and no scim-ldap-sync mapper —
+     * used by perf tests to measure Keycloak's pure federation-import cost
+     * as a baseline, isolating plugin overhead.
+     */
+    protected TestRealm newRealmWithLdapOnly() {
+        String realmName = "it-" + UUID.randomUUID().toString().substring(0, 8);
+        var realmRep = new RealmRepresentation();
+        realmRep.setRealm(realmName);
+        realmRep.setEnabled(true);
+        admin.realms().create(realmRep);
+        RealmResource realm = admin.realm(realmName);
+
+        String ldapId = addLdapFederation(realm);
+        addLdapAttributeMapper(realm, ldapId, "email", "email", "mail");
+        addLdapAttributeMapper(realm, ldapId, "firstName", "firstName", "givenName");
+        addLdapAttributeMapper(realm, ldapId, "lastName", "lastName", "sn");
+        return new TestRealm(realmName, ldapId, realm);
+    }
+
     protected void addScimStorageProvider(
             RealmResource realm,
             Consumer<MultivaluedHashMap<String, String>> customizer) {
