@@ -133,6 +133,16 @@ tasks.register<Test>("performanceTest") {
     // Generous default; individual scenarios can stretch toward this when
     // exercising large user cohorts.
     timeout.set(Duration.ofMinutes(30))
+    // Forward selected -D system properties from the gradle invocation to
+    // the test JVM. Without this, `-Dperf.userCount=10000` would be set on
+    // the gradle daemon but invisible to Integer.getInteger() inside tests.
+    listOf("perf.userCount", "perf.scimSinkLatencyMs").forEach { prop ->
+        System.getProperty(prop)?.let { systemProperty(prop, it) }
+    }
+    // Always re-run perf tests (their inputs are wall-clock-sensitive,
+    // not source-driven, and gradle's UP-TO-DATE check would otherwise
+    // skip a re-measurement).
+    outputs.upToDateWhen { false }
     doFirst {
         systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
         systemProperty("perf.report.dir", layout.buildDirectory.dir("reports/perf").get().asFile.absolutePath)

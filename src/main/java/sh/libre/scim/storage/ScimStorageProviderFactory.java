@@ -216,12 +216,13 @@ public class ScimStorageProviderFactory
             public void run(KeycloakSession session) {
                 var realm = session.realms().getRealm(realmId);
                 session.getContext().setRealm(realm);
-                var dispatcher = new ScimDispatcher(session);
-                if ("true".equals(model.get("propagation-user"))) {
-                    dispatcher.runOne(model, client -> client.sync(UserAdapter.class, result));
-                }
-                if ("true".equals(model.get("propagation-group"))) {
-                    dispatcher.runOne(model, client -> client.sync(GroupAdapter.class, result));
+                try (var dispatcher = new ScimDispatcher(session)) {
+                    if ("true".equals(model.get("propagation-user"))) {
+                        dispatcher.runOne(model, client -> client.sync(UserAdapter.class, result));
+                    }
+                    if ("true".equals(model.get("propagation-group"))) {
+                        dispatcher.runOne(model, client -> client.sync(GroupAdapter.class, result));
+                    }
                 }
             }
 
