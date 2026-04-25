@@ -33,7 +33,10 @@ public class ScimDispatcher {
         try {
             f.accept(client);
         } catch (Exception e) {
-            LOGGER.error(e);
+            // Include the stack trace, not just toString(). The previous
+            // 'LOGGER.error(e)' form swallowed the cause and made
+            // production-time triage impossible.
+            LOGGER.errorf(e, "SCIM dispatch failed on component %s (%s)", m.getId(), m.getName());
         } finally {
             client.close();
         }

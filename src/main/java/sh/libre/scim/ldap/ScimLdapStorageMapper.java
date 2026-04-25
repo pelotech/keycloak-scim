@@ -69,12 +69,17 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
 
     @Override
     public List<UserModel> getGroupMembers(RealmModel realm, GroupModel group, int firstResult, int maxResults) {
-        return null;
+        // Must return an empty list, not null. Keycloak's
+        // LDAPStorageProvider.getGroupMembersStream iterates over every
+        // attached mapper's getGroupMembers and combines the results;
+        // a null return value NPEs the stream pipeline.
+        return List.of();
     }
 
     @Override
     public List<UserModel> getRoleMembers(RealmModel realm, RoleModel role, int firstResult, int maxResults) {
-        return null;
+        // Same constraint as getGroupMembers — return empty, not null.
+        return List.of();
     }
 
     @Override
