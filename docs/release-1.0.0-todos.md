@@ -59,9 +59,9 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
       username-source, group-filter, reconciler-enabled,
       reconciler-interval-seconds, reconciler-stale-threshold-seconds.
       Each documented in helpText but not collected anywhere.
-- [ ] **B-License-footer** — README footer says `License AGPL`. The
+- [x] **B-License-footer** — README footer said `License AGPL`. The
       `LICENSE` file is Apache 2.0. Pre-existing inconsistency from
-      upstream; cheap to fix.
+      upstream. ✅ Footer corrected to Apache-2.0.
 - [ ] **W-Migration-guide** — One page on migrating from upstream
       `mitodl/keycloak-scim`. DB schema is compatible; config is
       mostly compatible. Help adopters who are switching.
