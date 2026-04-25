@@ -72,7 +72,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * create/update path, which goes through ScimEventListenerProvider rather
  * than our mapper.
  */
-abstract class IntegrationTestBase {
+public abstract class IntegrationTestBase {
 
     protected static final File PLUGIN_JAR = new File(
         System.getProperty(
