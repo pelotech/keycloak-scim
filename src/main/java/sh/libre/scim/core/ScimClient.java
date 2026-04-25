@@ -135,15 +135,20 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(Class<A> aClass,
             M kcModel) {
+        long t0 = System.nanoTime();
         var adapter = getAdapter(aClass);
         adapter.apply(kcModel);
         if (adapter.skip) {
             return;
         }
+        long t1 = System.nanoTime();
+        ScimClientMetrics.APPLY_MODEL_NANOS.add(t1 - t0);
         // If mapping exist then it was created by import so skip.
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
+        long t2 = System.nanoTime();
+        ScimClientMetrics.QUERY_NANOS.add(t2 - t1);
         // Fixed retry name (was "create-" + adapter.getId()). With ScimClient
         // instances now cached across many calls in ScimDispatcher, per-id
         // names would let the RetryRegistry accumulate Retry instances
@@ -161,6 +166,8 @@ public class ScimClient {
                 throw new RuntimeException(e);
             }
         });
+        long t3 = System.nanoTime();
+        ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
 
         if (!response.isSuccess()){
             LOGGER.warn(response.getResponseBody());
@@ -168,7 +175,12 @@ public class ScimClient {
         }
 
         adapter.apply(response.getResource());
+        long t4 = System.nanoTime();
+        ScimClientMetrics.APPLY_RESPONSE_NANOS.add(t4 - t3);
         adapter.saveMapping();
+        long t5 = System.nanoTime();
+        ScimClientMetrics.SAVE_MAPPING_NANOS.add(t5 - t4);
+        ScimClientMetrics.CREATE_COUNT.increment();
     };
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(Class<A> aClass,
