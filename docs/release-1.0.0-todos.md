@@ -71,9 +71,14 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
 - [x] **B-License-footer** — README footer said `License AGPL`. The
       `LICENSE` file is Apache 2.0. Pre-existing inconsistency from
       upstream. ✅ Footer corrected to Apache-2.0.
-- [ ] **W-Migration-guide** — One page on migrating from upstream
-      `mitodl/keycloak-scim`. DB schema is compatible; config is
-      mostly compatible. Help adopters who are switching.
+- [x] **W-Migration-guide** — ✅ `docs/migration-from-mitodl.md`:
+      what's compatible (DB schema, config, event-listener id,
+      JPA-entity id, Keycloak/Java versions), what's added (mapper,
+      reconciler, endpoint, OCI image), new config knobs (all
+      default-off / backward-compat), behavioral differences worth
+      knowing (async dispatch, widened retry, admin-DELETE fix,
+      mapper null-return fix), and a step-by-step switchover +
+      rollback procedure.
 - [ ] **D-Contributing** — `CONTRIBUTING.md`, code-style notes,
       branch-naming conventions. Defer.
 
@@ -108,30 +113,45 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
 
 ## Testing gaps to close before 1.0.0
 
-- [ ] **W-Multi-provider** — Realm with two SCIM providers
-      configured; verify dispatcher fans out and both endpoints
-      receive the user.
-- [ ] **W-Realm-isolation** — Two realms each with their own SCIM
-      provider; verify mappings/state don't bleed between them.
-- [ ] **W-Runtime-config-change** — Toggle `reconciler-enabled` on
-      a live component, change `reconciler-interval-seconds`,
-      verify `onUpdate` reschedules cleanly. Today the `onUpdate`
-      hook exists but isn't exercised end-to-end.
-- [ ] **W-scim-skip-attribute** — `scim-skip=true` user-attribute
-      opt-out has been in the code since the inkules port. Not
-      tested end-to-end.
-- [ ] **W-group-filter** — `group-filter` regex is unit-tested at
-      the witness level but no integration test confirms only
-      matched groups sync.
+- [x] **W-Multi-provider** — ✅ `multipleScimProvidersAllReceiveTheUser`
+      in `ScimMultiTenancyIT`: two SCIM providers in one realm with
+      distinct WireMock URL paths; verifies admin user create
+      produces a POST to BOTH endpoints.
+- [x] **W-Realm-isolation** — ✅ `realmsAreIsolated` in
+      `ScimMultiTenancyIT`: two realms each with their own SCIM
+      provider; verifies a user-create in realm-1 produces no POST
+      at realm-2's endpoint.
+- [x] **W-Runtime-config-change** — ✅
+      `runtimeReconcilerConfigChangeReschedules` in
+      `ScimMultiTenancyIT`: starts with reconciler disabled,
+      flips it on at runtime via component update, verifies the
+      `onUpdate` hook reschedules and the timer fires.
+- [x] **W-scim-skip-attribute** — ✅
+      `scimSkipAttributeOptsUserOutOfPropagation` in
+      `ScimPropagationFromLdapIT`: creates an opted-out user with
+      `scim-skip=true` and a reference user without; verifies the
+      reference user gets a POST and the opted-out one does not.
+      Required `enableUnmanagedUserAttributes` helper because
+      Keycloak 25's declarative user profile rejects unknown
+      attributes via admin REST by default.
+- [x] **W-group-filter** — ✅
+      `groupFilterScopesSyncRefreshToMatchingGroupMembers` in
+      `ScimGroupPropagationIT`: configures `sync-refresh=true` and
+      `group-filter='admins'`, creates two users in two groups
+      (admins, developers), triggers SCIM provider sync, verifies
+      sync's refresh PUTs target the matching-group member but
+      not the non-matching one.
 - [ ] **D-Other** — Persistence-across-restart, concurrent admin
       ops, LDAP auth failures, certificate validation, long
       usernames / special characters. 1.x scope.
 
 ## Code quality / cleanup
 
-- [ ] **W-Diag-sweep** — Verify no leftover `[diag]` instrumentation
-      logs anywhere in the codebase. Cleanup pass after the perf
-      work; cheap.
+- [x] **W-Diag-sweep** — ✅ `grep -rEn '\[diag\]|XXX|FIXME|TODO.*remove'`
+      across `src/` returned nothing. The only `System.out.println`
+      calls are the intentional `[perf]`-prefixed ones in the
+      perfTest harness (PerfReport summary + per-scenario
+      stdout headlines). Confirmed clean.
 - [ ] **D-ScimClient-split** — `ScimClient` has accumulated mass
       (~500 lines). Naturally splits along create/replace/delete +
       retry/failure-handling. Defer.

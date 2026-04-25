@@ -290,6 +290,22 @@ public abstract class IntegrationTestBase {
         }
     }
 
+    /**
+     * Allow arbitrary user attributes (e.g. {@code scim-skip}) to be set via
+     * admin REST. Keycloak 25's declarative user profile rejects unknown
+     * attributes by default; setting unmanagedAttributePolicy=ENABLED is the
+     * standard way operators turn that gate off when running plugins that
+     * use custom attributes. Tests of attribute-driven plugin behavior need
+     * the same.
+     */
+    protected void enableUnmanagedUserAttributes(RealmResource realm) {
+        var profile = realm.users().userProfile();
+        var cfg = profile.getConfiguration();
+        cfg.setUnmanagedAttributePolicy(
+            org.keycloak.representations.userprofile.config.UPConfig.UnmanagedAttributePolicy.ENABLED);
+        profile.update(cfg);
+    }
+
     protected void enableScimEventListener(RealmResource realm) {
         var rep = realm.toRepresentation();
         var listeners = new ArrayList<String>();
