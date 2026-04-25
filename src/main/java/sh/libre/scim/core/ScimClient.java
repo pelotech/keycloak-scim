@@ -101,6 +101,12 @@ public class ScimClient {
         .socketTimeout(30)
         .expectedHttpResponseHeaders(expectedResponseHeaders)
         .hostnameVerifier((s, sslSession) -> true)
+        // Override the SDK's hardcoded "no TCP connection reuse" + tiny
+        // default pool. See KeepAliveConfigManipulator's javadoc for the
+        // background — without this, every SCIM call pays full TCP
+        // handshake + teardown cost (~43 ms on localhost in our perf
+        // measurements).
+        .configManipulator(new KeepAliveConfigManipulator())
         .build();
     }
 

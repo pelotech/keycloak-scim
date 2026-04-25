@@ -84,20 +84,58 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
 
 ## Functional gaps already pinned
 
-- [ ] **W-Group-PATCH-delta** — `group-patchOp=true` switches the
+- [ ] **D-Group-PATCH-delta** — `group-patchOp=true` switches the
       group update path from PUT to PATCH, but the body still
       contains the full member list (just expressed as a REPLACE
       operation on `members`). For a 10k-member group, every
       membership change re-sends 10k members. Real fix: send
       incremental ADD/REMOVE patches based on the delta. The
-      mapping table can compute the delta cheaply.
-- [ ] **W-HTTP-43ms** — A SCIM HTTP request to localhost takes ~43 ms
-      in our perf measurements. That's an order of magnitude higher
-      than typical localhost HTTP (~1–5 ms). Investigate whether
-      Apache HttpClient inside the Captain Goldfish SCIM SDK is
-      establishing a new TCP connection per request despite our
-      ScimClient caching. If it's a small config fix on the SDK
-      side, throughput cascades upward.
+      mapping table can compute the delta cheaply. Deferred to
+      post-1.0.0 so it can be tackled holistically alongside
+      **D-LDAP-group-membership** — the two are the same
+      problem space (group propagation correctness + scale) and
+      a coherent solution touches both.
+- [x] **W-HTTP-43ms** — Investigated. ✅ Root cause: the SCIM SDK
+      hardcodes
+      `clientBuilder.setConnectionReuseStrategy((r,c) -> false)` in
+      `ScimHttpClient.getHttpClient()`, forcing a new TCP connection
+      per request. Workaround: register a `ConfigManipulator` (the
+      SDK invokes it *after* the hardcoded no-reuse line, so we can
+      flip it back). Implementation in
+      `KeepAliveConfigManipulator`: restores
+      `DefaultConnectionReuseStrategy`, applies
+      `DefaultConnectionKeepAliveStrategy`, raises the
+      `maxPerRoute` connection pool from Apache's default of 2 to
+      32 (configurable via `scim.http.maxConnPerRoute`). Effect:
+      per-request HTTP cost drops 21–37% (43 → 24–34 ms,
+      depending on path). Wall-clock at 10k users is within
+      run-to-run noise though, because we're already saturating
+      the worker pool at 8 threads — to capitalize, operators
+      raise `scim.dispatch.threads`. Documented in
+      `docs/performance.md`.
+- [x] **W-HTTP-30ms** — The residual ~25–30 ms localhost cost after
+      the keepalive override turned out to be the test rig, not the
+      SDK or our code. ✅ `HttpLayerBenchmark` (in `src/perfTest/`)
+      strips containers + tunnel away and POSTs directly to an
+      in-process WireMock on loopback. Three paths, 1000 sequential
+      POSTs each: JDK `HttpClient` 0.47 ms, Apache HttpClient + our
+      keepalive config 0.22 ms, full SCIM SDK
+      `ScimRequestBuilder.create` 0.17 ms — all within measurement
+      noise of each other. The HTTP stack sustains ~5000+ req/sec
+      on a single connection. The 30 ms reported by
+      `ScimClientMetrics` in the integration / perf rig is the
+      Testcontainers SSH tunnel hop
+      (`host.testcontainers.internal:<port>`): every container→host
+      packet routes through an SSHD container, adding ~25–30 ms per
+      request. Production deployments don't have this hop.
+      Recalibration: with realistic SCIM-sink RTT, the per-worker
+      ceiling is `1 / RTT`, not the test rig's `1 / 34ms`. Documented
+      in `docs/performance.md`.
+- [ ] **D-Perf-rig-sibling-container** — Move WireMock to a sibling
+      container on Keycloak's Docker network so perf numbers reflect
+      real network cost rather than tunnel overhead. Doesn't affect
+      production behavior — only `ScimClientMetrics` numbers in
+      `docs/performance.md`. 1.x.
 - [ ] **D-LDAP-group-membership** — No `onImportGroupFromLDAP`
       analogue in our LDAP mapper. Groups federated from LDAP don't
       propagate to SCIM. Architectural addition; document as
@@ -177,7 +215,9 @@ must-include **W** list.
 These are real gaps but documented as such in the design docs and
 release notes; not blocking 1.0.0:
 
-- LDAP-group-membership-from-LDAP propagation
+- Group propagation overhaul (incremental PATCH delta +
+  `onImportGroupFromLDAP` for LDAP-federated groups). Tackled as
+  one cohesive effort post-1.0.0.
 - Bloom-filter-witness extension to the reconciler
 - SCIM `/Bulk` batching
 - The 5xx-not-retried gap in the resilience policy

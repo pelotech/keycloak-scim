@@ -112,6 +112,118 @@ the caller's writes are committed and `getUserById` returns null.
 On caller rollback, no SCIM op fires (consistent with fail-open
 semantics).
 
+### HTTP keepalive override: per-request cost down ~25%
+
+The 43 ms/localhost-request floor turned out to come from a hardcoded
+line in the SCIM SDK's HTTP layer:
+
+```java
+// Captain Goldfish scim-sdk-client 1.25.1, ScimHttpClient.getHttpClient()
+clientBuilder.setConnectionReuseStrategy((response, context) -> false);
+```
+
+That forces a new TCP connection per request — full handshake +
+teardown each call, paying the 30+ ms TCP cost on every operation.
+
+The SDK invokes a registered `ConfigManipulator`'s
+`modifyHttpClientConfig` *after* that line, so we can flip it back.
+Implementation in `KeepAliveConfigManipulator`:
+
+- Restore `DefaultConnectionReuseStrategy.INSTANCE` (honor server
+  Keep-Alive headers, default-keepalive HTTP/1.1).
+- Apply `DefaultConnectionKeepAliveStrategy.INSTANCE` (Apache's
+  reasonable default).
+- Raise the connection pool: `maxPerRoute=32`, `maxTotal=64`.
+  Apache HttpClient defaults to 2/route, 20 total — way below 8
+  worker threads talking to one SCIM endpoint.
+
+**Per-request HTTP cost (10k-user run, ScimClientMetrics):**
+
+| Path | Before | After | Δ |
+| --- | ---: | ---: | ---: |
+| triggerFullSync | 43.04 ms | 33.97 ms | −21% |
+| lazyImport | 38.56 ms | 24.15 ms | −37% |
+| reconcilerDeletion | (not measured) | 25.23 ms | — |
+
+Wall-clock at 10k users is **within run-to-run noise** of the
+pre-keepalive numbers, though, because at 8 workers × 34 ms/req we
+saturate at ~235 req/sec — the worker-pool ceiling, not the HTTP
+ceiling. To capitalize on the per-request reduction, raise
+`scim.dispatch.threads` (default 8).
+
+Lazy-import sees a bigger per-request improvement (−37%) because
+its concurrent request count is lower (each `users().search()` is
+a separate admin REST round-trip), giving keepalive more time to
+amortize between calls.
+
+### Where the residual ~30 ms comes from: it's the test rig
+
+After the keepalive override, per-request HTTP cost reported by
+`ScimClientMetrics` was still ~25–34 ms, even on "localhost." That
+number turned out to be a property of the test rig, not the
+plugin or the SCIM SDK.
+
+`HttpLayerBenchmark` (in `src/perfTest/`) strips the test rig away
+and times the HTTP stack end-to-end against an in-process WireMock
+on a loopback port. Three paths, 1000 sequential POSTs each:
+
+| Path | Avg per-request |
+| --- | ---: |
+| JDK `java.net.http.HttpClient` (no SDK, no Apache) | 0.47 ms |
+| Apache HttpClient + our keepalive config | 0.22 ms |
+| SCIM SDK `ScimRequestBuilder.create(User).sendRequest()` | 0.17 ms |
+
+All three are within measurement noise of each other; the SDK adds
+nothing meaningful over raw Apache HttpClient. The HTTP stack on
+this hardware sustains ~5000+ req/sec/connection.
+
+**The 30 ms in the perf test is the Testcontainers SSH tunnel.**
+The integration / perf rig configures Keycloak (containerized) to
+reach WireMock (in-process on the host) via
+`host.testcontainers.internal:<port>`. Testcontainers implements
+that hostname by spinning up an SSHD container and routing every
+container-to-host packet through it:
+
+```
+keycloak-container → docker bridge → ssh-tunnel container →
+docker bridge → host loopback → WireMock
+```
+
+Each round-trip pays the bridge hop both directions plus the SSH
+relay's per-packet handling. On this hardware that's ~25–30 ms,
+even though the underlying TCP loopback is ~200 µs.
+
+Run it yourself:
+
+```sh
+./gradlew performanceTest --tests sh.libre.scim.perf.HttpLayerBenchmark
+```
+
+#### What this means for production
+
+- The plugin's HTTP layer is **not** the per-request bottleneck.
+  In production, per-request cost is whatever the network path to
+  the SCIM sink actually is — usually the dominant term — plus a
+  sub-millisecond layer cost from us.
+- The "8 workers × 34 ms ≈ 235 req/sec ceiling" we extrapolated
+  from the test rig was inflated by tunnel latency. In a deployment
+  where the SCIM sink is reachable on a real network at, say,
+  10 ms RTT, 8 workers ≈ 800 req/sec ceiling; on a fast LAN with
+  1–2 ms RTT, the worker pool is wildly over-provisioned for
+  realistic propagation volumes.
+- `scim.dispatch.threads` should still be raised when targeting
+  a high-latency SCIM sink (the per-worker rate is `1 / RTT`),
+  but not because of overhead the plugin is adding.
+
+#### Why we didn't fix the test rig (yet)
+
+The fix is to put WireMock in a sibling Docker container on
+Keycloak's network rather than on the host (no SSH tunnel needed).
+That's a worthwhile follow-up but doesn't change any production
+behavior — only the perf-test numbers — so we've kept the existing
+rig and documented the gap. Tracked as a follow-up; not a 1.0.0
+blocker.
+
 ### Reconciler deletion: ~100× throughput
 
 Same async-pool pattern applied to the deletion path. The reconciler
@@ -146,10 +258,12 @@ volumes most deployments will see.
 
 ## Remaining headroom and follow-ups
 
-1. **HTTP-per-request cost (43 ms localhost)**. Worth investigating
-   whether the Captain Goldfish SCIM SDK reuses Apache HttpClient
-   connections across requests in our usage. If not, pooling would
-   cut the per-request floor and lift the per-worker rate.
+1. **Perf-test rig fidelity**. The Testcontainers SSH tunnel adds
+   ~25–30 ms per request, which dominates the `ScimClientMetrics`
+   numbers in our perf reports. Putting WireMock in a sibling
+   container on Keycloak's Docker network would eliminate the
+   tunnel and give realistic per-request numbers. Doesn't affect
+   production behavior — only test-rig measurements.
 2. **SCIM `/Bulk` batching** where the remote supports it. Collapses
    N requests into one. Reduces per-request fixed cost but only
    useful where the remote implements `/Bulk` (many do not).
