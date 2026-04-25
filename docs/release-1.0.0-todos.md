@@ -44,15 +44,19 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
 
 ## Documentation
 
-- [ ] **B-README** — Rewrite the README. Currently it's mostly
-      the upstream mitodl prose with our ImageVolume section grafted
-      in. Should describe:
-      - What this fork is and why (long-lived; not a PR back to mitodl)
-      - What's in scope vs upstream (LDAP federation, reconciler,
-        perf work, OCI image)
-      - Compatibility (Keycloak 25.x+, 26.x)
-      - Quick-start using the OCI image (already exists; keep)
-      - Pointers to `docs/` for everything else
+- [x] **B-README** — Rewrite the README. ✅ Replaced the upstream
+      prose with a fork-focused README:
+      - One-paragraph "what is this" plus the differentiator list
+        relative to upstream (LDAP federation, reconciler, perf,
+        OCI image, test coverage)
+      - Compatibility table (Keycloak 25.x/26.x, Java 21, K8s 1.36+)
+      - Quick-start with K8s ImageVolume as the primary path; bare
+        JAR + docker-compose as the dev path
+      - Three-step Keycloak setup (event listener, SCIM provider,
+        LDAP mapper) pointing to `docs/configuration.md`
+      - Pointer list for every other doc
+      - Status section pointing back at this todo file
+      - Apache-2.0 license footer
 - [x] **B-Config-reference** — Single operator-facing reference for
       every config knob. ✅ `docs/configuration.md`: covers the SCIM
       provider component (~17 properties grouped by Connection /

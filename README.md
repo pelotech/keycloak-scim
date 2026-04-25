@@ -1,58 +1,59 @@
-# keycloak-scim-client
+# keycloak-scim
 
-This extension add [SCIM2](http://www.simplecloud.info) client capabilities to Keycloak. (See [RFC7643](https://datatracker.ietf.org/doc/html/rfc7643) and [RFC7644](https://datatracker.ietf.org/doc/html/rfc7644)).
+A Keycloak provider that propagates user and group lifecycle events
+out to one or more remote [SCIM 2.0](http://www.simplecloud.info)
+service providers
+([RFC 7643](https://datatracker.ietf.org/doc/html/rfc7643),
+[RFC 7644](https://datatracker.ietf.org/doc/html/rfc7644)).
+Keycloak stays the source of truth for identity; downstream
+applications get user create / update / delete and group membership
+changes via SCIM, with no need to give them direct access to your
+LDAP / Keycloak.
 
-## Overview
+This is a long-lived [pelotech](https://github.com/pelotech) fork of
+[mitodl/keycloak-scim](https://github.com/mitodl/keycloak-scim).
+What's added relative to upstream:
 
-### Motivation
+- **LDAP federation support.** Users imported via Keycloak's LDAP
+  User Federation (lazy import, periodic sync, explicit sync) now
+  propagate to SCIM. Upstream's event-listener-only design didn't
+  catch federation imports — see
+  [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
+  for the full design.
+- **LDAP-deletion reconciler.** A configurable periodic task
+  closes the gap left by upstream Keycloak issue
+  [#35235](https://github.com/keycloak/keycloak/issues/35235): users
+  deleted from LDAP no longer linger in your SCIM sink.
+- **Performance work for 10k+ user deployments.** Async dispatch on
+  a worker pool brings full-sync throughput from ~22 users/sec to
+  ~245 users/sec; reconciler deletion from ~22 to ~640 deletes/sec.
+  See [`docs/performance.md`](docs/performance.md) for measurements
+  and bottleneck analysis.
+- **OCI image for K8s ImageVolume mounting.** Drop the plugin into
+  a Keycloak pod without baking a custom image — see
+  [Quick start](#quick-start) below.
+- **Comprehensive test coverage.** 43 unit + 24 integration tests
+  (Testcontainers-driven against real Keycloak + OpenLDAP +
+  WireMock) plus a perf-test harness for scale work.
 
-We want to build a unified collaborative platform based on multiple applications. To do that, we need a way to propagate immediately changes made in Keycloak to all these applications. And we want to keep using OIDC or SAML as the authentication protocol.
+## Compatibility
 
-This will allow users to collaborate seamlessly across the platform without requiring every user to have connected once to each application. This will also ease GDRP compliance because deleting a user in Keycloak will delete the user from every app.
+| Component | Supported |
+| --- | --- |
+| Keycloak | 25.x, 26.x |
+| Java (build + runtime) | 21 |
+| Kubernetes (for ImageVolume mounting) | 1.36+ |
+| Architectures (OCI image) | linux/amd64, linux/arm64 |
 
-### Technical choices
+## Quick start
 
-The SCIM protocol is standard, comprehensible and easy to implement. It's a perfect fit for our goal.
+Two paths to getting the plugin loaded into Keycloak:
 
-We chose to build application extensions/plugins because it's easier to deploy and thus will benefit to a larger portion of the FOSS community.
+### Kubernetes ImageVolume (recommended)
 
-#### Keycloak specific
-
-This extension uses 3 concepts in KC :
-- Event Listener : it's used to listens for changes and transform them in SCIM calls.
-- Federation Provider : it's used to set up all the SCIM service providers without creating our own UI.
-- JPA Entity Provider : it's used to save the mapping between the local IDs and the service providers IDs.
-
-Because the event listener is the source of the SCIM flow, and it is not cancelable, we can't have strictly consistent behavior in case of SCIM service provider failure. 
-
-## Usage
-
-### Installation (quick)
-
-1. Download the [latest version](https://lab.libreho.st/libre.sh/scim/keycloak-scim/-/jobs/artifacts/main/raw/build/libs/keycloak-scim-1.0-SNAPSHOT-all.jar?job=package)
-2. Put it in `/opt/keycloak/providers/`.
-
-It's also possible to build your own custom image if you run Keycloak in a [container](/docs/container.md).
-
-Other [installation options](/docs/installation.md) are available.
-
-### Installation on Kubernetes (ImageVolume)
-
-This fork publishes an OCI image whose payload is just the shaded JAR,
-intended to be mounted into a Keycloak pod as a Kubernetes
-[`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image).
-That gets the JAR into `/opt/keycloak/providers/` without baking it into the
-Keycloak image, without an init container, and without a writable volume.
-
-- **Image:** `ghcr.io/pelotech/keycloak-scim`
-- **Tags:** every release publishes `MAJOR.MINOR.PATCH`, `MAJOR.MINOR`, and
-  `latest`. Production deployments should pin by digest.
-- **Architectures:** `linux/amd64`, `linux/arm64`.
-- **Supply chain:** images are signed with cosign keyless (GitHub OIDC) and
-  ship with SPDX + CycloneDX SBOM attestations.
-- **Kubernetes minimum:** `1.36` (the `image` volume type went GA on 2026-04-22).
-
-Example pod spec:
+Mount the published OCI image as a Kubernetes
+[`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image)
+on Keycloak's `/opt/keycloak/providers/`:
 
 ```yaml
 apiVersion: v1
@@ -76,7 +77,11 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
-Verify the image's signature before deploying:
+The image is `FROM scratch` — payload only, no shell, no entrypoint.
+Multi-arch manifest, signed with cosign keyless (GitHub OIDC), with
+SPDX + CycloneDX SBOMs attached as cosign attestations.
+
+Before deploying, verify the signature:
 
 ```sh
 cosign verify \
@@ -85,7 +90,7 @@ cosign verify \
   ghcr.io/pelotech/keycloak-scim:1.0.0
 ```
 
-Inspect the bundled SBOM:
+Inspect the SBOM:
 
 ```sh
 cosign download attestation \
@@ -94,47 +99,72 @@ cosign download attestation \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
 
-### Setup
+### Bare JAR (development)
 
-#### Add the event listerner
+```sh
+git clone https://github.com/pelotech/keycloak-scim
+cd keycloak-scim
+./gradlew shadowJar
+cp build/libs/keycloak-scim-*-all.jar /opt/keycloak/providers/
+```
 
-1. Go to `Admin Console > Events > Config`.
-2. Add `scim` in `Event Listeners`.
-3. Save.
+For local end-to-end testing, `docker-compose.yml` brings up
+Keycloak + Postgres with the freshly-built JAR mounted in:
 
-![Event listener page](/docs/img/event-listener-page.png)
+```sh
+./gradlew prepareDockerContext
+docker compose up
+```
 
-#### Create a federation provider
+## Configuring a SCIM provider
 
-1. Go to `Admin Console > User Federation`.
-2. Click on `Add provider`.
-3. Select `scim`.
-4. Configure the provider ([see](#configuration)).
-5. Save.
+After the plugin is loaded:
 
-![Federation provider page](/docs/img/federation-provider-page.png)
+1. **Enable the event listener** *(if you want admin-REST and
+   self-service events to propagate; LDAP-import propagation is
+   handled separately by the LDAP mapper below)*:
+   *Admin Console → Realm Settings → Events → Config* — add
+   `scim` to *Event Listeners*.
 
-### Configuration
+2. **Add a SCIM provider component:**
+   *Admin Console → User Federation → Add provider → scim*. Set
+   `endpoint`, `auth-mode`, `auth-pass` (token) at minimum.
+   Every config knob is documented in
+   [`docs/configuration.md`](docs/configuration.md).
 
-Add the endpoint - for a local set up you have to add the two containers in a docker network and use the container ip see [here](https://docs.docker.com/engine/reference/commandline/network/)
-If you use the [rocketchat app](https://lab.libreho.st/libre.sh/scim/rocketchat-scim) you get the endpoint from your rocket Chat Scim Adapter App Details.
-Endpoint content type is application/json.
-Auth mode Bearer or None for local test setup.
-Copy the bearer token from your app details in rocketchat.
+3. **Attach the LDAP mapper** *(only if you have LDAP federation
+   and want LDAP-imported users to propagate)*:
+   *Admin Console → User Federation → (your LDAP provider) →
+   Mappers → Add → scim-ldap-sync*. No config required; presence
+   is the configuration.
 
-If you enable import during sync then you can choose between to following import actions:
-- Create Local - adds users to keycloak
-- Nothing
-- Delete Remote - deletes users from the remote application
+The plugin will now fan out user/group changes from each path
+(admin REST, self-service, LDAP federation) to every configured
+SCIM provider component in the realm.
 
+## Documentation
 
+- [`docs/configuration.md`](docs/configuration.md) — every
+  config knob, attribute, endpoint, and JVM property.
+- [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
+  — design doc for LDAP federation propagation, the reconciler,
+  and a comparison with `scim-for-keycloak`'s alternative
+  architecture.
+- [`docs/performance.md`](docs/performance.md) — scale measurements,
+  bottleneck analysis, async dispatch design.
+- [`docs/releasing.md`](docs/releasing.md) — release runbook
+  (release-please flow, OCI image publication, RC dry-runs).
+- [`docs/installation.md`](docs/installation.md),
+  [`docs/container.md`](docs/container.md) — additional install
+  paths inherited from upstream.
 
+## Status
 
-### Sync
+`1.0.0` is in active preparation; track open work at
+[`docs/release-1.0.0-todos.md`](docs/release-1.0.0-todos.md). Until
+that lands, image tags are pre-1.0 and breaking changes between
+patch versions are possible — pin by digest.
 
-You can set up a periodic sync for all users or just changed users. You can either do:
-- Periodic Full Sync
-- Periodic Changed User Sync
+## License
 
-
-**[License Apache-2.0](/LICENSE)**
+Apache-2.0. See [`LICENSE`](LICENSE).
