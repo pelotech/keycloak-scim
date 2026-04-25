@@ -86,9 +86,10 @@ Verified at full 10k scale (`./gradlew performanceTest -Dperf.userCount=10000`):
 
 | Scenario | Time (10k users) | Throughput |
 | --- | ---: | ---: |
-| Keycloak alone, no plugin | 2.75 s | 3636 users/sec |
-| triggerFullSync with plugin | 40.84 s | 244.8 users/sec |
-| Lazy-import via admin REST search | 1m 12.97s | 137 users/sec |
+| Keycloak alone, no plugin | 2.84 s | 3520 users/sec |
+| triggerFullSync with plugin | 46.18 s | 216.6 users/sec |
+| Lazy-import via admin REST search | 1m 21.78s | 122.3 users/sec |
+| Reconciler deletion (parallel) | 15.70 s | 636.9 deletes/sec |
 
 Throughput holds (and slightly improves) at scale — JIT compilation
 has more time to take effect, the worker pool reaches steady state,
@@ -110,6 +111,38 @@ deferred until the caller's transaction commits via
 the caller's writes are committed and `getUserById` returns null.
 On caller rollback, no SCIM op fires (consistent with fail-open
 semantics).
+
+### Reconciler deletion: ~100× throughput
+
+Same async-pool pattern applied to the deletion path. The reconciler
+now runs in two phases:
+
+1. **Identify candidates** (sequential, in caller's session): one
+   JPA query for the mapping list, then one `getUserById` +
+   witness-evaluate per mapping. For 10k mappings this is ~10s of
+   JPA-dominated work.
+2. **Issue DELETEs** (parallel, on the shared worker pool): each
+   delete runs in its own worker session via `runJobInTransaction`.
+   `CompletableFuture.allOf(...).join()` gives the endpoint a
+   synchronous "all deletes complete" return semantics so the
+   `{"deleted": N}` response is meaningful.
+
+| Configuration | 1000 deletes | 10k deletes | Throughput (10k) |
+| --- | ---: | ---: | ---: |
+| Synchronous (before) | 46.25 s | (extrapolated ~7.5 min) | ~22/sec |
+| **Parallel (after)** | **0.46 s** | **15.70 s** | **636.9/sec** |
+
+The deletion path is now actually faster than the import path
+(15.7 s vs 46.2 s for the same 10k users). DELETEs have no body to
+serialize, no SCIM response to parse beyond the status line, and
+pool-saturation effects (HTTP keepalive, JIT warmup) appear earlier.
+
+For 10k mappings with the typical realistic case of "100s of
+deletions, not 10k," the wall-clock is dominated by the Phase 1
+mapping walk (~10s for 10k entries) rather than the deletes
+themselves. Parallelizing Phase 1 is a follow-up if the operator
+shape calls for it; the current behavior is fine for the deletion
+volumes most deployments will see.
 
 ## Remaining headroom and follow-ups
 
