@@ -14,7 +14,10 @@ services:
     image: quay.io/keycloak/keycloak:25.0.6
     command: start-dev
     volumes:
-      - ./build/libs/keycloak-scim-1.0-SNAPSHOT-all.jar:/opt/keycloak/providers/keycloak-scim-1.0-SNAPSHOT-all.jar
+      # Mounts the staged shaded JAR (./gradlew prepareDockerContext).
+      # Stable, version-less path so this file doesn't need to track
+      # release-please version bumps.
+      - ./build/docker/keycloak-scim.jar:/opt/keycloak/providers/keycloak-scim.jar
     environment:
       KC_DB: postgres
       KC_DB_URL_HOST: postgres
