@@ -1,0 +1,71 @@
+name: CI
+
+# Runs unit + integration tests on every PR and on every push to a
+# non-`main` branch. Push-to-main is intentionally excluded — that
+# path is owned by release-please (which opens its release PR) and
+# any failure on main shows up in the release PR's CI run.
+#
+# Integration tests boot real containers (Keycloak + OpenLDAP +
+# WireMock), so a CI run takes a few minutes. Worth the cost: every
+# previous "I caught a regression" moment in this codebase came from
+# integration tests, not unit tests.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel previous runs on the same ref so a quick succession of
+  # pushes doesn't pile up parallel container-stack startups.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Verify both the minimum-supported and the next-major Keycloak
+      # versions. We compile against 25.0.6 and ship binary
+      # compatibility for 26.x; this matrix catches drift.
+      matrix:
+        keycloak: ["25.0.6", "26.4.0"]
+    name: Java 21 / Keycloak ${{ matrix.keycloak }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile + unit tests
+        run: ./gradlew --no-daemon test
+
+      - name: Integration tests
+        env:
+          # Override the Keycloak image used by the Testcontainers-backed
+          # integration tests. Read by IntegrationTestBase via System.getProperty.
+          KEYCLOAK_IMAGE: "quay.io/keycloak/keycloak:${{ matrix.keycloak }}"
+        run: ./gradlew --no-daemon integrationTest -Dkeycloak.image=$KEYCLOAK_IMAGE
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.keycloak }}
+          path: |
+            build/reports/tests/
+            build/test-results/
+          retention-days: 14
