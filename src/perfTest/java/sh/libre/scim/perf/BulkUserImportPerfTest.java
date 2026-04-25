@@ -99,6 +99,42 @@ class BulkUserImportPerfTest extends PerfTestBase {
     }
 
     /**
+     * Pure Keycloak baseline: LDAP federation sync of N users with NO
+     * SCIM plugin attached (no scim provider, no scim-ldap-sync mapper).
+     * Measures Keycloak's per-user federation-import cost in isolation,
+     * so subsequent scenarios' "with plugin" times can be expressed as
+     * an overhead delta rather than absolute numbers.
+     */
+    @Test
+    @Order(0)
+    void triggerFullSync_keycloakAloneBaseline() throws Exception {
+        var r = newRealmWithLdapOnly();
+
+        seeded.addAll(seedLdapUsers("perfk", USER_COUNT));
+
+        var notes = new LinkedHashMap<String, String>();
+        notes.put("seedCount", String.valueOf(USER_COUNT));
+        notes.put("plugin", "absent");
+
+        var sample = report.timedWithNotes(
+            "triggerFullSync",
+            "no-plugin-N-users",
+            USER_COUNT,
+            notes,
+            () -> {
+                r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+                // No SCIM dispatch; sync is fully synchronous from
+                // Keycloak's perspective.
+                return null;
+            }
+        );
+
+        System.out.println("[perf] triggerFullSync (no plugin): "
+            + USER_COUNT + " users in " + sample.duration().toMillis()
+            + " ms (" + String.format("%.1f", sample.itemsPerSecond()) + " users/sec)");
+    }
+
+    /**
      * Lazy-import N users one at a time via admin REST search-by-username.
      * Compares against triggerFullSync to surface whether bulk-mode has any
      * advantage today (it largely doesn't, since each user still goes
