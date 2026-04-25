@@ -46,33 +46,78 @@ doesn't move the throughput needle at this scale.
 
 ### What IS the bottleneck
 
-(In progress — measurement underway. Will be filled in when the
-no-op-dispatcher experiment completes and subsequent commits land.)
+Per-phase timing inside `ScimClient.create` for a 1000-user
+triggerFullSync (instrumented via `ScimClientMetrics`):
 
-## Planned next steps
+```
+ScimClient create: count=1002 total=43941ms (avg 43.85ms)
+  applyModel:     0.52ms avg  (1.2%)
+  query findById: 0.07ms avg  (0.2%)
+  http send:     43.04ms avg (98.1%)
+  applyResponse:  0.15ms avg  (0.3%)
+  saveMapping:    0.08ms avg  (0.2%)
+```
 
-1. **Localize the cost** with progressively-more-aggressive instrumentation:
-   no-op `dispatcher.run` to isolate plugin-internal work from
-   `ScimClient.create`; if `ScimClient.create` is dominant, no-op the
-   HTTP send to isolate JPA + adapter cost.
-2. **Targeted optimizations** based on what (1) reveals. Likely
-   candidates in descending order of probable impact:
-   - Async / queued SCIM dispatch (biggest lever, biggest change)
-   - SCIM `/Bulk` batching where the remote supports it
-   - Skip the per-user `findById` JPA query when we know the mapping
-     can't exist (e.g., during a first-time full sync)
-3. **Group membership at scale**: GroupAdapter.apply(GroupModel) eagerly
-   loads ALL members on every event, and a 10k-member group's PUT
-   carries 10k Member objects each requiring a JPA findById. Even one
-   membership change re-sends the full membership list. Incremental
-   PATCH (op=ADD / op=REMOVE on `members`) instead of full replace is
-   the right shape — already implemented as a config flag
-   (`group-patchOp`), but the client-side code rebuilds the full
-   member list rather than patching just the delta. Needs a rework.
+**98% of per-user cost is the SCIM HTTP send.** JPA + adapter cost
+combined is under 1ms. Implication: optimizing JPA, serialization,
+or model traversal would be rounding-error work; only the HTTP path
+matters.
+
+That 43ms-per-localhost-request is itself surprisingly high. For now
+treat it as the floor and parallelize around it; a follow-up may dig
+into Apache HttpClient connection pool / keepalive tuning inside the
+SCIM SDK.
+
+### Async dispatch: ~9× throughput
+
+Pulling SCIM HTTP off the user-import thread onto a worker pool
+(default 8 threads) collapses synchronous serialization on HTTP
+latency:
+
+| Configuration | triggerFullSync (1000 users) | Throughput |
+| --- | ---: | ---: |
+| Keycloak alone, no plugin | 549 ms | 1821 users/sec |
+| With plugin, sync dispatch | 46 s | 22 users/sec |
+| With plugin, **async dispatch** | **5.4 s** | **186 users/sec** |
+
+Lazy import is similar (4.5 s → 222 users/sec).
+
+For 10k users, this moves the absolute clock from ~7.6 minutes to
+~50 seconds. The remaining gap to no-plugin (~200 vs ~1800/sec) is
+the 8-worker concurrency cap on a 43 ms/request HTTP path: 8/0.043 ≈
+186 — exactly what we observe. To push further: raise pool size
+(`scim.dispatch.threads` system property) or fix the per-request
+HTTP cost.
+
+Correctness: workers run in their own Keycloak sessions opened via
+`runJobInTransaction`, so they re-fetch model objects by id rather
+than capturing references from the caller's session. Submission is
+deferred until the caller's transaction commits via
+`enlistAfterCompletion` — without this, workers open sessions before
+the caller's writes are committed and `getUserById` returns null.
+On caller rollback, no SCIM op fires (consistent with fail-open
+semantics).
+
+## Remaining headroom and follow-ups
+
+1. **HTTP-per-request cost (43 ms localhost)**. Worth investigating
+   whether the Captain Goldfish SCIM SDK reuses Apache HttpClient
+   connections across requests in our usage. If not, pooling would
+   cut the per-request floor and lift the per-worker rate.
+2. **SCIM `/Bulk` batching** where the remote supports it. Collapses
+   N requests into one. Reduces per-request fixed cost but only
+   useful where the remote implements `/Bulk` (many do not).
+3. **Group membership at scale**. `GroupAdapter.apply(GroupModel)`
+   eagerly loads ALL members on every group event, and a 10k-member
+   group's PUT carries 10k Member objects each requiring a JPA
+   findById. Even a single membership change re-sends the full
+   membership list. Incremental PATCH (op=ADD / op=REMOVE on
+   `members`) instead of full replace is the right shape — exists as
+   a config flag (`group-patchOp`), but the client-side code still
+   rebuilds the full member list rather than patching the delta.
 4. **LDAP-group-membership-from-LDAP gap**: our scim-ldap-sync mapper
-   has no `onImportGroupFromLDAP` hook (the analogue to user import).
-   Groups federated from LDAP don't propagate. This is an architectural
-   gap to address separately, after the user-side perf work lands.
+   has no `onImportGroupFromLDAP` hook. Groups federated from LDAP
+   don't propagate. Architectural gap to address separately.
 
 ## Why async dispatch is the eventual answer
 
