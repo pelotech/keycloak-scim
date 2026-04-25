@@ -96,8 +96,14 @@ public abstract class IntegrationTestBase {
             .withNetwork(network)
             .withNetworkAliases("openldap");
 
+    /** Overrideable via `-Dkeycloak.image=<image:tag>` so CI can run a matrix
+     *  across supported Keycloak majors. Default tracks our minimum
+     *  supported version. */
+    protected static final String KEYCLOAK_IMAGE =
+        System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:25.0.6");
+
     protected static final KeycloakContainer keycloak =
-        new KeycloakContainer("quay.io/keycloak/keycloak:25.0.6")
+        new KeycloakContainer(KEYCLOAK_IMAGE)
             .withProviderLibsFrom(List.of(PLUGIN_JAR))
             .withNetwork(network);
 

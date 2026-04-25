@@ -17,7 +17,12 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
       branch and on every PR. Today the only workflows are
       `release.yml` (tag-triggered) and `release-please.yml` (main
       pushes); nothing actually validates the test suite on
-      contributor changes. (commit ce7d167)
+      contributor changes. ✅ `.github/workflows/ci.yml` added,
+      runs across a Keycloak version matrix (25.0.6 + 26.x) — which
+      also closes **W-K8s-matrix** below.
+
+- [x] **W-K8s-matrix** — Folded into B-CI. Workflow's strategy
+      matrix runs the full test suite on Keycloak 25.0.6 and 26.4.0.
 - [ ] **B-Release-dry-run** — Cut a real `Release-As: 1.0.0-rc.0`
       end-to-end, per `docs/releasing.md`:
       - Land an empty commit with the `Release-As` footer
@@ -36,9 +41,6 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
       `release.yml` — see the runbook's "If the OCI image didn't
       auto-publish" section. The dry-run above also exercises the
       fallback if this is the chosen posture.
-- [ ] **W-K8s-matrix** — Add a Keycloak version matrix to the CI
-      workflow: 25.0.6 (current minimum) and the latest 26.x. We
-      claim binary compatibility but have only tested against 25.0.6.
 
 ## Documentation
 

@@ -109,6 +109,11 @@ tasks.register<Test>("integrationTest") {
     // shutdown hooks reset cleanly between classes.
     maxParallelForks = 1
     forkEvery = 1
+    // Forward the Keycloak image override (used by the CI matrix) and
+    // any other -D properties whose names we deliberately accept.
+    listOf("keycloak.image").forEach { prop ->
+        System.getProperty(prop)?.let { systemProperty(prop, it) }
+    }
     doFirst {
         systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
     }
