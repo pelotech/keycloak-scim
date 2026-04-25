@@ -1,3 +1,5 @@
+import java.time.Duration
+
 plugins {
     java
     alias(libs.plugins.shadow)
@@ -31,6 +33,11 @@ val integrationTest by sourceSets.creating {
     runtimeClasspath += sourceSets.main.get().output
 }
 
+val perfTest by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + integrationTest.output
+    runtimeClasspath += sourceSets.main.get().output + integrationTest.output
+}
+
 configurations {
     testImplementation {
         extendsFrom(configurations.compileOnly.get())
@@ -40,6 +47,12 @@ configurations {
     }
     named(integrationTest.runtimeOnlyConfigurationName) {
         extendsFrom(configurations.testRuntimeOnly.get())
+    }
+    named(perfTest.implementationConfigurationName) {
+        extendsFrom(configurations.getByName(integrationTest.implementationConfigurationName))
+    }
+    named(perfTest.runtimeOnlyConfigurationName) {
+        extendsFrom(configurations.getByName(integrationTest.runtimeOnlyConfigurationName))
     }
 }
 
@@ -98,6 +111,31 @@ tasks.register<Test>("integrationTest") {
     forkEvery = 1
     doFirst {
         systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
+    }
+}
+
+// Performance/scale tests. Deliberately NOT part of `check` — they run for
+// many minutes, allocate larger Keycloak heaps, and are intended for ad-hoc
+// invocation when measuring or re-measuring. Invoke with `./gradlew
+// performanceTest`. Reports land under build/reports/perf/.
+tasks.register<Test>("performanceTest") {
+    description = "Runs scale/perf tests against a real Keycloak + LDAP + SCIM stack."
+    group = "verification"
+    testClassesDirs = perfTest.output.classesDirs
+    classpath = perfTest.runtimeClasspath
+    dependsOn(tasks.named("shadowJar"))
+    val shadowJarTask = tasks.named<Jar>("shadowJar")
+    systemProperty("api.version", "1.43")
+    // Each perf test class spins up its own stack; sequential per-class JVMs
+    // for the same reasons as integrationTest.
+    maxParallelForks = 1
+    forkEvery = 1
+    // Generous default; individual scenarios can stretch toward this when
+    // exercising large user cohorts.
+    timeout.set(Duration.ofMinutes(30))
+    doFirst {
+        systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
+        systemProperty("perf.report.dir", layout.buildDirectory.dir("reports/perf").get().asFile.absolutePath)
     }
 }
 
