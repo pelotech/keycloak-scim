@@ -82,10 +82,23 @@ latency:
 
 Lazy import is similar (4.5 s → 222 users/sec).
 
-For 10k users, this moves the absolute clock from ~7.6 minutes to
-~50 seconds. The remaining gap to no-plugin (~200 vs ~1800/sec) is
-the 8-worker concurrency cap on a 43 ms/request HTTP path: 8/0.043 ≈
-186 — exactly what we observe. To push further: raise pool size
+Verified at full 10k scale (`./gradlew performanceTest -Dperf.userCount=10000`):
+
+| Scenario | Time (10k users) | Throughput |
+| --- | ---: | ---: |
+| Keycloak alone, no plugin | 2.75 s | 3636 users/sec |
+| triggerFullSync with plugin | 40.84 s | 244.8 users/sec |
+| Lazy-import via admin REST search | 1m 12.97s | 137 users/sec |
+
+Throughput holds (and slightly improves) at scale — JIT compilation
+has more time to take effect, the worker pool reaches steady state,
+and HTTP keepalive amortizes per-request setup. Lazy-import is
+slower than triggerFullSync because each `users().search()` is a
+separate admin REST round-trip serialized on the test side.
+
+The remaining gap to no-plugin (~245 vs ~3636/sec) is the 8-worker
+concurrency cap on a ~43 ms/request HTTP path: 8/0.043 ≈ 186 —
+close to what we observe. To push further: raise pool size
 (`scim.dispatch.threads` system property) or fix the per-request
 HTTP cost.
 
