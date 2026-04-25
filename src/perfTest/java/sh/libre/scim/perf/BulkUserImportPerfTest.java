@@ -45,7 +45,29 @@ class BulkUserImportPerfTest extends PerfTestBase {
     private final java.util.List<String> seeded = new java.util.ArrayList<>();
 
     @AfterEach
-    void cleanupSeeded() {
+    void cleanupSeeded() throws Exception {
+        // Pull the per-phase ScimClient timing breakdown from the Keycloak
+        // container before cleaning up — the metrics are useful even when
+        // the test has already passed.
+        try {
+            var http = java.net.http.HttpClient.newHttpClient();
+            // Any realm route works; the metrics endpoint is global.
+            var resp = http.send(
+                java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+                    keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/metrics"))
+                    .GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+            System.out.println("[perf] " + resp.body());
+            // Reset between scenarios so each test's metrics are isolated.
+            http.send(
+                java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+                    keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/metrics/reset"))
+                    .POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
+                java.net.http.HttpResponse.BodyHandlers.discarding());
+        } catch (Exception e) {
+            System.out.println("[perf] metrics fetch failed: " + e.getMessage());
+        }
+
         if (!seeded.isEmpty()) {
             cleanupLdapEntries(seeded.stream().map(PerfTestBase::ldapUserDn).toList());
             seeded.clear();
