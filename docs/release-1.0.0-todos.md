@@ -53,14 +53,17 @@ should reference this file (e.g. "release(todos): mark `B-CI` done").
       - Compatibility (Keycloak 25.x+, 26.x)
       - Quick-start using the OCI image (already exists; keep)
       - Pointers to `docs/` for everything else
-- [ ] **B-Config-reference** — Single operator-facing reference for
-      every SCIM provider component config knob. Today there are
-      ~15: endpoint, content-type, auth-mode, auth-user, auth-pass,
-      propagation-user, propagation-group, sync-import,
-      sync-import-action, sync-refresh, group-patchOp, user-patchOp,
-      username-source, group-filter, reconciler-enabled,
-      reconciler-interval-seconds, reconciler-stale-threshold-seconds.
-      Each documented in helpText but not collected anywhere.
+- [x] **B-Config-reference** — Single operator-facing reference for
+      every config knob. ✅ `docs/configuration.md`: covers the SCIM
+      provider component (~17 properties grouped by Connection /
+      Authentication / Propagation toggles / Sync behavior / PATCH vs
+      PUT / User identity mapping / Group filtering / Reconciler), the
+      `scim-ldap-sync` LDAP mapper, the `scim` event listener, the
+      `/scim-reconcile/*` endpoint, the user attributes the plugin
+      reads + writes (`scim-skip`, `ldap-federation-last-seen`), and
+      JVM-level system properties (`scim.dispatch.threads`,
+      `keycloak.image`). Includes a "what's NOT configurable" section
+      so operators know what they're agreeing to.
 - [x] **B-License-footer** — README footer said `License AGPL`. The
       `LICENSE` file is Apache 2.0. Pre-existing inconsistency from
       upstream. ✅ Footer corrected to Apache-2.0.
