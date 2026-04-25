@@ -137,4 +137,4 @@ You can set up a periodic sync for all users or just changed users. You can eith
 - Periodic Changed User Sync
 
 
-**[License AGPL](/LICENSE)**
+**[License Apache-2.0](/LICENSE)**
