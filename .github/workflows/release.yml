@@ -70,9 +70,16 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.meta.outputs.version }}"
-          # On a tag push, also tag major.minor and latest. On manual
-          # dispatch, only the explicit version (no 'latest' aliasing).
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          # Prerelease versions (any SemVer with a '-' suffix, e.g.
+          # 1.0.0-rc.0 or 2.0.0-beta.3) get only the explicit version
+          # tag. They must not move ':latest' or ':major.minor', which
+          # operators may follow for stable releases.
+          # Stable releases on a tag push get version, major.minor, and
+          # latest. workflow_dispatch always gets only the explicit
+          # version (no 'latest' aliasing for ad-hoc builds).
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "tags=${{ env.IMAGE }}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             MAJOR_MINOR="${VERSION%.*}"
             {
               echo "tags<<EOF"
