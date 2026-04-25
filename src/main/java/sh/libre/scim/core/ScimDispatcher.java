@@ -67,6 +67,17 @@ public class ScimDispatcher implements AutoCloseable {
             }
         });
 
+    /**
+     * Submit a task to the shared SCIM worker pool. Same pool that
+     * {@link #runAsync} uses; consumers can compose {@link CompletableFuture}s
+     * around it for parallel-with-await patterns (e.g. the reconciler's
+     * batch-delete path needs to fire N deletes in parallel and only return
+     * after all complete).
+     */
+    public static java.util.concurrent.CompletableFuture<Void> dispatchAsync(Runnable task) {
+        return java.util.concurrent.CompletableFuture.runAsync(task, ASYNC_EXECUTOR);
+    }
+
     public ScimDispatcher(KeycloakSession session) {
         this.session = session;
     }
