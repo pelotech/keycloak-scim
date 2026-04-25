@@ -9,6 +9,7 @@ import jakarta.ws.rs.ProcessingException;
 
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
+import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.http.BasicAuth;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
@@ -67,7 +68,18 @@ public class ScimClient {
         RetryConfig retryConfig = RetryConfig.custom()
             .maxAttempts(10)
             .intervalFunction(IntervalFunction.ofExponentialBackoff())
-            .retryExceptions(ProcessingException.class)
+            // Retry on both JAX-RS-level network errors (ProcessingException)
+            // and the SCIM SDK's own network-error wrapper (IORuntimeException
+            // — what Captain Goldfish throws when Apache HttpClient surfaces
+            // SocketException, NoHttpResponseException, etc.). Without
+            // IORuntimeException here, the entire retry policy is effectively
+            // dead code for this client stack — every real-world transient
+            // failure surfaces as IORuntimeException and bypasses retry.
+            //
+            // Note: HTTP error responses (5xx) do NOT throw; they return a
+            // ServerResponse with isSuccess()=false. They are not currently
+            // retried. See ScimResilienceIT#serverErrorIsNotRetriedGap.
+            .retryExceptions(ProcessingException.class, IORuntimeException.class)
             .build();
 
         registry = RetryRegistry.of(retryConfig);
