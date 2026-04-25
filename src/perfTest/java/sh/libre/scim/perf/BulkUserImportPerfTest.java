@@ -157,6 +157,74 @@ class BulkUserImportPerfTest extends PerfTestBase {
     }
 
     /**
+     * Reconciler-deletion baseline: seed N LDAP users, propagate to SCIM
+     * (so each gets a mapping row + ldap-federation-last-seen attribute),
+     * then call the reconciler endpoint with thresholdHours=0 — at that
+     * threshold every just-stamped user is "stale" per the witness, and
+     * the reconciler issues a SCIM DELETE for each.
+     *
+     * <p>Times only the reconciler endpoint call. The endpoint is
+     * synchronous: it returns when all SCIM DELETEs have been issued
+     * (today via {@code ReconcilerRunner.run}'s sequential loop). So the
+     * measured duration is the wall-clock for all N deletes.
+     *
+     * <p>Note: this is exercising the deletion-throughput shape, not
+     * realistic semantics — in production users with stale timestamps
+     * are typically a small subset of the total mapping table. The point
+     * is to find the bottleneck.
+     */
+    @Test
+    @Order(3)
+    void reconcilerDeletion_baselineThroughput() throws Exception {
+        var counter = stubFastUserCreate();
+        stubScimUserDeleteOk();
+        var r = newRealmWithScimAndLdap();
+
+        // Setup phase: import N users so the reconciler has something to
+        // delete. Not timed — exercises the same path the previous tests
+        // already measured.
+        seeded.addAll(seedLdapUsers("perfr", USER_COUNT));
+        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+        await().atMost(10, java.util.concurrent.TimeUnit.MINUTES)
+            .until(() -> counter.get() >= USER_COUNT);
+
+        // The reconcile endpoint needs the SCIM provider component id.
+        var scimComponentId = r.realm().components()
+            .query(null, "org.keycloak.storage.UserStorageProvider")
+            .stream()
+            .filter(c -> "scim".equals(c.getProviderId()))
+            .findFirst().orElseThrow().getId();
+
+        var notes = new LinkedHashMap<String, String>();
+        notes.put("seedCount", String.valueOf(USER_COUNT));
+        notes.put("scimSinkLatency", "0ms");
+
+        var sample = report.timedWithNotes(
+            "reconcilerDeletion",
+            "all-stale-N-users",
+            USER_COUNT,
+            notes,
+            () -> {
+                try {
+                    var resp = postReconcile(r.name(), scimComponentId, 0);
+                    if (resp.statusCode() != 200) {
+                        throw new RuntimeException("reconcile failed: status " + resp.statusCode()
+                            + " body " + resp.body());
+                    }
+                    notes.put("response", resp.body());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+                return null;
+            }
+        );
+
+        System.out.println("[perf] reconcilerDeletion baseline: "
+            + USER_COUNT + " users in " + sample.duration().toMillis()
+            + " ms (" + String.format("%.1f", sample.itemsPerSecond()) + " deletes/sec)");
+    }
+
+    /**
      * Lazy-import N users one at a time via admin REST search-by-username.
      * Compares against triggerFullSync to surface whether bulk-mode has any
      * advantage today (it largely doesn't, since each user still goes
