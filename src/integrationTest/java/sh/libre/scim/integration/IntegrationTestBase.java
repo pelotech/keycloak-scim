@@ -10,6 +10,7 @@ import org.keycloak.admin.client.Keycloak;
 import org.keycloak.admin.client.resource.RealmResource;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.representations.idm.ComponentRepresentation;
+import org.keycloak.representations.idm.GroupRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
 import org.testcontainers.Testcontainers;
@@ -315,12 +316,67 @@ abstract class IntegrationTestBase {
             .willReturn(aResponse().withStatus(204)));
     }
 
+    protected void stubScimGroupCreateOk() {
+        // GroupAdapter.apply(Group) calls .get() on id and displayName.
+        // The id (used as our external-id in the mapping table) must fit
+        // the VARCHAR(36) column.
+        wireMock.stubFor(post(urlPathEqualTo("/Groups"))
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "%s",
+                      "displayName": "placeholder",
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+                    }""".formatted(UUID.randomUUID()))));
+    }
+
+    protected void stubScimGroupUpdateOk() {
+        wireMock.stubFor(put(urlMatching("/Groups/.*"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "ext-updated",
+                      "displayName": "placeholder",
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+                    }""")));
+    }
+
+    protected void stubScimGroupDeleteOk() {
+        wireMock.stubFor(delete(urlPathMatching("/Groups/.*"))
+            .willReturn(aResponse().withStatus(204)));
+    }
+
     /** Polls until WireMock has seen at least one POST to /Users with the given userName. */
     protected void awaitUserPostFor(String userName) {
         await().atMost(20, SECONDS).untilAsserted(() ->
             wireMock.verify(postRequestedFor(urlPathEqualTo("/Users"))
                 .withRequestBody(matchingJsonPath("$.userName", equalTo(userName))))
         );
+    }
+
+    /** Polls until WireMock has seen at least one POST to /Groups with the given displayName. */
+    protected void awaitGroupPostFor(String displayName) {
+        await().atMost(20, SECONDS).untilAsserted(() ->
+            wireMock.verify(postRequestedFor(urlPathEqualTo("/Groups"))
+                .withRequestBody(matchingJsonPath("$.displayName", equalTo(displayName))))
+        );
+    }
+
+    protected String createGroup(RealmResource realm, String name) {
+        var rep = new GroupRepresentation();
+        rep.setName(name);
+        try (Response resp = realm.groups().add(rep)) {
+            if (resp.getStatus() >= 400) {
+                throw new IllegalStateException("admin group create for " + name
+                    + " failed: " + resp.getStatus());
+            }
+            String path = resp.getLocation().getPath();
+            return path.substring(path.lastIndexOf('/') + 1);
+        }
     }
 
     // ---------- LDAP manipulation ----------
