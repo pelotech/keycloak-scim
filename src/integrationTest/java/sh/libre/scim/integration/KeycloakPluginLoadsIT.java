@@ -45,7 +45,7 @@ class KeycloakPluginLoadsIT {
 
     @Test
     void scimStorageProviderFactoryIsRegistered() {
-        var admin = keycloak.getKeycloakAdminClient();
+        var admin = AdminClients.forContainer(keycloak);
         ServerInfoRepresentation info = admin.serverInfo().getInfo();
 
         var userStorageProviders = info.getComponentTypes()
@@ -59,7 +59,7 @@ class KeycloakPluginLoadsIT {
 
     @Test
     void scimLdapStorageMapperFactoryIsRegistered() {
-        var admin = keycloak.getKeycloakAdminClient();
+        var admin = AdminClients.forContainer(keycloak);
         ServerInfoRepresentation info = admin.serverInfo().getInfo();
 
         var ldapMappers = info.getComponentTypes()

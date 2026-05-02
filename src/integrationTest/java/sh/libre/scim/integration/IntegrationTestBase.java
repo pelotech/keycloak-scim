@@ -117,7 +117,7 @@ public abstract class IntegrationTestBase {
         Testcontainers.exposeHostPorts(wireMock.port());
         openldap.start();
         keycloak.start();
-        admin = keycloak.getKeycloakAdminClient();
+        admin = AdminClients.forContainer(keycloak);
     }
 
     @AfterAll

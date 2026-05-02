@@ -80,6 +80,7 @@ dependencies {
     testImplementation(libs.mockito.junit.jupiter)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
+    add(integrationTest.implementationConfigurationName, libs.keycloak.admin.client)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.core)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.junit)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.keycloak)
