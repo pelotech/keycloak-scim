@@ -13,7 +13,8 @@ import jakarta.persistence.Table;
 @Table(name = "SCIM_RESOURCE")
 @NamedQueries({
                 @NamedQuery(name = "findById", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and id = :id"),
-                @NamedQuery(name = "findByExternalId", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id")})
+                @NamedQuery(name = "findByExternalId", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id"),
+                @NamedQuery(name = "findByComponentAndType", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type")})
 public class ScimResource {
         @Id
         @Column(name = "ID", nullable = false)
