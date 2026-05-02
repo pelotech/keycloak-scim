@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "sh.libre.scim"
-version = "1.0-SNAPSHOT"
+version = "0.0.0" // x-release-please-version
 description = "keycloak-scim"
 
 java {
@@ -103,4 +103,26 @@ tasks.register<Test>("integrationTest") {
 
 tasks.check {
     dependsOn("integrationTest")
+}
+
+// Reproducible archives: identical inputs produce identical outputs (same
+// JAR sha256 across builds). Drops file mtimes inside archives and pins
+// entry order. Trade-off is purely cosmetic (mtimes inside the JAR no
+// longer reflect "when this was built"); for an artifact pinned by digest
+// in production, that's a feature, not a loss.
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+// Stages the shaded JAR under build/docker/ with a stable, version-less
+// filename. Operators reference the version via the OCI image tag — no
+// need to repeat it in the path inside the image.
+tasks.register<Copy>("prepareDockerContext") {
+    description = "Stages the shaded JAR for Docker image build."
+    group = "distribution"
+    dependsOn(tasks.named("shadowJar"))
+    from(tasks.named<Jar>("shadowJar"))
+    rename { "keycloak-scim.jar" }
+    into(layout.buildDirectory.dir("docker"))
 }

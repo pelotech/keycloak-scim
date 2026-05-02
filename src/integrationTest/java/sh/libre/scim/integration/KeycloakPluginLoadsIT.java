@@ -28,7 +28,7 @@ class KeycloakPluginLoadsIT {
     private static final File PLUGIN_JAR = new File(
         System.getProperty(
             "keycloak.plugin.jar",
-            "build/libs/keycloak-scim-1.0-SNAPSHOT-all.jar"
+            "build/docker/keycloak-scim.jar"
         )
     );
 
