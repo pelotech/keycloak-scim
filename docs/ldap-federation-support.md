@@ -37,25 +37,19 @@ LDAP or Keycloak directly.
   delete time was redundant.
 
 **Deferred / open**
-- Scenario 4 (deletion reconciliation). **Empirically confirmed as a gap
-  on Keycloak 25.0.6** (see `ldapDeletionGapIsDocumented` in
-  `ScimPropagationFromLdapIT`): removing a user from LDAP and running
-  `triggerFullSync` does not remove the local `UserModel` and does not
-  fire an admin `USER/DELETE` event, so no SCIM DELETE reaches the sink.
-  Closing this requires either a diff-based reconciler, a custom sync
-  strategy that deletes local users missing from LDAP, or an additional
-  hook in our mapper. The test pins the current behavior and will turn
-  red when the gap is closed.
-- Admin DELETE does not propagate to SCIM. Pre-existing bug in mitodl's
-  `ScimEventListenerProvider`: the DELETE handler does
-  `getUser(event.getUserId())` which returns null for a user that has
-  already been deleted, then dereferences `user.isEmailVerified()`, NPEs,
-  and the exception is swallowed by `ScimDispatcher.runOne`. Fix is to
-  use `event.getUserId()` directly and drop the post-delete user fetch.
-  Pinned by `adminDeleteGapIsDocumented`.
+- Scenario 4 (deletion reconciliation) — **scoped solution shipped.**
+  Baseline behavior (no reconciler running) is still pinned by
+  `ldapSyncAloneDoesNotPropagateDeletion`: removing a user from LDAP +
+  `triggerFullSync` does not propagate to SCIM, because upstream
+  Keycloak [#35235](https://github.com/keycloak/keycloak/issues/35235)
+  leaves the local `UserModel` in place and no admin `USER/DELETE`
+  event fires. The plugin now ships a reconciler
+  (`ReconcilerRunner` + `POST /realms/{realm}/scim-reconcile/{componentId}`)
+  that issues SCIM DELETE for mapping rows whose local user is gone or
+  whose `ldap-federation-last-seen` attribute is stale past a
+  configurable threshold. Verified end-to-end by
+  `reconcilerDeletesScimResourcesForMissingLdapUsers`.
 - Role-gating: opt-in filter to restrict SCIM propagation to a configurable subset of users.
-- Upstream acceptance: open a PR against `mitodl/keycloak-scim` to avoid
-  maintaining a fork across Keycloak version upgrades.
 
 ## Problem
 
@@ -283,13 +277,177 @@ and the new mapper attached. Then exercise:
 
 ## Open questions
 
-- **Upstream acceptance.** If we build this, is mitodl interested in taking the PR?
-  Worth asking before forking — maintaining a fork for something this central is
-  expensive across Keycloak version upgrades.
-- **Keycloak version compatibility.** `LDAPStorageMapper` has had signature changes
-  across Keycloak majors. Pin the target version range explicitly in the PR.
+- **Keycloak version compatibility.** `LDAPStorageMapper` has had
+  signature changes across Keycloak majors. The current build targets
+  Keycloak 25.0.6 minimum and is binary-compatible with 26.x. Future
+  Keycloak majors will need verification, and the test harness's
+  Testcontainers setup gives us a fast path to do that.
 - **Role-gating.** Add an opt-in filter so the mapper only propagates users that carry
   a configured realm role. Decide whether to implement in the mapper or as a follow-up.
+
+## Reconciler design (v1 shipped; extensions planned)
+
+Closes the scenario-4 gap: LDAP-federated users who disappear from
+LDAP stay in Keycloak (upstream bug
+[#35235](https://github.com/keycloak/keycloak/issues/35235)) and
+therefore stay in the external SCIM sink. The reconciler periodically
+issues SCIM DELETEs for mappings whose federation-backed user hasn't
+been observed from LDAP in a configured window.
+
+### Principles
+
+- **Scope is outbound SCIM only.** We do not delete the local
+  `UserModel`; that's Keycloak's responsibility, tracked in #35235.
+  When upstream fixes it, admin `USER/DELETE` events fire and our
+  existing event-listener path propagates the delete — no change
+  required to the reconciler.
+- **Opt-in, default off.** Operators on affected Keycloak versions
+  enable it explicitly; on versions where upstream has fixed the bug,
+  leaving it off (or even on, idempotently) is fine.
+- **Uses only public SPIs.** No Hibernate integrators, no private
+  subclassing. `TimerProvider` for scheduling, `session.users()` /
+  `UserModel.getFederationLink()` for data access, the existing
+  `ScimDispatcher` / `ScimClient.delete` for the outbound call.
+- **Must be idempotent with the event-listener path.** Both can fire
+  for the same delete; the net effect must be one SCIM DELETE and one
+  cleared mapping. `ScimClient.delete` already handles the "mapping
+  missing" case via `NoResultException`, so concurrent races are safe.
+
+### Liveness signal: `ldap-federation-last-seen`
+
+Every `ScimLdapStorageMapper.onImportUserFromLDAP` invocation sets the
+`ldap-federation-last-seen` user attribute to the current timestamp.
+This covers lazy imports, periodic sync, and explicit
+`triggerFullSync` / `triggerChangedUsersSync` triggers — the same
+three paths our primary mapper hook covers. Attribute name is
+federation-type-specific (not SCIM-specific) so the same signal is
+reusable by future federation integrations.
+
+Storage: user attributes are persisted via Keycloak's existing
+`USER_ATTRIBUTE` table. No plugin-side schema migration.
+
+### Decision rule (pluggable witnesses)
+
+The reconciler evaluates each federation-linked user against one or
+more witnesses, framed as independent evidence. **Delete only when all
+active witnesses agree the user is absent.** Today there is one
+witness; the design leaves room for more without restructuring.
+
+Active witnesses at v1:
+
+- **Timestamp witness:** `ldap-federation-last-seen` older than
+  `reconciler-stale-threshold-hours`. Authoritative for "stale."
+
+In addition, before witnesses are consulted, the reconciler performs
+two preconditions on each mapping row:
+
+1. `session.users().getUserById(realm, mappingId)` — if `null`, the
+   local user is gone entirely (federation dropped it, admin deleted
+   it, etc.); delete the SCIM resource without consulting witnesses.
+2. Otherwise check `user.getFederationLink()` — if `null`, the user is
+   local-only and out of scope for the LDAP reconciler; skip.
+
+The timestamp witness only applies to users that still exist locally
+and still have a federation link but haven't been observed recently.
+
+Planned witnesses (future, not v1):
+
+- **Bloom-filter witness:** during sync, every
+  `onImportUserFromLDAP` call adds the username to an in-progress
+  Bloom filter scoped to the LDAP federation component. When the
+  reconciler considers a candidate, if the filter is fresh (its
+  `built_at` is within 2× the federation's sync period) and
+  `filter.mightContain(username)` is `false`, the witness votes
+  "absent." If the filter is stale, the witness abstains and the
+  decision falls back to timestamps alone (degrades gracefully).
+  Catches a narrow class of bug — silent timestamp-write failures
+  where the threshold buffer doesn't help — at modest cost
+  (~1–2 bytes/user; one `put` per user per sync).
+
+Why this shape: it gives a clear extension point if we observe false
+positives in production, without making the v1 implementation more
+complex than it needs to be. Retrofitting the filter later means
+adding a witness impl and including it in the AND, not restructuring
+the reconciler.
+
+### Config (shipped on the SCIM provider component)
+
+- `reconciler-enabled` (bool, default `false`)
+- `reconciler-interval-seconds` (string, default `"86400"` — 24h)
+- `reconciler-stale-threshold-seconds` (string, default `"172800"` — 48h)
+
+Values in seconds to match Keycloak's own federation-sync config
+convention (e.g. `fullSyncPeriod`). The endpoint also accepts a
+`thresholdHours` query param for operator-forced passes.
+
+Config validation at component save time (shipped, in
+`ReconcilerConfigValidator`):
+
+- When `reconciler-enabled=false`, no validation runs (operator hasn't
+  opted in).
+- Both `reconciler-interval-seconds` and
+  `reconciler-stale-threshold-seconds` must be positive.
+- `reconciler-stale-threshold-seconds` must be strictly greater than
+  `reconciler-interval-seconds`.
+- For every LDAP federation in the realm with `fullSyncPeriod > 0`,
+  `reconciler-stale-threshold-seconds` must be strictly greater than
+  that federation's `fullSyncPeriod` — otherwise the reconciler would
+  delete users the federation simply hasn't had time to re-observe.
+  Federations with periodic sync disabled (`fullSyncPeriod <= 0`) are
+  skipped from this check; operators who disable periodic sync are
+  accepting that the reconciler operates on lazy-import-only liveness
+  data.
+
+Violations throw `ComponentValidationException` at save time, so the
+admin console / REST surfaces the error and the bad config never
+reaches the timer.
+
+### Manual trigger (shipped)
+
+A convenience endpoint via `RealmResourceProviderFactory`:
+`POST /realms/{realm}/scim-reconcile/{componentId}` forces an
+immediate reconciliation pass for the given SCIM provider, without
+waiting for the timer. Optional `thresholdHours` query param overrides
+the default for a single call (useful for operator-forced cleanups).
+Returns `{"deleted": N}`.
+
+### Scheduled trigger (shipped)
+
+`ScimStorageProviderFactory` schedules a `TimerProvider` task per SCIM
+component when `reconciler-enabled=true`. Entry points:
+- `onCreate` fires when a component is added to a realm via the admin
+  console / REST, so operators who configure a new SCIM provider get
+  their timer scheduled without a restart.
+- `onUpdate` reschedules on config changes (interval, threshold,
+  enabled flag flipping).
+- `preRemove` cancels the timer when the component is deleted.
+- `postInit` does a boot-time scan so existing components get their
+  timers back after a Keycloak restart.
+
+The scheduled task runs in its own `KeycloakSession` via
+`KeycloakModelUtils.runJobInTransaction`. Because `ScimClient.delete`
+is idempotent (SCIM DELETE on a missing mapping is a no-op), clustered
+deployments where every Keycloak node schedules its own timer are safe
+— just slightly wasteful. Config knob to deduplicate cluster-wide is
+a potential follow-up.
+
+### If upstream Keycloak ever fixes #35235
+
+The pattern this reconciler implements (timestamp-based liveness +
+threshold) maps cleanly to the `TODO` in Keycloak's own
+`LDAPStorageProviderFactory.sync`: "*Remove all existing keycloak
+users, which have federation links, but are not in LDAP. Perhaps
+don't check users, which were just added or updated during this
+sync?*" — the parenthetical is exactly the threshold logic.
+
+If Keycloak eventually adopts this pattern (e.g. a
+`FEDERATION_LAST_SEEN_AT` column on `USER_ENTITY` plus a scheduled
+task that deletes local users past a configured threshold), the
+plugin-side reconciler self-deactivates: Keycloak's task fires admin
+`USER/DELETE` events, our existing event listener catches them,
+mapping rows get cleared via the `delete()` path, and nothing remains
+for our reconciler to find on its next tick. No version detection
+needed; works on every supported Keycloak release.
 
 ## References
 
