@@ -1,0 +1,36 @@
+name: release-please
+
+# Runs on every push to main. release-please-action keeps a single open
+# "release PR" that accumulates conventional commits since the last
+# release; merging that PR creates a tag (e.g. v1.0.0) and a GitHub
+# Release. The release.yml workflow then fires on the v* tag push to
+# build, sign, and publish the OCI image.
+#
+# Token note: GITHUB_TOKEN works, but tags it pushes will NOT trigger
+# downstream workflows (GitHub's actions-cannot-recurse rule). For the
+# release.yml OCI build to fire automatically when a release-please PR
+# merges, set a Personal Access Token (or GitHub App token) with
+# 'contents: write' + 'pull-requests: write' as a repository secret
+# named RELEASE_PLEASE_TOKEN. The expression below falls back to
+# GITHUB_TOKEN if the secret isn't set; in that case, after merging a
+# release PR you'll need to manually re-push the tag (or trigger
+# release.yml via workflow_dispatch) to publish the OCI image.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
