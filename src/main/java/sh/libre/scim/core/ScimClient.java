@@ -9,6 +9,7 @@ import jakarta.ws.rs.ProcessingException;
 
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
+import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.http.BasicAuth;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
@@ -67,7 +68,18 @@ public class ScimClient {
         RetryConfig retryConfig = RetryConfig.custom()
             .maxAttempts(10)
             .intervalFunction(IntervalFunction.ofExponentialBackoff())
-            .retryExceptions(ProcessingException.class)
+            // Retry on both JAX-RS-level network errors (ProcessingException)
+            // and the SCIM SDK's own network-error wrapper (IORuntimeException
+            // — what Captain Goldfish throws when Apache HttpClient surfaces
+            // SocketException, NoHttpResponseException, etc.). Without
+            // IORuntimeException here, the entire retry policy is effectively
+            // dead code for this client stack — every real-world transient
+            // failure surfaces as IORuntimeException and bypasses retry.
+            //
+            // Note: HTTP error responses (5xx) do NOT throw; they return a
+            // ServerResponse with isSuccess()=false. They are not currently
+            // retried. See ScimResilienceIT#serverErrorIsNotRetriedGap.
+            .retryExceptions(ProcessingException.class, IORuntimeException.class)
             .build();
 
         registry = RetryRegistry.of(retryConfig);
@@ -89,6 +101,12 @@ public class ScimClient {
         .socketTimeout(30)
         .expectedHttpResponseHeaders(expectedResponseHeaders)
         .hostnameVerifier((s, sslSession) -> true)
+        // Override the SDK's hardcoded "no TCP connection reuse" + tiny
+        // default pool. See KeepAliveConfigManipulator's javadoc for the
+        // background — without this, every SCIM call pays full TCP
+        // handshake + teardown cost (~43 ms on localhost in our perf
+        // measurements).
+        .configManipulator(new KeepAliveConfigManipulator())
         .build();
     }
 
@@ -123,16 +141,26 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(Class<A> aClass,
             M kcModel) {
+        long t0 = System.nanoTime();
         var adapter = getAdapter(aClass);
         adapter.apply(kcModel);
         if (adapter.skip) {
             return;
         }
+        long t1 = System.nanoTime();
+        ScimClientMetrics.APPLY_MODEL_NANOS.add(t1 - t0);
         // If mapping exist then it was created by import so skip.
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
-        var retry = registry.retry("create-" + adapter.getId());
+        long t2 = System.nanoTime();
+        ScimClientMetrics.QUERY_NANOS.add(t2 - t1);
+        // Fixed retry name (was "create-" + adapter.getId()). With ScimClient
+        // instances now cached across many calls in ScimDispatcher, per-id
+        // names would let the RetryRegistry accumulate Retry instances
+        // unboundedly. Operation-name granularity is the right scope —
+        // resilience4j's per-Retry state isn't per-resource anyway.
+        var retry = registry.retry("create");
 
         ServerResponse<S> response = retry.executeSupplier(() -> {
             try {
@@ -144,6 +172,8 @@ public class ScimClient {
                 throw new RuntimeException(e);
             }
         });
+        long t3 = System.nanoTime();
+        ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
 
         if (!response.isSuccess()){
             LOGGER.warn(response.getResponseBody());
@@ -151,7 +181,12 @@ public class ScimClient {
         }
 
         adapter.apply(response.getResource());
+        long t4 = System.nanoTime();
+        ScimClientMetrics.APPLY_RESPONSE_NANOS.add(t4 - t3);
         adapter.saveMapping();
+        long t5 = System.nanoTime();
+        ScimClientMetrics.SAVE_MAPPING_NANOS.add(t5 - t4);
+        ScimClientMetrics.CREATE_COUNT.increment();
     };
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(Class<A> aClass,
@@ -165,7 +200,7 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
-            var retry = registry.retry("replace-" + adapter.getId());
+            var retry = registry.retry("replace");
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {
                     LOGGER.info(adapter.getType());
@@ -232,7 +267,7 @@ public class ScimClient {
             var resource = adapter.query("findById", adapter.getId()).getSingleResult();
             adapter.apply(resource);
 
-            var retry = registry.retry("delete-" + id);
+            var retry = registry.retry("delete");
 
             ServerResponse<S> response = retry.executeSupplier(() -> {
                 try {

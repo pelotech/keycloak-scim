@@ -1,5 +1,6 @@
 package sh.libre.scim.reconcile;
 
+import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -10,6 +11,7 @@ import org.keycloak.services.resource.RealmResourceProvider;
 
 import java.time.Duration;
 
+import sh.libre.scim.core.ScimClientMetrics;
 import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 /**
@@ -58,6 +60,27 @@ public class ScimReconcileResourceProvider implements RealmResourceProvider {
         int deleted = new ReconcilerRunner(session, component, threshold).run();
 
         return Response.ok("{\"deleted\":" + deleted + "}", MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * Diagnostic endpoint: returns a plain-text summary of {@link ScimClientMetrics}
+     * counters (per-phase timing breakdown for ScimClient.create). Used by the
+     * perf test harness; safe to call in production.
+     *
+     * <p>Route: {@code GET /realms/{realm}/scim-reconcile/metrics}
+     */
+    @GET
+    @Path("metrics")
+    public Response metrics() {
+        return Response.ok(ScimClientMetrics.summary(), MediaType.TEXT_PLAIN).build();
+    }
+
+    /** Resets metric counters. Used by the perf harness between scenarios. */
+    @POST
+    @Path("metrics/reset")
+    public Response resetMetrics() {
+        ScimClientMetrics.reset();
+        return Response.noContent().build();
     }
 
     @Override
