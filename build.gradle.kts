@@ -90,6 +90,12 @@ tasks.register<Test>("integrationTest") {
     // docker-java ships with a default API version (1.32) that modern Docker
     // Engines reject. Pin to a version that all currently-supported engines accept.
     systemProperty("api.version", "1.43")
+    // Each test class boots its own Keycloak + OpenLDAP + WireMock stack.
+    // Run sequentially (maxParallelForks=1) and fork a fresh JVM per class
+    // (forkEvery=1) so Testcontainers' static container fields and Ryuk
+    // shutdown hooks reset cleanly between classes.
+    maxParallelForks = 1
+    forkEvery = 1
     doFirst {
         systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
     }

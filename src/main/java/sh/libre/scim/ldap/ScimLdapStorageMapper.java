@@ -12,6 +12,7 @@ import org.keycloak.storage.ldap.mappers.LDAPStorageMapper;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import javax.naming.AuthenticationException;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 
@@ -19,6 +20,8 @@ import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
 
 public class ScimLdapStorageMapper implements LDAPStorageMapper {
+
+    public static final String LAST_SEEN_ATTRIBUTE = "ldap-federation-last-seen";
 
     private static final Logger LOGGER = Logger.getLogger(ScimLdapStorageMapper.class);
 
@@ -31,6 +34,7 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
     @Override
     public void onImportUserFromLDAP(LDAPObject ldapUser, UserModel user, RealmModel realm, boolean isCreate) {
         LOGGER.infof("onImportUserFromLDAP user=%s isCreate=%s", user.getUsername(), isCreate);
+        user.setSingleAttribute(LAST_SEEN_ATTRIBUTE, Instant.now().toString());
         if (isCreate) {
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter.class, user));
         } else {
