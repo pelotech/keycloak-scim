@@ -53,11 +53,7 @@ LDAP or Keycloak directly.
   and the exception is swallowed by `ScimDispatcher.runOne`. Fix is to
   use `event.getUserId()` directly and drop the post-delete user fetch.
   Pinned by `adminDeleteGapIsDocumented`.
-- Role-gating parity with scim-for-keycloak's `scim-managed` realm role as
-  an opt-in filter.
-- Check whether scim-for-keycloak's commercial build already hooks
-  `LDAPStorageMapper`; if so, mitodl deployments that standardize on it
-  don't need this work.
+- Role-gating: opt-in filter to restrict SCIM propagation to a configurable subset of users.
 - Upstream acceptance: open a PR against `mitodl/keycloak-scim` to avoid
   maintaining a fork across Keycloak version upgrades.
 
@@ -287,19 +283,13 @@ and the new mapper attached. Then exercise:
 
 ## Open questions
 
-- **Does scim-for-keycloak's commercial build hook `LDAPStorageMapper`?** If yes, this
-  whole doc is moot for deployments that standardize on scim-for-keycloak; the plugin
-  already does it. Ask their support: *"Does outbound SCIM fire when users are imported
-  by Keycloak's LDAP User Federation, across lazy/periodic/explicit triggers?"*
 - **Upstream acceptance.** If we build this, is mitodl interested in taking the PR?
   Worth asking before forking — maintaining a fork for something this central is
   expensive across Keycloak version upgrades.
 - **Keycloak version compatibility.** `LDAPStorageMapper` has had signature changes
   across Keycloak majors. Pin the target version range explicitly in the PR.
-- **Role-gating parity with scim-for-keycloak.** scim-for-keycloak uses a
-  `scim-managed` realm role as an opt-in filter for which users participate in SCIM.
-  If we want the same safety net in mitodl, the mapper should check for the role
-  before emitting. Decide whether to implement that here or leave it for a follow-up.
+- **Role-gating.** Add an opt-in filter so the mapper only propagates users that carry
+  a configured realm role. Decide whether to implement in the mapper or as a follow-up.
 
 ## References
 
@@ -311,6 +301,3 @@ and the new mapper attached. Then exercise:
 - [Keycloak forum: Event SPI and Users added from other sources](https://forum.keycloak.org/t/event-spi-and-users-added-from-other-sources-identity-provider-federated-provider/9433)
   — original discussion establishing that EventListenerProvider does not fire for
   federation-origin users.
-- [Captain-P-Goldfish/scim-for-keycloak issue #92](https://github.com/Captain-P-Goldfish/scim-for-keycloak/issues/92)
-  — LDAP-federated users in SCIM server responses; confirms federated users can be
-  surfaced via SCIM, just not necessarily auto-propagated outbound.
