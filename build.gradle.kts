@@ -1,3 +1,5 @@
+import java.time.Duration
+
 plugins {
     java
     alias(libs.plugins.shadow)
@@ -31,6 +33,11 @@ val integrationTest by sourceSets.creating {
     runtimeClasspath += sourceSets.main.get().output
 }
 
+val perfTest by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output + integrationTest.output
+    runtimeClasspath += sourceSets.main.get().output + integrationTest.output
+}
+
 configurations {
     testImplementation {
         extendsFrom(configurations.compileOnly.get())
@@ -40,6 +47,12 @@ configurations {
     }
     named(integrationTest.runtimeOnlyConfigurationName) {
         extendsFrom(configurations.testRuntimeOnly.get())
+    }
+    named(perfTest.implementationConfigurationName) {
+        extendsFrom(configurations.getByName(integrationTest.implementationConfigurationName))
+    }
+    named(perfTest.runtimeOnlyConfigurationName) {
+        extendsFrom(configurations.getByName(integrationTest.runtimeOnlyConfigurationName))
     }
 }
 
@@ -67,6 +80,7 @@ dependencies {
     testImplementation(libs.mockito.junit.jupiter)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
+    add(integrationTest.implementationConfigurationName, libs.keycloak.admin.client)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.core)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.junit)
     add(integrationTest.implementationConfigurationName, libs.testcontainers.keycloak)
@@ -96,8 +110,48 @@ tasks.register<Test>("integrationTest") {
     // shutdown hooks reset cleanly between classes.
     maxParallelForks = 1
     forkEvery = 1
+    // Forward the Keycloak image override (used by the CI matrix) and
+    // any other -D properties whose names we deliberately accept.
+    listOf("keycloak.image").forEach { prop ->
+        System.getProperty(prop)?.let { systemProperty(prop, it) }
+    }
     doFirst {
         systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
+    }
+}
+
+// Performance/scale tests. Deliberately NOT part of `check` — they run for
+// many minutes, allocate larger Keycloak heaps, and are intended for ad-hoc
+// invocation when measuring or re-measuring. Invoke with `./gradlew
+// performanceTest`. Reports land under build/reports/perf/.
+tasks.register<Test>("performanceTest") {
+    description = "Runs scale/perf tests against a real Keycloak + LDAP + SCIM stack."
+    group = "verification"
+    testClassesDirs = perfTest.output.classesDirs
+    classpath = perfTest.runtimeClasspath
+    dependsOn(tasks.named("shadowJar"))
+    val shadowJarTask = tasks.named<Jar>("shadowJar")
+    systemProperty("api.version", "1.43")
+    // Each perf test class spins up its own stack; sequential per-class JVMs
+    // for the same reasons as integrationTest.
+    maxParallelForks = 1
+    forkEvery = 1
+    // Generous default; individual scenarios can stretch toward this when
+    // exercising large user cohorts.
+    timeout.set(Duration.ofMinutes(30))
+    // Forward selected -D system properties from the gradle invocation to
+    // the test JVM. Without this, `-Dperf.userCount=10000` would be set on
+    // the gradle daemon but invisible to Integer.getInteger() inside tests.
+    listOf("perf.userCount", "perf.scimSinkLatencyMs").forEach { prop ->
+        System.getProperty(prop)?.let { systemProperty(prop, it) }
+    }
+    // Always re-run perf tests (their inputs are wall-clock-sensitive,
+    // not source-driven, and gradle's UP-TO-DATE check would otherwise
+    // skip a re-measurement).
+    outputs.upToDateWhen { false }
+    doFirst {
+        systemProperty("keycloak.plugin.jar", shadowJarTask.get().archiveFile.get().asFile.absolutePath)
+        systemProperty("perf.report.dir", layout.buildDirectory.dir("reports/perf").get().asFile.absolutePath)
     }
 }
 
