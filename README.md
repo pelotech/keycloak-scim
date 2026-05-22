@@ -147,9 +147,7 @@ SCIM provider component in the realm.
 - [`docs/configuration.md`](docs/configuration.md) — every
   config knob, attribute, endpoint, and JVM property.
 - [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
-  — design doc for LDAP federation propagation, the reconciler,
-  and a comparison with `an alternative SCIM plugin`'s alternative
-  architecture.
+  — design doc for LDAP federation propagation and the reconciler.
 - [`docs/performance.md`](docs/performance.md) — scale measurements,
   bottleneck analysis, async dispatch design.
 - [`docs/releasing.md`](docs/releasing.md) — release runbook
