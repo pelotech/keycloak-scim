@@ -51,4 +51,29 @@ class OAuthClientCredentialsTokenSourceTest {
         assertThat(src.currentAuthorizationHeader()).isEqualTo("Bearer eyJ.second");
         verify(minter, times(2)).mint(cfg);
     }
+
+    @Test
+    void concurrentMisses_singleMint() throws Exception {
+        var latch = new java.util.concurrent.CountDownLatch(1);
+        when(minter.mint(cfg)).thenAnswer(inv -> {
+            latch.await();
+            return new OAuthClientCredentialsTokenSource.MintResult("Bearer eyJ.shared", 300);
+        });
+
+        int threads = 16;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var done = new java.util.concurrent.CountDownLatch(threads);
+        for (int i = 0; i < threads; i++) {
+            pool.submit(() -> {
+                new OAuthClientCredentialsTokenSource("comp-1", cfg, minter).currentAuthorizationHeader();
+                done.countDown();
+            });
+        }
+        Thread.sleep(50);
+        latch.countDown();
+        assertThat(done.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+        pool.shutdown();
+
+        verify(minter, times(1)).mint(cfg);
+    }
 }
