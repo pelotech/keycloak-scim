@@ -75,6 +75,7 @@ dependencies {
     implementation(libs.scim.sdk.client)
     implementation(libs.commons.lang3)
 
+    testImplementation(libs.assertj)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
