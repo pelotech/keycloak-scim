@@ -27,4 +27,12 @@ class OAuthClientCredentialsTokenSourceTest {
         assertThat(src.currentAuthorizationHeader()).isEqualTo("Bearer eyJ.first");
         verify(minter, times(1)).mint(cfg);
     }
+
+    @Test
+    void secondCallBeforeRefreshAt_returnsCached() {
+        var src = new OAuthClientCredentialsTokenSource("comp-1", cfg, minter);
+        src.currentAuthorizationHeader();
+        src.currentAuthorizationHeader();
+        verify(minter, times(1)).mint(cfg);
+    }
 }
