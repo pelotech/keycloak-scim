@@ -21,6 +21,7 @@ import org.keycloak.storage.user.ImportSynchronization;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.GroupAdapter;
+import sh.libre.scim.core.OAuthClientCredentialsTokenSource;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
 import sh.libre.scim.reconcile.ReconcilerConfigValidator;
@@ -202,12 +203,14 @@ public class ScimStorageProviderFactory
     @Override
     public void onUpdate(KeycloakSession session, org.keycloak.models.RealmModel realm,
                          ComponentModel oldModel, ComponentModel newModel) {
+        OAuthClientCredentialsTokenSource.invalidate(newModel.getId());
         ReconcilerScheduler.scheduleIfEnabled(
             session.getKeycloakSessionFactory(), session, realm.getId(), newModel);
     }
 
     @Override
     public void preRemove(KeycloakSession session, org.keycloak.models.RealmModel realm, ComponentModel model) {
+        OAuthClientCredentialsTokenSource.invalidate(model.getId());
         ReconcilerScheduler.cancel(session, model);
     }
 
