@@ -76,4 +76,17 @@ class OAuthClientCredentialsTokenSourceTest {
 
         verify(minter, times(1)).mint(cfg);
     }
+
+    @Test
+    void invalidate_dropsEntry() {
+        when(minter.mint(cfg))
+            .thenReturn(new OAuthClientCredentialsTokenSource.MintResult("Bearer eyJ.first", 300))
+            .thenReturn(new OAuthClientCredentialsTokenSource.MintResult("Bearer eyJ.second", 300));
+
+        var src = new OAuthClientCredentialsTokenSource("comp-1", cfg, minter);
+        assertThat(src.currentAuthorizationHeader()).isEqualTo("Bearer eyJ.first");
+        src.invalidate();
+        assertThat(src.currentAuthorizationHeader()).isEqualTo("Bearer eyJ.second");
+        verify(minter, times(2)).mint(cfg);
+    }
 }
