@@ -1,5 +1,6 @@
 package sh.libre.scim.core;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -7,6 +8,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.github.tomakehurst.wiremock.WireMockServer;
+import com.github.tomakehurst.wiremock.core.WireMockConfiguration;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -128,5 +131,26 @@ class OAuthClientCredentialsTokenSourceTest {
         var parsed = OAuthClientCredentialsTokenSource.parseTokenResponse(body);
         assertThat(parsed.hadExpiresIn()).isFalse();
         assertThat(parsed.result().expiresInSeconds()).isEqualTo(60L);
+    }
+
+    @Test
+    void httpNonSuccess_throws() {
+        var wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            wm.stubFor(post("/token")
+                .willReturn(aResponse()
+                    .withStatus(401)
+                    .withBody("invalid client credentials: extra context that is long enough to demonstrate truncation should it exceed the limit set in the minter")));
+
+            var minter = new OAuthClientCredentialsTokenSource.HttpTokenMinter("comp-1");
+            var c = new OAuthConfig(wm.baseUrl() + "/token", "client", "secret", null);
+
+            assertThatThrownBy(() -> minter.mint(c))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("401");
+        } finally {
+            wm.stop();
+        }
     }
 }

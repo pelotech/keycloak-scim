@@ -79,6 +79,7 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
+    testImplementation(libs.wiremock)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     add(integrationTest.implementationConfigurationName, libs.keycloak.admin.client)

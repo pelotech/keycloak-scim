@@ -2,11 +2,19 @@ package sh.libre.scim.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.util.EntityUtils;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.jboss.logging.Logger;
 
 public final class OAuthClientCredentialsTokenSource {
@@ -120,12 +128,69 @@ public final class OAuthClientCredentialsTokenSource {
     /**
      * Emits a WARN log at most once per componentId when the token endpoint omits
      * {@code expires_in}. Subsequent requests for the same componentId are silent.
-     * Called by {@code HttpTokenMinter} (Task 8) after invoking {@link #parseTokenResponse}.
+     * Called by {@code HttpTokenMinter} after invoking {@link #parseTokenResponse}.
      */
-    void maybeWarnNoExpiresIn(boolean hadExpiresIn) {
+    static void maybeWarnNoExpiresIn(String componentId, boolean hadExpiresIn) {
         if (!hadExpiresIn && WARNED_NO_EXPIRES_IN.add(componentId)) {
             LOG.warnf("OAuth token endpoint did not return expires_in for component %s; defaulting to 60s",
                 componentId);
+        }
+    }
+
+    /** Produces OAuth {@code client_credentials} tokens via HTTP. */
+    public static final class HttpTokenMinter implements TokenMinter {
+        private final String componentId;
+
+        public HttpTokenMinter(String componentId) {
+            this.componentId = componentId;
+        }
+
+        @Override
+        public MintResult mint(OAuthConfig cfg) {
+            try (CloseableHttpClient client = HttpClients.createDefault()) {
+                HttpPost post = new HttpPost(cfg.tokenEndpoint());
+                post.setHeader("Authorization", basicAuthHeader(cfg.clientId(), cfg.clientSecret()));
+                post.setHeader("Content-Type", "application/x-www-form-urlencoded");
+                post.setHeader("Accept", "application/json");
+                post.setEntity(new StringEntity(formBody(cfg.scope()), StandardCharsets.UTF_8));
+
+                try (CloseableHttpResponse resp = client.execute(post)) {
+                    int status = resp.getStatusLine().getStatusCode();
+                    String body = EntityUtils.toString(resp.getEntity(), StandardCharsets.UTF_8);
+                    if (status < 200 || status >= 300) {
+                        throw new RuntimeException(
+                            "token endpoint returned " + status + ": " + truncate(body, 200));
+                    }
+                    ParsedToken parsed = parseTokenResponse(body);
+                    maybeWarnNoExpiresIn(componentId, parsed.hadExpiresIn());
+                    return parsed.result();
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("token endpoint request failed: " + e.getMessage(), e);
+            }
+        }
+
+        static String basicAuthHeader(String clientId, String clientSecret) {
+            // URL-encode per RFC 6749 §2.3.1 — Java's URLEncoder uses
+            // application/x-www-form-urlencoded (space → "+"), which is what the RFC requires.
+            String encodedId = java.net.URLEncoder.encode(clientId, StandardCharsets.UTF_8);
+            String encodedSecret = java.net.URLEncoder.encode(clientSecret, StandardCharsets.UTF_8);
+            String creds = encodedId + ":" + encodedSecret;
+            return "Basic " + java.util.Base64.getEncoder()
+                .encodeToString(creds.getBytes(StandardCharsets.UTF_8));
+        }
+
+        static String formBody(String scope) {
+            if (scope == null || scope.isBlank()) {
+                return "grant_type=client_credentials";
+            }
+            return "grant_type=client_credentials&scope="
+                + java.net.URLEncoder.encode(scope, StandardCharsets.UTF_8);
+        }
+
+        private static String truncate(String s, int max) {
+            if (s == null) return "";
+            return s.length() <= max ? s : s.substring(0, max) + "…";
         }
     }
 
