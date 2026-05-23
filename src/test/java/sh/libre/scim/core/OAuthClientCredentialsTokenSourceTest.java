@@ -200,4 +200,27 @@ class OAuthClientCredentialsTokenSourceTest {
             wm.stop();
         }
     }
+
+    @Test
+    void clientCredentialsUrlEncoded() {
+        var wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            wm.stubFor(post("/token").willReturn(okJson(
+                "{\"access_token\":\"t\",\"expires_in\":300}")));
+
+            var minter = new OAuthClientCredentialsTokenSource.HttpTokenMinter("comp-1");
+            // client_id with space, client_secret with '/' and '+' — special chars per RFC 6749 §2.3.1
+            minter.mint(new OAuthConfig(wm.baseUrl() + "/token", "id with space", "sec/with+special", null));
+
+            // URLEncoder.encode("id with space", UTF-8) → "id+with+space"
+            // URLEncoder.encode("sec/with+special", UTF-8) → "sec%2Fwith%2Bspecial"
+            String expected = "Basic " + java.util.Base64.getEncoder().encodeToString(
+                "id+with+space:sec%2Fwith%2Bspecial".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            wm.verify(postRequestedFor(urlEqualTo("/token"))
+                .withHeader("Authorization", equalTo(expected)));
+        } finally {
+            wm.stop();
+        }
+    }
 }
