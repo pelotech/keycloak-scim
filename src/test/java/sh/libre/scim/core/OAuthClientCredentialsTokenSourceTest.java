@@ -95,9 +95,18 @@ class OAuthClientCredentialsTokenSourceTest {
     @Test
     void missingExpiresIn_defaultsTo60s() {
         String body = "{\"access_token\":\"abc\",\"token_type\":\"Bearer\"}";
-        var r = OAuthClientCredentialsTokenSource.parseTokenResponse(body).result();
-        assertThat(r.expiresInSeconds()).isEqualTo(60L);
-        assertThat(r.authorizationHeader()).isEqualTo("Bearer abc");
+        var parsed = OAuthClientCredentialsTokenSource.parseTokenResponse(body);
+        assertThat(parsed.hadExpiresIn()).isFalse();
+        assertThat(parsed.result().expiresInSeconds()).isEqualTo(60L);
+        assertThat(parsed.result().authorizationHeader()).isEqualTo("Bearer abc");
+    }
+
+    @Test
+    void presentExpiresIn_hadExpiresInTrue() {
+        String body = "{\"access_token\":\"tok\",\"expires_in\":300}";
+        var parsed = OAuthClientCredentialsTokenSource.parseTokenResponse(body);
+        assertThat(parsed.hadExpiresIn()).isTrue();
+        assertThat(parsed.result().expiresInSeconds()).isEqualTo(300L);
     }
 
     @Test
