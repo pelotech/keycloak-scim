@@ -23,6 +23,7 @@ public final class OAuthClientCredentialsTokenSource {
     record ParsedToken(MintResult result, boolean hadExpiresIn) {}
 
     private static final int EXPIRY_SKEW_SECONDS = 30;
+    private static final ObjectMapper TOKEN_RESPONSE_MAPPER = new ObjectMapper();
 
     // JVM-lifetime cache keyed by componentId. Entries are removed only via
     // invalidate() — no eviction on component delete is hooked up at this
@@ -101,7 +102,7 @@ public final class OAuthClientCredentialsTokenSource {
     static ParsedToken parseTokenResponse(String body) {
         JsonNode root;
         try {
-            root = new ObjectMapper().readTree(body);
+            root = TOKEN_RESPONSE_MAPPER.readTree(body);
         } catch (Exception e) {
             throw new IllegalStateException("token response not valid JSON", e);
         }
@@ -110,8 +111,9 @@ public final class OAuthClientCredentialsTokenSource {
             throw new IllegalStateException("token response missing access_token");
         }
         String tokenType = root.hasNonNull("token_type") ? root.get("token_type").asText() : "Bearer";
-        boolean hadExpiresIn = root.hasNonNull("expires_in");
-        long expiresIn = hadExpiresIn ? root.get("expires_in").asLong() : 60L;
+        JsonNode expiresInNode = root.get("expires_in");
+        boolean hadExpiresIn = expiresInNode != null && !expiresInNode.isNull() && expiresInNode.canConvertToLong();
+        long expiresIn = hadExpiresIn ? expiresInNode.asLong() : 60L;
         return new ParsedToken(new MintResult(tokenType + " " + at.asText(), expiresIn), hadExpiresIn);
     }
 

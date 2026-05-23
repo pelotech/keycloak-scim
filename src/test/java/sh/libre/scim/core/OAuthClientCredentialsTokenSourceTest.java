@@ -121,4 +121,12 @@ class OAuthClientCredentialsTokenSourceTest {
         assertThat(src.currentAuthorizationHeader()).isEqualTo("Bearer eyJ.second");
         verify(minter, times(2)).mint(cfg);
     }
+
+    @Test
+    void nonNumericExpiresIn_treatedAsMissing() {
+        String body = "{\"access_token\":\"abc\",\"token_type\":\"Bearer\",\"expires_in\":\"not-a-number\"}";
+        var parsed = OAuthClientCredentialsTokenSource.parseTokenResponse(body);
+        assertThat(parsed.hadExpiresIn()).isFalse();
+        assertThat(parsed.result().expiresInSeconds()).isEqualTo(60L);
+    }
 }
