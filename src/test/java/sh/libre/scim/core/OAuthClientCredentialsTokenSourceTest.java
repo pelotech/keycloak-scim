@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -81,6 +82,22 @@ class OAuthClientCredentialsTokenSourceTest {
         pool.shutdown();
 
         verify(minter, times(1)).mint(cfg);
+    }
+
+    @Test
+    void tokenResponseMissingAccessToken_throws() {
+        String body = "{\"token_type\":\"Bearer\",\"expires_in\":300}";
+        assertThatThrownBy(() -> OAuthClientCredentialsTokenSource.parseTokenResponse(body))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("access_token");
+    }
+
+    @Test
+    void missingExpiresIn_defaultsTo60s() {
+        String body = "{\"access_token\":\"abc\",\"token_type\":\"Bearer\"}";
+        var r = OAuthClientCredentialsTokenSource.parseTokenResponse(body).result();
+        assertThat(r.expiresInSeconds()).isEqualTo(60L);
+        assertThat(r.authorizationHeader()).isEqualTo("Bearer abc");
     }
 
     @Test
