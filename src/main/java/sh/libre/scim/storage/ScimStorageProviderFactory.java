@@ -1,5 +1,6 @@
 package sh.libre.scim.storage;
 
+import java.net.URI;
 import java.util.Date;
 import java.util.List;
 
@@ -7,6 +8,7 @@ import jakarta.ws.rs.core.MediaType;
 
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.component.ComponentValidationException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakSessionTask;
@@ -217,6 +219,33 @@ public class ScimStorageProviderFactory
             .filter(c -> "ldap".equals(c.getProviderId()))
             .toList();
         ReconcilerConfigValidator.validate(model, ldapFederations);
+
+        String authMode = model.get("auth-mode");
+        if ("CLIENT_CREDENTIALS".equals(authMode)) {
+            requireNonBlank(model, "oauth-client-id");
+            requireNonBlank(model, "oauth-client-secret");
+            String endpoint = requireNonBlank(model, "oauth-token-endpoint");
+            try {
+                URI uri = URI.create(endpoint);
+                if (uri.getScheme() == null
+                    || (!uri.getScheme().equals("http") && !uri.getScheme().equals("https"))) {
+                    throw new ComponentValidationException(
+                        "oauth-token-endpoint must be an absolute http(s) URL");
+                }
+            } catch (IllegalArgumentException e) {
+                throw new ComponentValidationException(
+                    "oauth-token-endpoint must be an absolute http(s) URL", e);
+            }
+        }
+    }
+
+    private static String requireNonBlank(ComponentModel m, String name) {
+        String v = m.get(name);
+        if (v == null || v.isBlank()) {
+            throw new ComponentValidationException(
+                name + " is required when auth-mode is CLIENT_CREDENTIALS");
+        }
+        return v;
     }
 
     @Override
