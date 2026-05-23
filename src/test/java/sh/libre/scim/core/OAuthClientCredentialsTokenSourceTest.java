@@ -160,4 +160,44 @@ class OAuthClientCredentialsTokenSourceTest {
         var r = OAuthClientCredentialsTokenSource.parseTokenResponse(body).result();
         assertThat(r.authorizationHeader()).isEqualTo("DPoP xyz");
     }
+
+    @Test
+    void scopeAppendedToBodyWhenConfigured() {
+        var wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            wm.stubFor(post("/token").willReturn(okJson(
+                "{\"access_token\":\"t\",\"token_type\":\"Bearer\",\"expires_in\":300}")));
+
+            var minter = new OAuthClientCredentialsTokenSource.HttpTokenMinter("comp-1");
+            minter.mint(new OAuthConfig(wm.baseUrl() + "/token", "id", "sec", "scim:write"));
+
+            wm.verify(postRequestedFor(urlEqualTo("/token"))
+                .withRequestBody(containing("grant_type=client_credentials"))
+                .withRequestBody(containing("scope=scim%3Awrite")));
+        } finally {
+            wm.stop();
+        }
+    }
+
+    @Test
+    void scopeOmittedWhenBlank() {
+        var wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
+        wm.start();
+        try {
+            wm.stubFor(post("/token").willReturn(okJson(
+                "{\"access_token\":\"t\",\"expires_in\":300}")));
+
+            var minter = new OAuthClientCredentialsTokenSource.HttpTokenMinter("comp-1");
+            // null scope
+            minter.mint(new OAuthConfig(wm.baseUrl() + "/token", "id", "sec", null));
+            // empty scope
+            minter.mint(new OAuthConfig(wm.baseUrl() + "/token", "id", "sec", ""));
+
+            wm.verify(2, postRequestedFor(urlEqualTo("/token"))
+                .withRequestBody(notMatching(".*scope=.*")));
+        } finally {
+            wm.stop();
+        }
+    }
 }
