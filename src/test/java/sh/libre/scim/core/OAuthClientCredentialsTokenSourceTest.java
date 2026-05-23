@@ -138,17 +138,19 @@ class OAuthClientCredentialsTokenSourceTest {
         var wm = new WireMockServer(WireMockConfiguration.options().dynamicPort());
         wm.start();
         try {
+            String longBody = "invalid_client_secret ".repeat(20); // ~440 chars
             wm.stubFor(post("/token")
                 .willReturn(aResponse()
                     .withStatus(401)
-                    .withBody("invalid client credentials: extra context that is long enough to demonstrate truncation should it exceed the limit set in the minter")));
+                    .withBody(longBody)));
 
             var minter = new OAuthClientCredentialsTokenSource.HttpTokenMinter("comp-1");
             var c = new OAuthConfig(wm.baseUrl() + "/token", "client", "secret", null);
 
             assertThatThrownBy(() -> minter.mint(c))
                 .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("401");
+                .hasMessageContaining("401")
+                .hasMessageContaining("…");  // truncation marker
         } finally {
             wm.stop();
         }

@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.util.EntityUtils;
@@ -156,13 +157,21 @@ public final class OAuthClientCredentialsTokenSource {
 
                 try (CloseableHttpResponse resp = client.execute(post)) {
                     int status = resp.getStatusLine().getStatusCode();
-                    String body = EntityUtils.toString(resp.getEntity(), StandardCharsets.UTF_8);
+                    HttpEntity entity = resp.getEntity();
+                    String body = entity == null
+                        ? ""
+                        : EntityUtils.toString(entity, StandardCharsets.UTF_8);
                     if (status < 200 || status >= 300) {
+                        String truncated = truncate(body, 200);
+                        LOG.errorf("OAuth token endpoint returned %d for component %s: %s",
+                            status, componentId, truncated);
                         throw new RuntimeException(
-                            "token endpoint returned " + status + ": " + truncate(body, 200));
+                            "token endpoint returned " + status + ": " + truncated);
                     }
                     ParsedToken parsed = parseTokenResponse(body);
                     maybeWarnNoExpiresIn(componentId, parsed.hadExpiresIn());
+                    LOG.debugf("OAuth token minted for component %s (expires_in=%ds)",
+                        componentId, parsed.result().expiresInSeconds());
                     return parsed.result();
                 }
             } catch (IOException e) {
