@@ -153,4 +153,11 @@ class OAuthClientCredentialsTokenSourceTest {
             wm.stop();
         }
     }
+
+    @Test
+    void nonDefaultTokenType_usedInHeader() {
+        String body = "{\"access_token\":\"xyz\",\"token_type\":\"DPoP\",\"expires_in\":300}";
+        var r = OAuthClientCredentialsTokenSource.parseTokenResponse(body).result();
+        assertThat(r.authorizationHeader()).isEqualTo("DPoP xyz");
+    }
 }
