@@ -40,6 +40,7 @@ public class ScimClient {
     final protected String scimApplicationBaseUrl;
     final protected Map<String, String> defaultHeaders;
     final protected Map<String, String> expectedResponseHeaders;
+    final protected OAuthClientCredentialsTokenSource tokenSource;
 
     public ScimClient(ComponentModel model, KeycloakSession session) {
         this.model = model;
@@ -49,6 +50,7 @@ public class ScimClient {
         this.defaultHeaders = new HashMap<>();
         this.expectedResponseHeaders = new HashMap<>();
 
+        OAuthClientCredentialsTokenSource ts = null;
         switch (model.get("auth-mode")) {
             case "BEARER":
                 defaultHeaders.put(HttpHeaders.AUTHORIZATION,
@@ -59,7 +61,17 @@ public class ScimClient {
                     BasicAuthentication(model.get("auth-user"),
                                         model.get("auth-pass")));
                 break;
+            case "CLIENT_CREDENTIALS": {
+                OAuthConfig oauthConfig = OAuthConfig.from(model);
+                ts = new OAuthClientCredentialsTokenSource(
+                    model.getId(),
+                    oauthConfig,
+                    new OAuthClientCredentialsTokenSource.HttpTokenMinter(model.getId()));
+                defaultHeaders.put(HttpHeaders.AUTHORIZATION, ts.currentAuthorizationHeader());
+                break;
+            }
         }
+        this.tokenSource = ts;
 
         defaultHeaders.put(HttpHeaders.CONTENT_TYPE, contentType);
 
@@ -82,6 +94,32 @@ public class ScimClient {
             .retryExceptions(ProcessingException.class, IORuntimeException.class)
             .build();
 
+        registry = RetryRegistry.of(retryConfig);
+    }
+
+    /**
+     * Package-private constructor for testing. Accepts an explicit
+     * {@link OAuthClientCredentialsTokenSource} so unit tests can inject a
+     * stub minter without making real HTTP calls.
+     */
+    ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
+        this.model = model;
+        this.contentType = model.get("content-type");
+        this.session = session;
+        this.scimApplicationBaseUrl = model.get("endpoint");
+        this.defaultHeaders = new HashMap<>();
+        this.expectedResponseHeaders = new HashMap<>();
+        this.tokenSource = tokenSource;
+        if (tokenSource != null) {
+            defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
+        }
+        defaultHeaders.put(HttpHeaders.CONTENT_TYPE, contentType);
+        scimRequestBuilder = new ScimRequestBuilder(scimApplicationBaseUrl, genScimClientConfig());
+        RetryConfig retryConfig = RetryConfig.custom()
+            .maxAttempts(10)
+            .intervalFunction(IntervalFunction.ofExponentialBackoff())
+            .retryExceptions(ProcessingException.class, IORuntimeException.class)
+            .build();
         registry = RetryRegistry.of(retryConfig);
     }
 
