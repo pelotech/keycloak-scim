@@ -98,7 +98,7 @@ public class ScimStorageProviderFactory
                 .name("oauth-token-endpoint")
                 .type(ProviderConfigProperty.STRING_TYPE)
                 .label("OAuth token endpoint")
-                .helpText("Full URL of the OAuth 2.0 token endpoint. Required when auth-mode is CLIENT_CREDENTIALS.")
+                .helpText("Full URL of the OAuth 2.0 token endpoint (e.g. https://keycloak.example.com/realms/main/protocol/openid-connect/token). Required when auth-mode is CLIENT_CREDENTIALS.")
                 .add()
                 .property()
                 .name("oauth-scope")
@@ -230,10 +230,15 @@ public class ScimStorageProviderFactory
             String endpoint = requireNonBlank(model, "oauth-token-endpoint");
             try {
                 URI uri = URI.create(endpoint);
-                if (uri.getScheme() == null
-                    || (!uri.getScheme().equals("http") && !uri.getScheme().equals("https"))) {
+                String scheme = uri.getScheme();
+                if (scheme == null
+                    || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
                     throw new ComponentValidationException(
                         "oauth-token-endpoint must be an absolute http(s) URL");
+                }
+                if (uri.getHost() == null || uri.getHost().isBlank()) {
+                    throw new ComponentValidationException(
+                        "oauth-token-endpoint must be an absolute http(s) URL with a host");
                 }
             } catch (IllegalArgumentException e) {
                 throw new ComponentValidationException(
@@ -242,13 +247,14 @@ public class ScimStorageProviderFactory
         }
     }
 
+    /** Returns the trimmed value of {@code name}, or throws ComponentValidationException if absent or blank. */
     private static String requireNonBlank(ComponentModel m, String name) {
         String v = m.get(name);
         if (v == null || v.isBlank()) {
             throw new ComponentValidationException(
                 name + " is required when auth-mode is CLIENT_CREDENTIALS");
         }
-        return v;
+        return v.trim();
     }
 
     @Override

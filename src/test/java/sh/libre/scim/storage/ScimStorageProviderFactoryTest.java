@@ -129,6 +129,44 @@ class ScimStorageProviderFactoryTest {
     }
 
     @Test
+    void clientCredentials_uppercaseScheme_accepted() {
+        var factory = new ScimStorageProviderFactory();
+        var model = componentWithAuthMode("CLIENT_CREDENTIALS", Map.of(
+            "oauth-client-id", "id",
+            "oauth-client-secret", "s",
+            "oauth-token-endpoint", "HTTPS://kc/token"));
+        assertThatCode(() ->
+                factory.validateConfiguration(mock(KeycloakSession.class), mockRealm(), model))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
+    void clientCredentials_noHost_rejected() {
+        var factory = new ScimStorageProviderFactory();
+        var model = componentWithAuthMode("CLIENT_CREDENTIALS", Map.of(
+            "oauth-client-id", "id",
+            "oauth-client-secret", "s",
+            "oauth-token-endpoint", "https:///path"));
+        assertThatThrownBy(() ->
+                factory.validateConfiguration(mock(KeycloakSession.class), mockRealm(), model))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("oauth-token-endpoint");
+    }
+
+    @Test
+    void legacyAuthMode_withJunkOauthFields_unaffected() {
+        var factory = new ScimStorageProviderFactory();
+        var model = componentWithAuthMode("BEARER", Map.of(
+            "auth-pass", "t",
+            // Junk in oauth-* fields — should be ignored because auth-mode != CLIENT_CREDENTIALS
+            "oauth-token-endpoint", "not-a-url",
+            "oauth-client-id", ""));
+        assertThatCode(() ->
+                factory.validateConfiguration(mock(KeycloakSession.class), mockRealm(), model))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
     void legacyAuthModes_unchanged() {
         var factory = new ScimStorageProviderFactory();
         var none = componentWithAuthMode("NONE", Map.of());
