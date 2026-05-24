@@ -152,6 +152,26 @@ public class ScimClient {
         return "Bearer " + token ;
     }
 
+    private void refreshAuthHeader() {
+        defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
+    }
+
+    protected <S extends ResourceNode> ServerResponse<S> sendWithAuthRefresh(
+            java.util.function.Supplier<ServerResponse<S>> op) {
+        if (tokenSource == null) {
+            return op.get();
+        }
+        refreshAuthHeader();
+        ServerResponse<S> r = op.get();
+        int status = r.getHttpStatus();
+        if (status == 401 || status == 403) {
+            tokenSource.invalidate();
+            refreshAuthHeader();
+            r = op.get();
+        }
+        return r;
+    }
+
     protected String genScimUrl(String scimEndpoint, String resourcePath) {
         return "%s/%s/%s".formatted(scimApplicationBaseUrl,
                 scimEndpoint,
