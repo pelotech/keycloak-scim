@@ -220,7 +220,7 @@ public class ScimClient {
         // resilience4j's per-Retry state isn't per-resource anyway.
         var retry = registry.retry("create");
 
-        ServerResponse<S> response = retry.executeSupplier(() -> {
+        ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
             try {
                 return scimRequestBuilder
                 .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
@@ -229,7 +229,7 @@ public class ScimClient {
             } catch (ResponseException e) {
                 throw new RuntimeException(e);
             }
-        });
+        }));
         long t3 = System.nanoTime();
         ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
 
@@ -259,7 +259,7 @@ public class ScimClient {
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
             var retry = registry.retry("replace");
-            ServerResponse<S> response = retry.executeSupplier(() -> {
+            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     LOGGER.info(adapter.getType());
                     if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
@@ -276,7 +276,7 @@ public class ScimClient {
                 } catch (ResponseException e) {
                     throw new RuntimeException(e);
                 }
-            });
+            }));
             if (!response.isSuccess()) {
                 int statusCode = response.getHttpStatus();
                 if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
@@ -327,7 +327,7 @@ public class ScimClient {
 
             var retry = registry.retry("delete");
 
-            ServerResponse<S> response = retry.executeSupplier(() -> {
+            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
                                                                 adapter.getResourceClass())
@@ -335,7 +335,7 @@ public class ScimClient {
                 } catch (ResponseException e) {
                     throw new RuntimeException(e);
                 }
-            });
+            }));
 
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
@@ -377,7 +377,18 @@ public class ScimClient {
         LOGGER.info("Import");
         try {
             var adapter = getAdapter(aClass);
-            ServerResponse<ListResponse<S>> response  = scimRequestBuilder.list(scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint(), adapter.getResourceClass()).get().sendRequest();
+            if (tokenSource != null) {
+                refreshAuthHeader();
+            }
+            ServerResponse<ListResponse<S>> response = scimRequestBuilder.list(scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint(), adapter.getResourceClass()).get().sendRequest();
+            if (tokenSource != null) {
+                int status = response.getHttpStatus();
+                if (status == 401 || status == 403) {
+                    tokenSource.invalidate();
+                    refreshAuthHeader();
+                    response = scimRequestBuilder.list(scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint(), adapter.getResourceClass()).get().sendRequest();
+                }
+            }
             ListResponse<S> resourceTypeListResponse = response.getResource();
 
             for (var resource : resourceTypeListResponse.getListedResources()) {
