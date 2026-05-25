@@ -51,6 +51,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Task 21: bulk-import workers share the token cache ({@link #cachedAcrossAsyncWorkers}).
  * <p>Task 22: token re-minted after expires_in elapses ({@link #expiryTriggersRefresh}).
  * <p>Task 23: SCIM 401 triggers cache invalidation and retry ({@link #scim401TriggersRefreshAndRetry}).
+ * <p>Task 24: token endpoint outage fails op fail-open, plugin survives ({@link #tokenEndpointDown_eventFailsButPluginSurvives}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -317,6 +318,48 @@ class ScimOidcAuthIT extends IntegrationTestBase {
 
         verifyJwtAgainstRealmJwks(jwt1);
         verifyJwtAgainstRealmJwks(jwt2);
+    }
+
+    /**
+     * Task 24: A token endpoint outage causes the operation to fail fail-open,
+     * but the plugin survives and processes subsequent events once the endpoint recovers.
+     */
+    @Test
+    void tokenEndpointDown_eventFailsButPluginSurvives() throws Exception {
+        String stubPath = "/oauth/token-down";
+        wireMock.stubFor(post(urlEqualTo(stubPath))
+            .willReturn(aResponse().withStatus(503).withBody("service unavailable")));
+        useWireMockTokenEndpoint(stubPath);
+
+        // Stub SCIM sink.
+        stubScimUserCreateOk();
+
+        // First event: token endpoint is down — mint fails, SCIM POST never happens.
+        createAdminUser(realm, "dave", "dave@test.local");
+
+        // Give async dispatch a window to attempt the token mint.
+        Thread.sleep(2000);
+
+        // No SCIM POST happened for dave.
+        wireMock.verify(0, postRequestedFor(urlPathMatching("/Users.*"))
+            .withRequestBody(matchingJsonPath("$.userName", equalTo("dave"))));
+        // But the token endpoint WAS attempted.
+        int attemptsBeforeRecovery = wireMock.findAll(
+            postRequestedFor(urlEqualTo(stubPath))).size();
+        assertThat(attemptsBeforeRecovery).isGreaterThanOrEqualTo(1);
+
+        // Bring the token endpoint back up with a valid response.
+        wireMock.stubFor(post(urlEqualTo(stubPath)).willReturn(okJson(
+            "{\"access_token\":\"eyJ.recovered\",\"token_type\":\"Bearer\",\"expires_in\":300}")));
+
+        // Next event: plugin recovers and successfully POSTs to SCIM.
+        createAdminUser(realm, "erin", "erin@test.local");
+        awaitUserPostFor("erin");
+
+        // erin's SCIM POST used the recovered bearer.
+        wireMock.verify(1, postRequestedFor(urlPathMatching("/Users.*"))
+            .withRequestBody(matchingJsonPath("$.userName", equalTo("erin")))
+            .withHeader("Authorization", equalTo("Bearer eyJ.recovered")));
     }
 
     // ---------- helpers ----------
