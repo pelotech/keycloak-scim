@@ -37,9 +37,13 @@ admin REST API (`POST /admin/realms/{realm}/components` with
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `auth-mode` | enum | `NONE` | One of `NONE`, `BASIC_AUTH`, `BEARER`. `NONE` is for local dev only — production deployments should always use `BEARER`. |
-| `auth-user` | string | — | Username for `BASIC_AUTH`. Ignored for `NONE` or `BEARER`. |
-| `auth-pass` | password | — | Password for `BASIC_AUTH`, or token for `BEARER`. Stored encrypted by Keycloak's Vault Provider where configured. |
+| `auth-mode` | enum | `NONE` | One of `NONE`, `BASIC_AUTH`, `BEARER`, `CLIENT_CREDENTIALS`. `NONE` is for local dev only — production deployments should always use `BEARER` or `CLIENT_CREDENTIALS`. |
+| `auth-user` | string | — | Username for `BASIC_AUTH`. Ignored for other modes. |
+| `auth-pass` | password | — | Password for `BASIC_AUTH`, or static token for `BEARER`. Stored encrypted by Keycloak's Vault Provider where configured. Ignored for `CLIENT_CREDENTIALS`. |
+| `oauth-client-id` | string | — | OAuth client ID for the `CLIENT_CREDENTIALS` grant. Required when `auth-mode=CLIENT_CREDENTIALS`. Ignored for other modes. |
+| `oauth-client-secret` | password | — | OAuth client secret for the `CLIENT_CREDENTIALS` grant. Required when `auth-mode=CLIENT_CREDENTIALS`. Stored encrypted by Keycloak's Vault Provider where configured. Ignored for other modes. |
+| `oauth-token-endpoint` | string | — | Full URL of the OAuth 2.0 token endpoint. Required when `auth-mode=CLIENT_CREDENTIALS`. Must be an absolute `http` or `https` URL with a host (e.g. `https://keycloak.example.com/realms/main/protocol/openid-connect/token`). Validated at component save time. Ignored for other modes. |
+| `oauth-scope` | string | — | Space-separated OAuth scopes to request. Optional. When non-blank, sent as the `scope` parameter on the token request; omitted otherwise. Ignored for modes other than `CLIENT_CREDENTIALS`. |
 
 ### Propagation toggles
 
@@ -115,6 +119,74 @@ deletions to SCIM, working around upstream Keycloak issue
   users the federation simply hadn't had time to re-observe.
 
 A bad combination throws `ComponentValidationException` at save time.
+
+### OAuth 2.0 client_credentials
+
+When `auth-mode=CLIENT_CREDENTIALS`, the plugin mints a bearer token
+from the configured token endpoint and sends it as
+`Authorization: Bearer <token>` on every outbound SCIM request.
+
+**Setup steps:**
+
+1. Set `auth-mode` to `CLIENT_CREDENTIALS`.
+2. Set `oauth-client-id` to the client ID registered on the
+   authorization server.
+3. Set `oauth-client-secret` to the corresponding client secret.
+   If your Keycloak deployment has a Vault Provider configured,
+   the value is stored encrypted (same behavior as `auth-pass`).
+4. Set `oauth-token-endpoint` to the full token endpoint URL (e.g.
+   `https://keycloak.example.com/realms/main/protocol/openid-connect/token`).
+   The value is validated at component save time: it must be an
+   absolute `http` or `https` URL with a host. Saving fails with a
+   `ComponentValidationException` if the URL is blank, relative, or
+   has no host.
+5. Optionally set `oauth-scope` to a space-separated list of scopes
+   to request. When blank (the default), the `scope` parameter is
+   omitted from the token request.
+
+**Token request format.** The plugin issues a `POST` to the token
+endpoint with:
+
+- `Authorization: Basic <base64(URLEncode(clientId):URLEncode(clientSecret))>`
+  — RFC 6749 §2.3.1 `client_secret_basic` client authentication.
+- Body `grant_type=client_credentials` (plus `scope=…` when set).
+
+**Token cache.** Tokens are cached in a JVM-wide map keyed by SCIM
+component ID, so all concurrent SCIM requests for a given component
+share a single bearer header. The cached entry is used until
+`expires_in − 30s` has elapsed, at which point the next request
+triggers a fresh token fetch (lazy refresh with a 30-second skew).
+If any component field is edited by an operator, or the component is
+deleted, the cached token for that component is invalidated
+immediately.
+
+**On-401/403 retry.** If the SCIM endpoint returns 401 or 403, the
+plugin invalidates the cached token, fetches a fresh one from the
+token endpoint, and retries the SCIM operation exactly once. This
+handles short-lived token revocations or clock-skew edge cases
+without manual intervention.
+
+**What's NOT supported for CLIENT_CREDENTIALS** (deliberate
+omissions; each was considered and deferred until there is a
+concrete need):
+
+- **No OIDC discovery.** The token endpoint URL must be supplied
+  directly; the plugin does not fetch or follow
+  `.well-known/openid-configuration`.
+- **No `client_secret_post`.** Only `client_secret_basic` (RFC 6749
+  §2.3.1) is supported.
+- **No `private_key_jwt` or mTLS bearer** (RFC 8705).
+- **No `audience` request parameter.** Keycloak does not honor
+  `audience` in the client_credentials request body. Configure
+  audience restrictions via a token mapper on the Keycloak client
+  instead.
+- **No proactive refresh-ahead-of-expiry.** Refresh is lazy: a new
+  token is fetched only when the cached one has expired (or a
+  401/403 is received). This is symmetric with the existing SCIM-5xx
+  no-retry gap below.
+- **No retry on token-endpoint 5xx.** A failed token fetch surfaces
+  as an error on the calling SCIM operation. Symmetric with the
+  existing no-retry policy for SCIM-server errors.
 
 ## scim-ldap-sync LDAP mapper
 
@@ -194,3 +266,12 @@ Tunables read from `System.getProperty(...)` at runtime. Set via
   (since v0.x perf work). The synchronous `ScimDispatcher.run` is
   preserved for the reconciler endpoint's "return a count
   synchronously" semantics.
+- **OAuth token-endpoint retry on 5xx.** When `auth-mode=CLIENT_CREDENTIALS`,
+  a failed token fetch (network error or 5xx from the authorization
+  server) surfaces immediately as an error on the calling SCIM
+  operation — there is no retry loop for the token request itself.
+  Symmetric with the SCIM-server no-retry gap above.
+- **OAuth proactive refresh.** Token refresh is lazy: the cached
+  token is replaced only when `expires_in − 30s` has elapsed or a
+  401/403 is received from the SCIM endpoint. There is no
+  background thread that refreshes ahead of expiry.
