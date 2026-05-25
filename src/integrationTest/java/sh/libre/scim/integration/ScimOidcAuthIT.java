@@ -1,9 +1,11 @@
 package sh.libre.scim.integration;
 
+import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import jakarta.ws.rs.core.Response;
@@ -15,17 +17,23 @@ import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.ComponentRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 
+import java.net.URL;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.okJson;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 /**
  * End-to-end integration tests for the CLIENT_CREDENTIALS auth mode.
@@ -38,6 +46,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Task 18: scaffold + sanity test ({@link #harnessLoadsAndComponentConfiguresCleanly}).
  * <p>Task 19: JWT verification happy path ({@link #clientCredentialsHappyPath_jwtMintedAndVerifiable}).
+ * <p>Task 20: token cache reused across subsequent events ({@link #cachedAcrossSubsequentEvents}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -49,6 +58,9 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     private String realmName;
     private RealmResource realm;
     private String scimComponentId;
+
+    // Cached JWKS for JWT verification — lazily loaded, keyed to the realm.
+    private JWKSet cachedJwkSet;
 
     @BeforeEach
     void setUpRealmAndComponent() {
@@ -63,6 +75,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
 
         scimComponentId = addScimClientCredentialsProvider(realm, internalTokenEndpoint());
         enableScimEventListener(realm);
+        cachedJwkSet = null;
     }
 
     /**
@@ -127,22 +140,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
 
         // Fetch the realm's JWKS from the external (test-JVM-accessible) URL.
         // keycloak.getAuthServerUrl() is the externally-mapped URL the test JVM uses.
-        String externalBaseUrl = keycloak.getAuthServerUrl();
-        var jwksUrl = java.net.URI.create(externalBaseUrl + "/realms/" + realmName
-            + "/protocol/openid-connect/certs").toURL();
-        var jwkSet = JWKSet.load(jwksUrl);
-
-        // Discover the signing algorithm from the JWT header so the test
-        // survives realm signing-alg changes (PS256, ES256, etc.).
-        var parsedJwt = SignedJWT.parse(jwt);
-        var alg = parsedJwt.getHeader().getAlgorithm();
-
-        // Verify the JWT's signature against the realm's public keys.
-        var keySource = new ImmutableJWKSet<SecurityContext>(jwkSet);
-        var keySelector = new JWSVerificationKeySelector<SecurityContext>(alg, keySource);
-        var processor = new DefaultJWTProcessor<SecurityContext>();
-        processor.setJWSKeySelector(keySelector);
-        var claims = processor.process(jwt, null);
+        var claims = verifyJwtAgainstRealmJwks(jwt);
 
         // Verify key claims that a downstream receiver would check.
         assertThat(claims.getStringClaim("azp")).isEqualTo(SA_CLIENT_ID);
@@ -155,6 +153,34 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // misconfiguration of the token lifespan (Keycloak default is 5 min).
         assertThat(claims.getExpirationTime())
             .isAfter(new Date(System.currentTimeMillis() + 10_000));
+    }
+
+    /**
+     * Task 20: Token cache is reused across subsequent SCIM events.
+     *
+     * <p>With a WireMock token endpoint returning a long-lived token,
+     * two sequential admin-user creates must share the same bearer —
+     * exactly one token POST, two SCIM POSTs carrying identical auth headers.
+     */
+    @Test
+    void cachedAcrossSubsequentEvents() {
+        String stubPath = "/oauth/token-cached";
+        wireMock.stubFor(post(urlEqualTo(stubPath)).willReturn(okJson(
+            "{\"access_token\":\"eyJ.cached\",\"token_type\":\"Bearer\",\"expires_in\":300}")));
+        useWireMockTokenEndpoint(stubPath);
+
+        // Stub the SCIM sink.
+        stubScimUserCreateOk();
+
+        createAdminUser(realm, "bob-1", "bob1@test.local");
+        awaitUserPostFor("bob-1");
+        createAdminUser(realm, "bob-2", "bob2@test.local");
+        awaitUserPostFor("bob-2");
+
+        // Exactly one /token POST; both /Users POSTs share the cached bearer.
+        wireMock.verify(1, postRequestedFor(urlEqualTo(stubPath)));
+        wireMock.verify(2, postRequestedFor(urlPathMatching("/Users.*"))
+            .withHeader("Authorization", equalTo("Bearer eyJ.cached")));
     }
 
     // ---------- helpers ----------
@@ -171,11 +197,15 @@ class ScimOidcAuthIT extends IntegrationTestBase {
      * Reconfigures the SCIM provider component's {@code oauth-token-endpoint}
      * to point at a WireMock stub instead of Keycloak. The factory's
      * {@code onUpdate} hook automatically invalidates the token cache.
+     *
+     * <p>Uses {@code host.testcontainers.internal} because Keycloak runs inside
+     * Docker and must reach WireMock on the host via that alias.
      */
     protected void useWireMockTokenEndpoint(String stubPath) {
         var componentResource = realm.components().component(scimComponentId);
         var rep = componentResource.toRepresentation();
-        rep.getConfig().putSingle("oauth-token-endpoint", wireMock.baseUrl() + stubPath);
+        rep.getConfig().putSingle("oauth-token-endpoint",
+            "http://host.testcontainers.internal:" + wireMock.port() + stubPath);
         componentResource.update(rep);
     }
 
@@ -188,6 +218,47 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         var rep = componentResource.toRepresentation();
         rep.getConfig().putSingle("oauth-token-endpoint", internalTokenEndpoint());
         componentResource.update(rep);
+    }
+
+    /**
+     * Strips the "Bearer " prefix from an Authorization header value.
+     */
+    private String stripBearer(String authorizationHeader) {
+        assertThat(authorizationHeader).startsWith("Bearer ");
+        return authorizationHeader.substring("Bearer ".length());
+    }
+
+    /**
+     * Verifies a JWT's signature against the realm's JWKS endpoint and returns
+     * the validated claims set. Fetches JWKS once per test (lazy + cached).
+     */
+    private JWTClaimsSet verifyJwtAgainstRealmJwks(String jwt) throws Exception {
+        if (cachedJwkSet == null) {
+            String externalBaseUrl = keycloak.getAuthServerUrl();
+            URL jwksUrl = java.net.URI.create(
+                externalBaseUrl + "/realms/" + realmName + "/protocol/openid-connect/certs"
+            ).toURL();
+            cachedJwkSet = JWKSet.load(jwksUrl);
+        }
+        var parsedJwt = SignedJWT.parse(jwt);
+        JWSAlgorithm alg = parsedJwt.getHeader().getAlgorithm();
+        var keySource = new ImmutableJWKSet<SecurityContext>(cachedJwkSet);
+        var keySelector = new JWSVerificationKeySelector<SecurityContext>(alg, keySource);
+        var processor = new DefaultJWTProcessor<SecurityContext>();
+        processor.setJWSKeySelector(keySelector);
+        return processor.process(jwt, null);
+    }
+
+    /**
+     * Polls WireMock until at least {@code expectedCount} POSTs to /Users have been recorded.
+     */
+    private void awaitScimPostCount(int expectedCount) {
+        await().atMost(30, TimeUnit.SECONDS).untilAsserted(() -> {
+            int count = wireMock.countRequestsMatching(
+                postRequestedFor(urlPathMatching("/Users.*")).build()
+            ).getCount();
+            assertThat(count).isGreaterThanOrEqualTo(expectedCount);
+        });
     }
 
     /**
