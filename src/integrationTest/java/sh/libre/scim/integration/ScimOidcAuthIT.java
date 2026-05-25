@@ -47,6 +47,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Task 18: scaffold + sanity test ({@link #harnessLoadsAndComponentConfiguresCleanly}).
  * <p>Task 19: JWT verification happy path ({@link #clientCredentialsHappyPath_jwtMintedAndVerifiable}).
  * <p>Task 20: token cache reused across subsequent events ({@link #cachedAcrossSubsequentEvents}).
+ * <p>Task 21: bulk-import workers share the token cache ({@link #cachedAcrossAsyncWorkers}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -181,6 +182,43 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         wireMock.verify(1, postRequestedFor(urlEqualTo(stubPath)));
         wireMock.verify(2, postRequestedFor(urlPathMatching("/Users.*"))
             .withHeader("Authorization", equalTo("Bearer eyJ.cached")));
+    }
+
+    /**
+     * Task 21: Concurrent async workers from LDAP full sync share the token cache.
+     *
+     * <p>With N=2 LDAP users (the seed file has alice + bob), triggering a full
+     * sync fans out via {@code ScimDispatcher.runAsync}. Despite concurrent dispatch,
+     * only one token POST should happen because the per-componentId lock in
+     * {@code OAuthClientCredentialsTokenSource} serializes mints.
+     */
+    @Test
+    void cachedAcrossAsyncWorkers() throws Exception {
+        String stubPath = "/oauth/token-async";
+        wireMock.stubFor(post(urlEqualTo(stubPath)).willReturn(okJson(
+            "{\"access_token\":\"eyJ.async\",\"token_type\":\"Bearer\",\"expires_in\":300}")));
+        useWireMockTokenEndpoint(stubPath);
+
+        // Stub the SCIM sink.
+        stubScimUserCreateOk();
+
+        // Add LDAP federation (seed has alice + bob = 2 users).
+        String ldapId = addLdapFederation(realm);
+        addLdapAttributeMapper(realm, ldapId, "email", "email", "mail");
+        addLdapAttributeMapper(realm, ldapId, "firstName", "firstName", "givenName");
+        addLdapAttributeMapper(realm, ldapId, "lastName", "lastName", "sn");
+        attachScimMapper(realm, ldapId);
+
+        // Trigger full sync; the async dispatcher fans out one task per user.
+        realm.userStorage().syncUsers(ldapId, "triggerFullSync");
+
+        // Wait for both SCIM POSTs.
+        awaitScimPostCount(2);
+
+        // One token mint despite two concurrent SCIM POSTs.
+        wireMock.verify(1, postRequestedFor(urlEqualTo(stubPath)));
+        wireMock.verify(2, postRequestedFor(urlPathMatching("/Users.*"))
+            .withHeader("Authorization", equalTo("Bearer eyJ.async")));
     }
 
     // ---------- helpers ----------
