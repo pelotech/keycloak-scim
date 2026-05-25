@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
@@ -14,6 +15,7 @@ import de.captaingoldfish.scim.sdk.client.http.BasicAuth;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
+import de.captaingoldfish.scim.sdk.common.resources.base.ScimObjectNode;
 import de.captaingoldfish.scim.sdk.common.response.ListResponse;
 
 import org.jboss.logging.Logger;
@@ -40,25 +42,55 @@ public class ScimClient {
     final protected String scimApplicationBaseUrl;
     final protected Map<String, String> defaultHeaders;
     final protected Map<String, String> expectedResponseHeaders;
+    final protected OAuthClientCredentialsTokenSource tokenSource;
 
     public ScimClient(ComponentModel model, KeycloakSession session) {
+        this(model, session, buildTokenSourceFromModel(model));
+    }
+
+    private static OAuthClientCredentialsTokenSource buildTokenSourceFromModel(ComponentModel model) {
+        if ("CLIENT_CREDENTIALS".equals(model.get("auth-mode"))) {
+            return new OAuthClientCredentialsTokenSource(
+                model.getId(),
+                OAuthConfig.from(model),
+                new OAuthClientCredentialsTokenSource.HttpTokenMinter(model.getId()));
+        }
+        return null;
+    }
+
+    /**
+     * Package-private constructor for testing. Accepts an explicit
+     * {@link OAuthClientCredentialsTokenSource} so unit tests can inject a
+     * stub minter without making real HTTP calls.
+     *
+     * <p>This is also the single shared init path — the production constructor
+     * builds the token source via {@link #buildTokenSourceFromModel} and delegates
+     * here so setup logic is never duplicated.
+     */
+    // package-private for tests
+    ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
         this.model = model;
         this.contentType = model.get("content-type");
         this.session = session;
         this.scimApplicationBaseUrl = model.get("endpoint");
         this.defaultHeaders = new HashMap<>();
         this.expectedResponseHeaders = new HashMap<>();
+        this.tokenSource = tokenSource;
 
-        switch (model.get("auth-mode")) {
-            case "BEARER":
-                defaultHeaders.put(HttpHeaders.AUTHORIZATION,
-                    BearerAuthentication(model.get("auth-pass")));
-                break;
-            case "BASIC_AUTH":
-                defaultHeaders.put(HttpHeaders.AUTHORIZATION,
-                    BasicAuthentication(model.get("auth-user"),
-                                        model.get("auth-pass")));
-                break;
+        if (tokenSource != null) {
+            defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
+        } else {
+            switch (model.get("auth-mode")) {
+                case "BEARER":
+                    defaultHeaders.put(HttpHeaders.AUTHORIZATION,
+                        BearerAuthentication(model.get("auth-pass")));
+                    break;
+                case "BASIC_AUTH":
+                    defaultHeaders.put(HttpHeaders.AUTHORIZATION,
+                        BasicAuthentication(model.get("auth-user"),
+                                            model.get("auth-pass")));
+                    break;
+            }
         }
 
         defaultHeaders.put(HttpHeaders.CONTENT_TYPE, contentType);
@@ -114,6 +146,28 @@ public class ScimClient {
         return "Bearer " + token ;
     }
 
+    private void refreshAuthHeader() {
+        assert tokenSource != null;
+        defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
+    }
+
+    // package-private for tests
+    <S extends ScimObjectNode> ServerResponse<S> sendWithAuthRefresh(
+            Supplier<ServerResponse<S>> op) {
+        if (tokenSource == null) {
+            return op.get();
+        }
+        refreshAuthHeader();
+        ServerResponse<S> r = op.get();
+        int status = r.getHttpStatus();
+        if (status == 401 || status == 403) {
+            tokenSource.invalidate();
+            refreshAuthHeader();
+            r = op.get();
+        }
+        return r;
+    }
+
     protected String genScimUrl(String scimEndpoint, String resourcePath) {
         return "%s/%s/%s".formatted(scimApplicationBaseUrl,
                 scimEndpoint,
@@ -162,7 +216,7 @@ public class ScimClient {
         // resilience4j's per-Retry state isn't per-resource anyway.
         var retry = registry.retry("create");
 
-        ServerResponse<S> response = retry.executeSupplier(() -> {
+        ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
             try {
                 return scimRequestBuilder
                 .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
@@ -171,7 +225,7 @@ public class ScimClient {
             } catch (ResponseException e) {
                 throw new RuntimeException(e);
             }
-        });
+        }));
         long t3 = System.nanoTime();
         ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
 
@@ -201,7 +255,7 @@ public class ScimClient {
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
             var retry = registry.retry("replace");
-            ServerResponse<S> response = retry.executeSupplier(() -> {
+            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     LOGGER.info(adapter.getType());
                     if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
@@ -218,7 +272,7 @@ public class ScimClient {
                 } catch (ResponseException e) {
                     throw new RuntimeException(e);
                 }
-            });
+            }));
             if (!response.isSuccess()) {
                 int statusCode = response.getHttpStatus();
                 if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
@@ -269,7 +323,7 @@ public class ScimClient {
 
             var retry = registry.retry("delete");
 
-            ServerResponse<S> response = retry.executeSupplier(() -> {
+            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
                                                                 adapter.getResourceClass())
@@ -277,7 +331,7 @@ public class ScimClient {
                 } catch (ResponseException e) {
                     throw new RuntimeException(e);
                 }
-            });
+            }));
 
             if (!response.isSuccess()){
                 LOGGER.warn(response.getResponseBody());
@@ -319,7 +373,10 @@ public class ScimClient {
         LOGGER.info("Import");
         try {
             var adapter = getAdapter(aClass);
-            ServerResponse<ListResponse<S>> response  = scimRequestBuilder.list(scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint(), adapter.getResourceClass()).get().sendRequest();
+            String listUrl = scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint();
+            Class<S> resourceClass = adapter.getResourceClass();
+            ServerResponse<ListResponse<S>> response = sendWithAuthRefresh(() ->
+                scimRequestBuilder.list(listUrl, resourceClass).get().sendRequest());
             ListResponse<S> resourceTypeListResponse = response.getResource();
 
             for (var resource : resourceTypeListResponse.getListedResources()) {

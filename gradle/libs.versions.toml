@@ -1,4 +1,5 @@
 [versions]
+assertj = "3.27.3"
 awaitility = "4.2.2"
 commons-lang3 = "3.18.0"
 gradle-shadow = "8.3.0"
@@ -8,6 +9,7 @@ jakarta-ws-rs = "4.0.0"
 junit = "5.11.4"
 keycloak = "25.0.6"
 mockito = "5.14.2"
+nimbus-jose-jwt = "9.37.3"
 openrewrite = "6.24.0"
 openrewrite-recipe-bom = "2.20.0"
 resilience4j = "2.2.0"
@@ -18,6 +20,7 @@ testcontainers-keycloak = "3.4.0"
 wiremock = "3.9.2"
 
 [libraries]
+assertj = { module = "org.assertj:assertj-core", version.ref = "assertj" }
 awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
 commons-lang3 = { module = "org.apache.commons:commons-lang3", version.ref = "commons-lang3" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
@@ -33,6 +36,7 @@ keycloak-server-spi-private = { module = "org.keycloak:keycloak-server-spi-priva
 keycloak-services = { module = "org.keycloak:keycloak-services", version.ref = "keycloak" }
 mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 mockito-junit-jupiter = { module = "org.mockito:mockito-junit-jupiter", version.ref = "mockito" }
+nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus-jose-jwt" }
 openrewrite-recipe-bom = { module = "org.openrewrite.recipe:rewrite-recipe-bom", version.ref = "openrewrite-recipe-bom" }
 resilience4j-retry = { module = "io.github.resilience4j:resilience4j-retry", version.ref = "resilience4j" }
 scim-sdk-client = { module = "de.captaingoldfish:scim-sdk-client", version.ref = "scim-sdk" }

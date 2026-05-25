@@ -75,9 +75,11 @@ dependencies {
     implementation(libs.scim.sdk.client)
     implementation(libs.commons.lang3)
 
+    testImplementation(libs.assertj)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.mockito.core)
     testImplementation(libs.mockito.junit.jupiter)
+    testImplementation(libs.wiremock)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 
     add(integrationTest.implementationConfigurationName, libs.keycloak.admin.client)
@@ -86,6 +88,7 @@ dependencies {
     add(integrationTest.implementationConfigurationName, libs.testcontainers.keycloak)
     add(integrationTest.implementationConfigurationName, libs.wiremock)
     add(integrationTest.implementationConfigurationName, libs.awaitility)
+    add(integrationTest.implementationConfigurationName, libs.nimbus.jose.jwt)
     add(integrationTest.runtimeOnlyConfigurationName, libs.slf4j.simple)
 }
 

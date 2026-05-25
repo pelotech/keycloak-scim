@@ -1,5 +1,6 @@
 package sh.libre.scim.storage;
 
+import java.net.URI;
 import java.util.Date;
 import java.util.List;
 
@@ -7,6 +8,7 @@ import jakarta.ws.rs.core.MediaType;
 
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.component.ComponentValidationException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakSessionTask;
@@ -19,6 +21,7 @@ import org.keycloak.storage.user.ImportSynchronization;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.GroupAdapter;
+import sh.libre.scim.core.OAuthClientCredentialsTokenSource;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
 import sh.libre.scim.reconcile.ReconcilerConfigValidator;
@@ -64,7 +67,7 @@ public class ScimStorageProviderFactory
                 .type(ProviderConfigProperty.LIST_TYPE)
                 .label("Auth mode")
                 .helpText("Select the authorization mode")
-                .options("NONE", "BASIC_AUTH", "BEARER")
+                .options("NONE", "BASIC_AUTH", "BEARER", "CLIENT_CREDENTIALS")
                 .defaultValue("NONE")
                 .add()
                 .property()
@@ -78,6 +81,30 @@ public class ScimStorageProviderFactory
                 .type(ProviderConfigProperty.PASSWORD)
                 .label("Auth password/token")
                 .helpText("Password or token required for basic or bearer authentification.")
+                .add()
+                .property()
+                .name("oauth-client-id")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("OAuth client ID")
+                .helpText("Required when auth-mode is CLIENT_CREDENTIALS.")
+                .add()
+                .property()
+                .name("oauth-client-secret")
+                .type(ProviderConfigProperty.PASSWORD)
+                .label("OAuth client secret")
+                .helpText("Required when auth-mode is CLIENT_CREDENTIALS. Stored via Keycloak Vault Provider where configured.")
+                .add()
+                .property()
+                .name("oauth-token-endpoint")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("OAuth token endpoint")
+                .helpText("Full URL of the OAuth 2.0 token endpoint (e.g. https://keycloak.example.com/realms/main/protocol/openid-connect/token). Required when auth-mode is CLIENT_CREDENTIALS.")
+                .add()
+                .property()
+                .name("oauth-scope")
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("OAuth scope")
+                .helpText("Optional space-separated OAuth scopes. Sent as the 'scope' parameter on the token request when set; omitted when blank.")
                 .add()
                 .property()
                 .name("propagation-user")
@@ -176,12 +203,14 @@ public class ScimStorageProviderFactory
     @Override
     public void onUpdate(KeycloakSession session, org.keycloak.models.RealmModel realm,
                          ComponentModel oldModel, ComponentModel newModel) {
+        OAuthClientCredentialsTokenSource.invalidate(newModel.getId());
         ReconcilerScheduler.scheduleIfEnabled(
             session.getKeycloakSessionFactory(), session, realm.getId(), newModel);
     }
 
     @Override
     public void preRemove(KeycloakSession session, org.keycloak.models.RealmModel realm, ComponentModel model) {
+        OAuthClientCredentialsTokenSource.invalidate(model.getId());
         ReconcilerScheduler.cancel(session, model);
     }
 
@@ -193,6 +222,39 @@ public class ScimStorageProviderFactory
             .filter(c -> "ldap".equals(c.getProviderId()))
             .toList();
         ReconcilerConfigValidator.validate(model, ldapFederations);
+
+        String authMode = model.get("auth-mode");
+        if ("CLIENT_CREDENTIALS".equals(authMode)) {
+            requireNonBlank(model, "oauth-client-id");
+            requireNonBlank(model, "oauth-client-secret");
+            String endpoint = requireNonBlank(model, "oauth-token-endpoint");
+            try {
+                URI uri = URI.create(endpoint);
+                String scheme = uri.getScheme();
+                if (scheme == null
+                    || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+                    throw new ComponentValidationException(
+                        "oauth-token-endpoint must be an absolute http(s) URL");
+                }
+                if (uri.getHost() == null || uri.getHost().isBlank()) {
+                    throw new ComponentValidationException(
+                        "oauth-token-endpoint must be an absolute http(s) URL with a host");
+                }
+            } catch (IllegalArgumentException e) {
+                throw new ComponentValidationException(
+                    "oauth-token-endpoint must be an absolute http(s) URL", e);
+            }
+        }
+    }
+
+    /** Returns the trimmed value of {@code name}, or throws ComponentValidationException if absent or blank. */
+    private static String requireNonBlank(ComponentModel m, String name) {
+        String v = m.get(name);
+        if (v == null || v.isBlank()) {
+            throw new ComponentValidationException(
+                name + " is required when auth-mode is CLIENT_CREDENTIALS");
+        }
+        return v.trim();
     }
 
     @Override
