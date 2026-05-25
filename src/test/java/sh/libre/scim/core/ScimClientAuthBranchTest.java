@@ -98,6 +98,43 @@ class ScimClientAuthBranchTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void sendWithAuthRefresh_retriesOnceOn403() {
+        OAuthClientCredentialsTokenSource.resetCacheForTests();
+        var model = componentModelFor("CLIENT_CREDENTIALS");
+
+        var callCount = new AtomicInteger();
+        var ts = new OAuthClientCredentialsTokenSource(
+            model.getId(),
+            OAuthConfig.from(model),
+            cfg -> {
+                int n = callCount.incrementAndGet();
+                return n == 1
+                    ? new OAuthClientCredentialsTokenSource.MintResult("Bearer eyJ.first", 300)
+                    : new OAuthClientCredentialsTokenSource.MintResult("Bearer eyJ.second", 300);
+            });
+
+        var client = new ScimClient(model, mock(KeycloakSession.class), ts);
+
+        var attempts = new AtomicInteger();
+
+        ServerResponse<User> r403 = mock(ServerResponse.class);
+        when(r403.getHttpStatus()).thenReturn(403);
+        ServerResponse<User> r201 = mock(ServerResponse.class);
+        when(r201.getHttpStatus()).thenReturn(201);
+
+        Supplier<ServerResponse<User>> op = () -> {
+            int n = attempts.incrementAndGet();
+            return n == 1 ? r403 : r201;
+        };
+
+        var result = client.sendWithAuthRefresh(op);
+
+        assertThat(attempts.get()).isEqualTo(2);
+        assertThat(result.getHttpStatus()).isEqualTo(201);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void sendWithAuthRefresh_noTokenSource_doesNotRetry() {
         var model = new ComponentModel();
         var config = new MultivaluedHashMap<String, String>();
