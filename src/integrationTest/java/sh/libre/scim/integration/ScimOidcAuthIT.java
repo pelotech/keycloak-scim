@@ -32,6 +32,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
+import static com.github.tomakehurst.wiremock.stubbing.Scenario.STARTED;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -49,6 +50,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Task 20: token cache reused across subsequent events ({@link #cachedAcrossSubsequentEvents}).
  * <p>Task 21: bulk-import workers share the token cache ({@link #cachedAcrossAsyncWorkers}).
  * <p>Task 22: token re-minted after expires_in elapses ({@link #expiryTriggersRefresh}).
+ * <p>Task 23: SCIM 401 triggers cache invalidation and retry ({@link #scim401TriggersRefreshAndRetry}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -259,6 +261,62 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // on every call — not the cached 1-for-all behaviour.
         int tokenPosts = wireMock.findAll(postRequestedFor(urlEqualTo(stubPath))).size();
         assertThat(tokenPosts).isGreaterThanOrEqualTo(2);
+    }
+
+    /**
+     * Task 23: SCIM 401 triggers cache invalidation and a retry with a re-minted token.
+     *
+     * <p>The WireMock SCIM sink returns 401 on the first POST and 201 on the second.
+     * {@code sendWithAuthRefresh} in {@code ScimClient} calls {@code invalidate()} on
+     * the token source and retries. The end-to-end invariants are:
+     * <ul>
+     *   <li>Exactly 2 SCIM POSTs happen (initial attempt + retry).</li>
+     *   <li>Both carry a valid Keycloak-signed JWT (not a stale or fabricated bearer).</li>
+     *   <li>The retry (second POST) receives a 201 and the user create completes.</li>
+     * </ul>
+     *
+     * <p>Note: Keycloak may return the same token for both calls if the token
+     * is still within its validity window, so this test does not assert that the
+     * two JWTs are distinct — that is covered at the unit-test level.
+     */
+    @Test
+    void scim401TriggersRefreshAndRetry() throws Exception {
+        String scenarioName = "scim-401-then-201";
+        wireMock.stubFor(post(urlPathMatching("/Users.*"))
+            .inScenario(scenarioName)
+            .whenScenarioStateIs(STARTED)
+            .willReturn(aResponse().withStatus(401).withBody("{\"detail\":\"token rejected\"}"))
+            .willSetStateTo("after-401"));
+        wireMock.stubFor(post(urlPathMatching("/Users.*"))
+            .inScenario(scenarioName)
+            .whenScenarioStateIs("after-401")
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "%s",
+                      "userName": "carol",
+                      "displayName": "carol",
+                      "active": true,
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                    }""".formatted(UUID.randomUUID()))));
+
+        createAdminUser(realm, "carol", "carol@test.local");
+
+        // Wait for both SCIM POSTs: the 401 attempt and the successful retry.
+        await().atMost(20, TimeUnit.SECONDS).untilAsserted(() -> {
+            var requests = wireMock.findAll(postRequestedFor(urlPathMatching("/Users.*")));
+            assertThat(requests).hasSize(2);
+        });
+
+        // Both POSTs must carry a real Keycloak-signed JWT.
+        var requests = wireMock.findAll(postRequestedFor(urlPathMatching("/Users.*")));
+        String jwt1 = stripBearer(requests.get(0).getHeader("Authorization"));
+        String jwt2 = stripBearer(requests.get(1).getHeader("Authorization"));
+
+        verifyJwtAgainstRealmJwks(jwt1);
+        verifyJwtAgainstRealmJwks(jwt2);
     }
 
     // ---------- helpers ----------
