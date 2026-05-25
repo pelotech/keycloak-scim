@@ -66,7 +66,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     private RealmResource realm;
     private String scimComponentId;
 
-    // Cached JWKS for JWT verification — lazily loaded, keyed to the realm.
+    // Lazily loaded once per test method; cleared in @BeforeEach via the field reset.
     private JWKSet cachedJwkSet;
 
     @BeforeEach
@@ -284,7 +284,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
      */
     @Test
     void scim401TriggersRefreshAndRetry() throws Exception {
-        String scenarioName = "scim-401-then-201";
+        String scenarioName = "scim-401-then-201-" + java.util.UUID.randomUUID();
         wireMock.stubFor(post(urlPathMatching("/Users.*"))
             .inScenario(scenarioName)
             .whenScenarioStateIs(STARTED)
@@ -339,16 +339,15 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // First event: token endpoint is down — mint fails, SCIM POST never happens.
         createAdminUser(realm, "dave", "dave@test.local");
 
-        // Give async dispatch a window to attempt the token mint.
-        Thread.sleep(2000);
+        // Wait until the async dispatcher has tried to mint a token at least once.
+        await().atMost(20, TimeUnit.SECONDS).untilAsserted(() -> {
+            int attempts = wireMock.findAll(postRequestedFor(urlEqualTo(stubPath))).size();
+            assertThat(attempts).isGreaterThanOrEqualTo(1);
+        });
 
-        // No SCIM POST happened for dave.
+        // Now we can assert: no SCIM POST happened for dave (the 503 short-circuited it).
         wireMock.verify(0, postRequestedFor(urlPathMatching("/Users.*"))
             .withRequestBody(matchingJsonPath("$.userName", equalTo("dave"))));
-        // But the token endpoint WAS attempted.
-        int attemptsBeforeRecovery = wireMock.findAll(
-            postRequestedFor(urlEqualTo(stubPath))).size();
-        assertThat(attemptsBeforeRecovery).isGreaterThanOrEqualTo(1);
 
         // Bring the token endpoint back up with a valid response.
         wireMock.stubFor(post(urlEqualTo(stubPath)).willReturn(okJson(
@@ -421,17 +420,6 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         var rep = componentResource.toRepresentation();
         rep.getConfig().putSingle("oauth-token-endpoint",
             "http://host.testcontainers.internal:" + wireMock.port() + stubPath);
-        componentResource.update(rep);
-    }
-
-    /**
-     * Restores the SCIM provider component's {@code oauth-token-endpoint}
-     * back to the real Keycloak endpoint.
-     */
-    protected void useKeycloakTokenEndpoint() {
-        var componentResource = realm.components().component(scimComponentId);
-        var rep = componentResource.toRepresentation();
-        rep.getConfig().putSingle("oauth-token-endpoint", internalTokenEndpoint());
         componentResource.update(rep);
     }
 
