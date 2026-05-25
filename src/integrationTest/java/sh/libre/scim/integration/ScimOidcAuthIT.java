@@ -48,6 +48,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Task 19: JWT verification happy path ({@link #clientCredentialsHappyPath_jwtMintedAndVerifiable}).
  * <p>Task 20: token cache reused across subsequent events ({@link #cachedAcrossSubsequentEvents}).
  * <p>Task 21: bulk-import workers share the token cache ({@link #cachedAcrossAsyncWorkers}).
+ * <p>Task 22: token re-minted after expires_in elapses ({@link #expiryTriggersRefresh}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -219,6 +220,45 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         wireMock.verify(1, postRequestedFor(urlEqualTo(stubPath)));
         wireMock.verify(2, postRequestedFor(urlPathMatching("/Users.*"))
             .withHeader("Authorization", equalTo("Bearer eyJ.async")));
+    }
+
+    /**
+     * Task 22: Token is re-minted after {@code expires_in} elapses.
+     *
+     * <p>With {@code expires_in=1}, the skew logic computes
+     * {@code refreshAt = now + max(0, 1 - 30) = now}, so every call to
+     * {@code currentAuthorizationHeader()} mints a fresh token (the cache never
+     * hits). Contrast with the cached case ({@link #cachedAcrossSubsequentEvents}):
+     * {@code expires_in=300} yields exactly 1 token POST for 2 user creates.
+     * Here we assert at-least 2 — one per user-create event — proving re-mint
+     * behaviour. (The actual count can be higher because {@code ScimClient} calls
+     * {@code currentAuthorizationHeader()} both in its constructor and in
+     * {@code sendWithAuthRefresh}, so each event may trigger more than one mint.)
+     */
+    @Test
+    void expiryTriggersRefresh() throws Exception {
+        String stubPath = "/oauth/token-fast-expiry";
+        wireMock.stubFor(post(urlEqualTo(stubPath)).willReturn(okJson(
+            "{\"access_token\":\"eyJ.first\",\"token_type\":\"Bearer\",\"expires_in\":1}")));
+        useWireMockTokenEndpoint(stubPath);
+
+        // Stub the SCIM sink.
+        stubScimUserCreateOk();
+
+        createAdminUser(realm, "exp-user-1", "exp1@test.local");
+        awaitUserPostFor("exp-user-1");
+
+        // Small jitter to advance the wall clock past the minted instant;
+        // refreshAt = now-at-mint, so any subsequent now is >= refreshAt.
+        Thread.sleep(100);
+
+        createAdminUser(realm, "exp-user-2", "exp2@test.local");
+        awaitUserPostFor("exp-user-2");
+
+        // At least 2 token POSTs (one per event minimum), confirming re-mint
+        // on every call — not the cached 1-for-all behaviour.
+        int tokenPosts = wireMock.findAll(postRequestedFor(urlEqualTo(stubPath))).size();
+        assertThat(tokenPosts).isGreaterThanOrEqualTo(2);
     }
 
     // ---------- helpers ----------
