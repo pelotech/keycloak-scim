@@ -88,6 +88,7 @@ dependencies {
     add(integrationTest.implementationConfigurationName, libs.testcontainers.keycloak)
     add(integrationTest.implementationConfigurationName, libs.wiremock)
     add(integrationTest.implementationConfigurationName, libs.awaitility)
+    add(integrationTest.implementationConfigurationName, libs.nimbus.jose.jwt)
     add(integrationTest.runtimeOnlyConfigurationName, libs.slf4j.simple)
 }
 
