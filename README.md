@@ -29,6 +29,10 @@ What's added relative to upstream:
   ~245 users/sec; reconciler deletion from ~22 to ~640 deletes/sec.
   See [`docs/performance.md`](docs/performance.md) for measurements
   and bottleneck analysis.
+- **OAuth 2.0 client_credentials auth.** Outbound SCIM can mint
+  access tokens via the client_credentials grant and send them as
+  bearer tokens, matching what JWKS-verifying SCIM receivers expect.
+  See [`docs/configuration.md`](docs/configuration.md) for setup.
 - **OCI image for K8s ImageVolume mounting.** Drop the plugin into
   a Keycloak pod without baking a custom image — see
   [Quick start](#quick-start) below.
