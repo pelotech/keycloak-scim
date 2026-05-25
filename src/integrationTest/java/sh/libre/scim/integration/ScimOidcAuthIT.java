@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.keycloak.admin.client.resource.RealmResource;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.representations.idm.ClientRepresentation;
+import org.keycloak.representations.idm.ClientScopeRepresentation;
 import org.keycloak.representations.idm.ComponentRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 
@@ -52,6 +53,7 @@ import static org.awaitility.Awaitility.await;
  * <p>Task 22: token re-minted after expires_in elapses ({@link #expiryTriggersRefresh}).
  * <p>Task 23: SCIM 401 triggers cache invalidation and retry ({@link #scim401TriggersRefreshAndRetry}).
  * <p>Task 24: token endpoint outage fails op fail-open, plugin survives ({@link #tokenEndpointDown_eventFailsButPluginSurvives}).
+ * <p>Task 25: oauth-scope round-trips into JWT scope claim end-to-end ({@link #scopeForwardedToTokenEndpoint}).
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -362,6 +364,40 @@ class ScimOidcAuthIT extends IntegrationTestBase {
             .withHeader("Authorization", equalTo("Bearer eyJ.recovered")));
     }
 
+    /**
+     * Task 25: The {@code oauth-scope} component config is forwarded to the token
+     * endpoint and round-trips into the JWT's {@code scope} claim.
+     *
+     * <p>A {@code scim:write} client scope is created in the realm, attached as
+     * optional to the SA client, and configured on the SCIM component. The minted
+     * JWT must contain {@code scim:write} in its {@code scope} claim.
+     */
+    @Test
+    void scopeForwardedToTokenEndpoint() throws Exception {
+        // Create and attach the scim:write client scope.
+        createClientScope(realm, "scim:write");
+        attachOptionalClientScope(realm, SA_CLIENT_ID, "scim:write");
+
+        // Set oauth-scope on the SCIM provider component.
+        var componentRes = realm.components().component(scimComponentId);
+        var rep = componentRes.toRepresentation();
+        rep.getConfig().putSingle("oauth-scope", "scim:write");
+        componentRes.update(rep);
+
+        // Stub the SCIM sink.
+        stubScimUserCreateOk();
+
+        createAdminUser(realm, "scoped-user", "scoped@test.local");
+        awaitUserPostFor("scoped-user");
+
+        // Extract the JWT and verify the scope claim.
+        var requests = wireMock.findAll(postRequestedFor(urlPathMatching("/Users.*")));
+        assertThat(requests).isNotEmpty();
+        String jwt = stripBearer(requests.get(requests.size() - 1).getHeader("Authorization"));
+        var claims = verifyJwtAgainstRealmJwks(jwt);
+        assertThat(claims.getStringClaim("scope")).contains("scim:write");
+    }
+
     // ---------- helpers ----------
 
     /**
@@ -438,6 +474,35 @@ class ScimOidcAuthIT extends IntegrationTestBase {
             ).getCount();
             assertThat(count).isGreaterThanOrEqualTo(expectedCount);
         });
+    }
+
+    /**
+     * Creates a client scope with the given name and openid-connect protocol.
+     */
+    private void createClientScope(RealmResource targetRealm, String name) {
+        var rep = new ClientScopeRepresentation();
+        rep.setName(name);
+        rep.setProtocol("openid-connect");
+        try (Response r = targetRealm.clientScopes().create(rep)) {
+            if (r.getStatus() >= 400) {
+                throw new IllegalStateException(
+                    "client scope create failed for '" + name + "': " + r.getStatus());
+            }
+        }
+    }
+
+    /**
+     * Attaches the named client scope as an optional scope to the named client.
+     */
+    private void attachOptionalClientScope(RealmResource targetRealm,
+                                            String clientId, String scopeName) {
+        var client = targetRealm.clients().findByClientId(clientId).get(0);
+        var scopeRep = targetRealm.clientScopes().findAll().stream()
+            .filter(s -> scopeName.equals(s.getName()))
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException(
+                "client scope not found: " + scopeName));
+        targetRealm.clients().get(client.getId()).addOptionalClientScope(scopeRep.getId());
     }
 
     /**
