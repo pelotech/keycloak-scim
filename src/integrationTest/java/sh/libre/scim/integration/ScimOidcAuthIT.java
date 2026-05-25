@@ -1,10 +1,10 @@
 package sh.libre.scim.integration;
 
-import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,7 +15,6 @@ import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.ComponentRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 
-import java.net.URL;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
@@ -44,7 +43,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
 
     // Stable identifiers for the service-account client created in each test's realm.
     private static final String SA_CLIENT_ID = "scim-pusher";
-    private static final String SA_CLIENT_SECRET = "client-secret-value";
+    private static final String SA_CLIENT_SECRET = "test-fixture-secret";
 
     // Per-test state set up in @BeforeEach.
     private String realmName;
@@ -62,14 +61,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
 
         createServiceAccountClient(realm);
 
-        // oauth-token-endpoint must be the URL the plugin (running inside
-        // the Keycloak container) uses to reach the token endpoint. Since
-        // the plugin runs inside the same JVM as Keycloak, it can address
-        // the server via localhost on Keycloak's internal HTTP port (8080).
-        String internalTokenEndpoint = "http://localhost:8080/realms/"
-            + realmName + "/protocol/openid-connect/token";
-
-        scimComponentId = addScimClientCredentialsProvider(realm, internalTokenEndpoint);
+        scimComponentId = addScimClientCredentialsProvider(realm, internalTokenEndpoint());
         enableScimEventListener(realm);
     }
 
@@ -136,13 +128,18 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // Fetch the realm's JWKS from the external (test-JVM-accessible) URL.
         // keycloak.getAuthServerUrl() is the externally-mapped URL the test JVM uses.
         String externalBaseUrl = keycloak.getAuthServerUrl();
-        var jwksUrl = new URL(externalBaseUrl + "/realms/" + realmName
-            + "/protocol/openid-connect/certs");
+        var jwksUrl = java.net.URI.create(externalBaseUrl + "/realms/" + realmName
+            + "/protocol/openid-connect/certs").toURL();
         var jwkSet = JWKSet.load(jwksUrl);
+
+        // Discover the signing algorithm from the JWT header so the test
+        // survives realm signing-alg changes (PS256, ES256, etc.).
+        var parsedJwt = SignedJWT.parse(jwt);
+        var alg = parsedJwt.getHeader().getAlgorithm();
 
         // Verify the JWT's signature against the realm's public keys.
         var keySource = new ImmutableJWKSet<SecurityContext>(jwkSet);
-        var keySelector = new JWSVerificationKeySelector<>(JWSAlgorithm.RS256, keySource);
+        var keySelector = new JWSVerificationKeySelector<SecurityContext>(alg, keySource);
         var processor = new DefaultJWTProcessor<SecurityContext>();
         processor.setJWSKeySelector(keySelector);
         var claims = processor.process(jwt, null);
@@ -154,10 +151,21 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // We assert structural correctness rather than a hard-coded base URL,
         // since Keycloak in dev mode reflects the Host header as the issuer.
         assertThat(claims.getIssuer()).endsWith("/realms/" + realmName);
-        assertThat(claims.getExpirationTime()).isAfter(new Date());
+        // Require at least 10s of remaining lifetime — catches any accidental
+        // misconfiguration of the token lifespan (Keycloak default is 5 min).
+        assertThat(claims.getExpirationTime())
+            .isAfter(new Date(System.currentTimeMillis() + 10_000));
     }
 
     // ---------- helpers ----------
+
+    /**
+     * Returns the Keycloak token endpoint URL as seen from inside the Keycloak
+     * container. Port 8080 is Keycloak's internal HTTP port (not a mapped one).
+     */
+    private String internalTokenEndpoint() {
+        return "http://localhost:8080/realms/" + realmName + "/protocol/openid-connect/token";
+    }
 
     /**
      * Reconfigures the SCIM provider component's {@code oauth-token-endpoint}
@@ -176,11 +184,9 @@ class ScimOidcAuthIT extends IntegrationTestBase {
      * back to the real Keycloak endpoint.
      */
     protected void useKeycloakTokenEndpoint() {
-        String internalTokenEndpoint = "http://localhost:8080/realms/"
-            + realmName + "/protocol/openid-connect/token";
         var componentResource = realm.components().component(scimComponentId);
         var rep = componentResource.toRepresentation();
-        rep.getConfig().putSingle("oauth-token-endpoint", internalTokenEndpoint);
+        rep.getConfig().putSingle("oauth-token-endpoint", internalTokenEndpoint());
         componentResource.update(rep);
     }
 
