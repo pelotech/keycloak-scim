@@ -250,6 +250,7 @@ Tunables read from `System.getProperty(...)` at runtime. Set via
 | Property | Default | Where used | Description |
 | --- | --- | --- | --- |
 | `scim.dispatch.threads` | `8` | `ScimDispatcher` | Size of the worker pool that processes async SCIM operations (LDAP-import propagation and reconciler-batch deletes). Pool is JVM-global. Higher values increase parallel throughput against the SCIM sink at the cost of more concurrent connections. Most SCIM servers tolerate 8–16; raise only if you have headroom on both sides. |
+| `scim.tls.insecureHostnameVerification` | `false` | `ScimClient` | When `true`, disables TLS hostname verification on outbound SCIM requests — any cert presented by the SCIM endpoint will be accepted regardless of CN/SAN. Escape hatch for dev environments, internal CAs with CN drift, or explicitly-trusted self-signed setups. **Leave `false` in production**: with verification off, a MITM presenting a valid cert for any domain can impersonate the SCIM endpoint and harvest bearer tokens. |
 | `keycloak.image` | `quay.io/keycloak/keycloak:25.0.6` | integration tests | Override the Keycloak container image used by the test harness. Used by the CI matrix to verify both 25.x and 26.x. Production-irrelevant. |
 
 ## What's NOT configurable (by design)
