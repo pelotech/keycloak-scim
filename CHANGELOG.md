@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.0](https://github.com/pelotech/keycloak-scim/compare/v1.0.0-rc.1...v1.0.0) (2026-05-26)
+
+
+### Build
+
+* **release:** consolidate release-please + OCI build into one workflow ([#16](https://github.com/pelotech/keycloak-scim/issues/16)) ([925a84c](https://github.com/pelotech/keycloak-scim/commit/925a84cb0d0e1f09cf9005ada1beab5bbfbf5b49))
+* **release:** drop unused QEMU setup step + promote to 1.0.0 ([#18](https://github.com/pelotech/keycloak-scim/issues/18)) ([d6dd3e3](https://github.com/pelotech/keycloak-scim/commit/d6dd3e39126ee6b31ea95b86127b2e3cf32e08e4))
+
 ## [1.0.0-rc.1](https://github.com/pelotech/keycloak-scim/compare/v1.0.0-rc.0...v1.0.0-rc.1) (2026-05-25)
 
 
