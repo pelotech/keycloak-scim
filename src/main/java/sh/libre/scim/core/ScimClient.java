@@ -126,20 +126,35 @@ public class ScimClient {
     }
 
     protected ScimClientConfig genScimClientConfig() {
-        return ScimClientConfig.builder()
+        var builder = ScimClientConfig.builder()
         .httpHeaders(defaultHeaders)
         .connectTimeout(30)
         .requestTimeout(30)
         .socketTimeout(30)
         .expectedHttpResponseHeaders(expectedResponseHeaders)
-        .hostnameVerifier((s, sslSession) -> true)
         // Override the SDK's hardcoded "no TCP connection reuse" + tiny
         // default pool. See KeepAliveConfigManipulator's javadoc for the
         // background — without this, every SCIM call pays full TCP
         // handshake + teardown cost (~43 ms on localhost in our perf
         // measurements).
-        .configManipulator(new KeepAliveConfigManipulator())
-        .build();
+        .configManipulator(new KeepAliveConfigManipulator());
+
+        if (tlsHostnameVerificationDisabled()) {
+            // Operator-opted-out via -Dscim.tls.insecureHostnameVerification=true.
+            // Default is strict verification (the SDK / Apache HttpClient
+            // falls back to its default verifier when none is set). Use
+            // the escape hatch only for dev, internal-CA-with-CN-drift, or
+            // explicitly-trusted self-signed scenarios; production should
+            // leave it off.
+            builder = builder.hostnameVerifier((s, sslSession) -> true);
+        }
+
+        return builder.build();
+    }
+
+    // package-private for tests
+    static boolean tlsHostnameVerificationDisabled() {
+        return Boolean.getBoolean("scim.tls.insecureHostnameVerification");
     }
 
     protected String BearerAuthentication(String token) {
