@@ -1,46 +1,28 @@
 # Releasing
 
-Runbook for cutting a release of this fork. The pipeline has three stages
-that run in order:
+Runbook for cutting a release of this fork.
 
-1. **release-please** scans conventional commits since the last release,
-   keeps an open release PR, and on merge pushes a `v*` tag.
-2. **release.yml** fires on the `v*` tag, builds a multi-arch OCI image,
-   pushes to `ghcr.io/pelotech/keycloak-scim`, signs with cosign, and
-   attaches SPDX + CycloneDX SBOM attestations.
-3. Operators consume the image via the K8s `image` volume type
-   (Kubernetes 1.36+ — see the README's ImageVolume section).
+A single workflow (`.github/workflows/release.yml`) runs on every push to
+`main` and does two things in one job:
 
-## Prerequisites
+1. **release-please** scans conventional commits since the last release
+   and keeps an open release PR.
+2. **OCI build + publish** builds a multi-arch image, pushes it to
+   `ghcr.io/pelotech/keycloak-scim`, signs with cosign keyless, and
+   attaches SPDX + CycloneDX SBOMs.
 
-### Token (one-time setup)
+The image tag depends on what happened in the run:
 
-release-please opens its release PRs and pushes tags using whichever
-token is configured. The default `GITHUB_TOKEN` works for the PR + tag
-itself, but **tags it pushes do not trigger downstream workflows**
-(GitHub's anti-recursion rule). That means the OCI image build will
-*not* fire automatically when the release PR merges unless a
-non-default token is used.
+- If release-please's PR was just merged (i.e. `release_created=true`),
+  the image is tagged with the new SemVer — e.g. `1.0.0-rc.1`.
+- Otherwise, the image is tagged `git-<short_sha>`. Every commit on
+  `main` is fetchable by SHA, which is useful for testing a specific
+  commit against a cluster without cutting a tag.
 
-Two paths:
+Operators consume the image via the K8s `image` volume type (Kubernetes
+1.36+ — see the README's ImageVolume section).
 
-- **Recommended: a GitHub App.** Install a small App on the repo with
-  `contents: write` + `pull-requests: write`. Generate an installation
-  token and store it as the repo secret `RELEASE_PLEASE_TOKEN`. The
-  release-please workflow picks it up automatically (see the
-  `secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN` fallback in
-  `.github/workflows/release-please.yml`).
-- **Fallback: a Personal Access Token (classic or fine-grained) with
-  the same permissions.** Same secret name. Uses the maintainer's
-  identity for the tag push, which is fine for small teams but binds
-  release authority to one human's PAT lifecycle.
-
-Without either secret, the OCI workflow won't auto-fire. You can still
-publish the image by manually triggering `release.yml` via
-`workflow_dispatch` after merging a release PR — see "If the OCI image
-didn't auto-publish" below.
-
-### Conventional commits
+## Conventional commits
 
 release-please computes the next version from commit message prefixes:
 
@@ -57,21 +39,23 @@ for version computation but it'll still appear in `git log`.
 
 ## Cutting a normal release
 
-1. Land conventional commits on `main` as usual.
-2. release-please-action runs on every push to `main` and keeps a
-   single open release PR titled `chore(main): release X.Y.Z`. The
-   proposed version reflects the cumulative effect of all unreleased
-   conventional commits.
+1. Land conventional commits on `main` as usual. Each push triggers the
+   release workflow, which publishes an image tagged `git-<short_sha>`.
+2. release-please keeps a single open release PR titled
+   `chore(main): release X.Y.Z`. The proposed version reflects the
+   cumulative effect of all unreleased conventional commits.
 3. Review the PR diff. It should:
    - Bump `version =` in `build.gradle.kts`.
    - Update `.release-please-manifest.json`.
    - Update `CHANGELOG.md` with categorized entries.
-4. Merge the PR. release-please pushes tag `vX.Y.Z` and creates a
-   GitHub Release.
-5. `release.yml` fires on the tag and publishes
-   `ghcr.io/pelotech/keycloak-scim:X.Y.Z` plus floating tags `X.Y` and
-   `latest`. Multi-arch (linux/amd64, linux/arm64), cosign-signed,
-   SBOM-attested.
+4. Merge the PR. The same workflow run that the merge triggers will:
+   - Push tag `vX.Y.Z` and create a GitHub Release (via release-please).
+   - Publish `ghcr.io/pelotech/keycloak-scim:X.Y.Z` (multi-arch,
+     cosign-signed, SBOM-attested).
+
+No tag-push trigger, no inter-workflow chain, no PAT. The OCI build
+runs as later steps in the same job that release-please ran in, so it
+sees `release_created=true` and uses the SemVer for the image tag.
 
 ## Pre-release (dry run)
 
@@ -84,11 +68,9 @@ For verifying the image build, registry push, signing, and SBOM
 without involving release-please:
 
 1. Trigger `release.yml` via `workflow_dispatch` from the GitHub
-   Actions UI (or `gh workflow run release.yml -f
-   version_override=test-build`).
-2. The workflow publishes `ghcr.io/pelotech/keycloak-scim:test-build`
-   without touching `:latest` or `:X.Y`. The version label inside the
-   image is `test-build`.
+   Actions UI (or `gh workflow run release.yml -f version_override=test-build`).
+2. On `workflow_dispatch`, release-please is skipped entirely. The
+   workflow publishes `ghcr.io/pelotech/keycloak-scim:test-build`.
 3. Verify the image (see "Verifying an artifact" below). When you're
    satisfied, optionally delete the `:test-build` tag from the
    registry to keep things tidy.
@@ -115,17 +97,13 @@ tag, OCI build — without committing to a stable `1.0.0`:
 2. release-please opens a PR proposing version `1.0.0-rc.0` (overriding
    whatever it would have computed from accumulated commits).
 
-3. Merge the PR. Tag `v1.0.0-rc.0` is pushed; `release.yml` fires.
+3. Merge the PR. The same workflow run that the merge triggers
+   publishes `ghcr.io/pelotech/keycloak-scim:1.0.0-rc.0` and pushes
+   tag `v1.0.0-rc.0`.
 
-4. Because `1.0.0-rc.0` contains a `-` (SemVer prerelease marker), the
-   workflow publishes only the explicit
-   `ghcr.io/pelotech/keycloak-scim:1.0.0-rc.0` tag — `:latest` and
-   `:1.0` are untouched. Stable-release consumers are isolated from the
-   RC.
+4. Verify the artifact end-to-end (see below).
 
-5. Verify the artifact end-to-end (see below).
-
-6. If problems surface, fix them on `main`, then either:
+5. If problems surface, fix them on `main`, then either:
    - Cut another RC: `Release-As: 1.0.0-rc.1`, repeat.
    - Or skip directly to GA when ready: `Release-As: 1.0.0`.
 
@@ -149,8 +127,9 @@ after an RC tends to land on something like `1.1.0-rc.0` (it treats
 the previous release as the baseline and bumps from there). The
 explicit footer keeps things deterministic.
 
-After this PR merges, `:1.0.0`, `:1.0`, and `:latest` are all
-published.
+After this PR merges, `ghcr.io/pelotech/keycloak-scim:1.0.0` is
+published. There are no floating `:latest` or `:major.minor` tags — pin
+to the explicit version (or, even better, to the manifest digest).
 
 ## Verifying an artifact
 
@@ -175,24 +154,6 @@ For a deeper smoke test, mount the image into a real Keycloak pod via
 the README's ImageVolume example and confirm the SCIM provider
 appears under *Realm Settings → Provider Info* (or via the admin REST
 `/admin/serverinfo` endpoint).
-
-## If the OCI image didn't auto-publish
-
-This is the expected state when no `RELEASE_PLEASE_TOKEN` is
-configured. After merging a release-please PR:
-
-```bash
-gh workflow run release.yml -f version_override=X.Y.Z
-```
-
-Or trigger from the GitHub Actions UI. The workflow uses the version
-override directly — no tag is involved, so be precise about the
-intended version. The published image content is identical to what an
-auto-fired run would produce (the source tree at the merge commit is
-the same).
-
-Long-term fix: configure `RELEASE_PLEASE_TOKEN` per the Prerequisites
-section.
 
 ## Bootstrap state (for the curious)
 
