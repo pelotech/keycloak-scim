@@ -57,7 +57,17 @@ Two paths to getting the plugin loaded into Keycloak:
 
 Mount the published OCI image as a Kubernetes
 [`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image)
-on Keycloak's `/opt/keycloak/providers/`:
+onto Keycloak's providers directory.
+
+**Providers directory depends on the Keycloak image flavor:**
+
+| Image | Providers directory |
+| --- | --- |
+| `quay.io/keycloak/keycloak` (official) | `/opt/keycloak/providers/` |
+| `docker.io/bitnami/keycloak` (and downstream mirrors) | `/opt/bitnami/keycloak/providers/` |
+
+Mount the single JAR via `subPath` so any other providers already in
+the directory (e.g. distro-bundled SPIs) aren't shadowed:
 
 ```yaml
 apiVersion: v1
@@ -71,7 +81,8 @@ spec:
       args: ["start-dev"]
       volumeMounts:
         - name: scim-provider
-          mountPath: /opt/keycloak/providers
+          mountPath: /opt/keycloak/providers/keycloak-scim.jar
+          subPath: keycloak-scim.jar
           readOnly: true
   volumes:
     - name: scim-provider
@@ -81,9 +92,13 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
+For Bitnami Keycloak, change `mountPath` to
+`/opt/bitnami/keycloak/providers/keycloak-scim.jar`.
+
 The image is `FROM scratch` — payload only, no shell, no entrypoint.
-Multi-arch manifest, signed with cosign keyless (GitHub OIDC), with
-SPDX + CycloneDX SBOMs attached as cosign attestations.
+Multi-arch manifest (linux/amd64 + linux/arm64), signed with cosign
+keyless (GitHub OIDC), with SPDX + CycloneDX SBOMs attached as cosign
+attestations.
 
 Before deploying, verify the signature:
 
@@ -102,6 +117,23 @@ cosign download attestation \
   ghcr.io/pelotech/keycloak-scim:1.0.0 \
   | jq -r '.payload | @base64d | fromjson | .predicate'
 ```
+
+After deploying, confirm the SCIM provider registered with Keycloak:
+
+```sh
+# Get an admin access token first, e.g.:
+#   TOKEN=$(curl -sf -X POST "$KC_URL/realms/master/protocol/openid-connect/token" \
+#     -d grant_type=password -d username=admin -d password=admin \
+#     -d client_id=admin-cli | jq -r .access_token)
+
+curl -sf -H "Authorization: Bearer $TOKEN" "$KC_URL/admin/serverinfo" \
+  | jq -r '.componentTypes."org.keycloak.storage.UserStorageProvider"[].id' \
+  | grep -qx scim && echo "scim provider registered" || echo "MISSING — see Troubleshooting"
+```
+
+Keycloak's failure mode for a misconfigured providers mount is silent
+— no error log, the SPI just never registers. This recipe
+distinguishes "JAR loaded" from "JAR ignored."
 
 ### Bare JAR (development)
 
@@ -166,6 +198,25 @@ SCIM provider component in the realm.
 [`docs/release-1.0.0-todos.md`](docs/release-1.0.0-todos.md). Until
 that lands, image tags are pre-1.0 and breaking changes between
 patch versions are possible — pin by digest.
+
+## Troubleshooting
+
+**The JAR is on disk but the SCIM provider isn't visible in the admin
+console or in `/admin/serverinfo`.** Almost always one of:
+
+- **Wrong providers directory** for the Keycloak image flavor in use.
+  Vanilla `quay.io/keycloak/keycloak` uses `/opt/keycloak/providers/`;
+  Bitnami uses `/opt/bitnami/keycloak/providers/`. See [Quick
+  start](#quick-start) for the mount-path table.
+- **JAR was unpacked and repacked** without preserving the
+  `META-INF/services/*` files. Keycloak's provider discovery is
+  SPI-based and reads those service descriptors at boot; without
+  them, the factory classes won't be loaded even though they're on
+  the classpath.
+
+The verification recipe in [Quick start](#quick-start) surfaces
+either failure mode immediately — if `scim` isn't in the
+`/admin/serverinfo` provider list, the JAR didn't register.
 
 ## License
 
