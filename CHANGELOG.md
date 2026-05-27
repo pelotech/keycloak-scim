@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1](https://github.com/pelotech/keycloak-scim/compare/v1.0.0...v1.0.1) (2026-05-26)
+
+
+### Bug fixes
+
+* **security:** verify TLS hostnames by default; insecure mode opt-in ([#19](https://github.com/pelotech/keycloak-scim/issues/19)) ([4c35852](https://github.com/pelotech/keycloak-scim/commit/4c35852e4ddaa1e43ed594ea7eb8a46c96c32ca8))
+
+
+### Documentation
+
+* tighten ImageVolume install + add troubleshooting ([#20](https://github.com/pelotech/keycloak-scim/issues/20)) ([1011a71](https://github.com/pelotech/keycloak-scim/commit/1011a71ebd4713fed14107c3744a9f8a06a6ed8e))
+
 ## [1.0.0](https://github.com/pelotech/keycloak-scim/compare/v1.0.0-rc.1...v1.0.0) (2026-05-26)
 
 
