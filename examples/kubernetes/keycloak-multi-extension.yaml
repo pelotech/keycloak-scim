@@ -1,0 +1,78 @@
+# Multi-extension Keycloak provider composition (runtime compose).
+#
+# Keycloak loads provider JARs from a single directory. A Kubernetes
+# image: volume maps ONE OCI image to ONE mount, so it cannot compose
+# multiple extension images into that one directory. This manifest
+# populates a shared emptyDir at startup instead: each extension is
+# mounted read-only as an image: volume, an init container (the Keycloak
+# image itself — it ships cp + a shell) copies each JAR into the
+# emptyDir, and the main Keycloak container boots against it.
+#
+# Composes to N extensions: add one image: volume + one cp line each.
+#
+# Tradeoff: providers are mounted at runtime, so Keycloak augments at pod
+# boot rather than at image-build time. For build-time augmentation, bake
+# a custom image instead (see the README "Custom image" tier).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      volumes:
+        # Shared, writable providers dir, populated by the init container.
+        - name: providers
+          emptyDir: {}
+        # keycloak-scim payload image (FROM scratch; JAR at /keycloak-scim.jar).
+        # Pin by digest in production; tag shown for readability.
+        - name: ext-scim
+          image:
+            reference: ghcr.io/pelotech/keycloak-scim:1.0.0
+            pullPolicy: IfNotPresent
+        # Placeholder for a second extension — replace or delete.
+        # Adding an extension = one more image: volume here + one more cp
+        # line in the init container below.
+        - name: ext-other
+          image:
+            reference: ghcr.io/example/your-other-extension:0.1.0
+            pullPolicy: IfNotPresent
+      initContainers:
+        # Reuse the Keycloak image (already pulled for the main container);
+        # it has cp + a shell, so no extra utility image in the supply chain.
+        - name: seed-providers
+          image: quay.io/keycloak/keycloak:26.6.3
+          command:
+            - /usr/bin/sh
+            - -c
+            - |
+              set -eu
+              cp /mnt/extensions/scim/keycloak-scim.jar /providers/keycloak-scim.jar
+              cp /mnt/extensions/other/your-other-extension.jar /providers/your-other-extension.jar
+          volumeMounts:
+            - name: providers
+              mountPath: /providers
+            - name: ext-scim
+              mountPath: /mnt/extensions/scim
+              readOnly: true
+            - name: ext-other
+              mountPath: /mnt/extensions/other
+              readOnly: true
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.6.3
+          args: ["start-dev"]
+          volumeMounts:
+            # Vanilla image: /opt/keycloak/providers
+            # Bitnami image: change to /opt/bitnami/keycloak/providers
+            - name: providers
+              mountPath: /opt/keycloak/providers

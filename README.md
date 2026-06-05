@@ -51,9 +51,11 @@ What's added relative to upstream:
 
 ## Quick start
 
-Two paths to getting the plugin loaded into Keycloak:
+Four ways to get the plugin loaded into Keycloak, by scenario:
 
-### Kubernetes ImageVolume (recommended)
+### ImageVolume (single extension)
+
+*Use when keycloak-scim is the only provider extension you're adding.*
 
 Mount the published OCI image as a Kubernetes
 [`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image)
@@ -77,7 +79,7 @@ metadata:
 spec:
   containers:
     - name: keycloak
-      image: quay.io/keycloak/keycloak:25.0.6
+      image: quay.io/keycloak/keycloak:26.6.3
       args: ["start-dev"]
       volumeMounts:
         - name: scim-provider
@@ -91,6 +93,12 @@ spec:
         reference: ghcr.io/pelotech/keycloak-scim:1.0.0
         pullPolicy: IfNotPresent
 ```
+
+> **This does not compose for multiple extensions.** An `image:` volume
+> maps one OCI image to one mount, but Keycloak loads all providers from
+> a single directory. To add keycloak-scim *alongside* other extensions,
+> use [Runtime compose (multiple extensions)](#runtime-compose-multiple-extensions)
+> below.
 
 For Bitnami Keycloak, change `mountPath` to
 `/opt/bitnami/keycloak/providers/keycloak-scim.jar`.
@@ -134,6 +142,54 @@ curl -sf -H "Authorization: Bearer $TOKEN" "$KC_URL/admin/serverinfo" \
 Keycloak's failure mode for a misconfigured providers mount is silent
 — no error log, the SPI just never registers. This recipe
 distinguishes "JAR loaded" from "JAR ignored."
+
+### Runtime compose (multiple extensions)
+
+*Use when you're adding keycloak-scim alongside other provider extensions.*
+
+Populate a shared `emptyDir` at startup: mount each extension as a
+read-only `image:` volume, let an init container (the Keycloak image
+itself — it has `cp` and a shell) copy each JAR into the `emptyDir`,
+then boot Keycloak against the populated directory. Composes to any
+number of extensions — one `image:` volume and one copy line each.
+
+A complete, copy-pasteable Deployment is in
+[`examples/kubernetes/keycloak-multi-extension.yaml`](examples/kubernetes/keycloak-multi-extension.yaml).
+
+**Tradeoff:** providers mounted at runtime aren't part of a
+`kc.sh build`-augmented image, so Keycloak augments at pod boot (a
+per-pod startup cost) rather than once at image-build time. For
+build-time augmentation, use
+[Custom image (build-time augmentation)](#custom-image-build-time-augmentation).
+
+*Optional:* because the init container is the Keycloak image, it can
+also run `kc.sh build` to augment once during init instead of every
+boot — this additionally requires sharing the augmentation output
+directory between the init and main containers.
+
+### Custom image (build-time augmentation)
+
+*Use when you want a baked, pre-augmented image and have a build pipeline.*
+
+Bake the provider JAR into a Keycloak image and augment with
+`kc.sh build`. The published `FROM scratch` image is an ideal
+`COPY --from` source:
+
+```dockerfile
+FROM quay.io/keycloak/keycloak:26.6.3 AS builder
+# Pin by digest in production; tag shown for readability.
+COPY --from=ghcr.io/pelotech/keycloak-scim:1.0.0 /keycloak-scim.jar /opt/keycloak/providers/
+RUN /opt/keycloak/bin/kc.sh build
+
+FROM quay.io/keycloak/keycloak:26.6.3
+COPY --from=builder /opt/keycloak/ /opt/keycloak/
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start"]
+```
+
+Add more extensions with additional
+`COPY --from=<image> /<jar> /opt/keycloak/providers/` lines before the
+`kc.sh build`.
 
 ### Bare JAR (development)
 
@@ -188,9 +244,6 @@ SCIM provider component in the realm.
   bottleneck analysis, async dispatch design.
 - [`docs/releasing.md`](docs/releasing.md) — release runbook
   (release-please flow, OCI image publication, RC dry-runs).
-- [`docs/installation.md`](docs/installation.md),
-  [`docs/container.md`](docs/container.md) — additional install
-  paths inherited from upstream.
 
 ## Status
 
