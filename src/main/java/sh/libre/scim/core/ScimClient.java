@@ -244,19 +244,38 @@ public class ScimClient {
         long t3 = System.nanoTime();
         ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
 
-        if (!response.isSuccess()){
-            LOGGER.warn(response.getResponseBody());
-            LOGGER.warn(response.getHttpStatus());
+        handleCreateResponse(adapter, response);
+    };
+
+    /**
+     * Persists the SCIM mapping from a create response, but only when the POST
+     * succeeded. A rejected create (e.g. the target returns 400 for a user with
+     * no email) carries no parsed resource: {@code response.getResource()} is
+     * null, so applying it NPEs and — worse — a mapping persisted here would be
+     * a phantom record for a resource the target never created. On failure we
+     * log and bail, leaving the user unmapped so a later sync can retry.
+     *
+     * @return true if the mapping was applied and saved, false if the response
+     *         was unsuccessful and skipped.
+     */
+    // package-private for tests
+    <S extends ResourceNode> boolean handleCreateResponse(Adapter<?, S> adapter, ServerResponse<S> response) {
+        if (!response.isSuccess()) {
+            LOGGER.warnf("Failed to create SCIM resource %s: HTTP %d %s",
+                adapter.getId(), response.getHttpStatus(), response.getResponseBody());
+            return false;
         }
 
+        long t0 = System.nanoTime();
         adapter.apply(response.getResource());
-        long t4 = System.nanoTime();
-        ScimClientMetrics.APPLY_RESPONSE_NANOS.add(t4 - t3);
+        long t1 = System.nanoTime();
+        ScimClientMetrics.APPLY_RESPONSE_NANOS.add(t1 - t0);
         adapter.saveMapping();
-        long t5 = System.nanoTime();
-        ScimClientMetrics.SAVE_MAPPING_NANOS.add(t5 - t4);
+        long t2 = System.nanoTime();
+        ScimClientMetrics.SAVE_MAPPING_NANOS.add(t2 - t1);
         ScimClientMetrics.CREATE_COUNT.increment();
-    };
+        return true;
+    }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(Class<A> aClass,
             M kcModel) {
