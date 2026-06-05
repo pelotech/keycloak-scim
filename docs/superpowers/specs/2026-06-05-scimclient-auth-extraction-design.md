@@ -47,10 +47,17 @@ Introduce a functional interface in the `core` package:
 
 ```java
 @FunctionalInterface
-interface AdapterFactory<M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> {
+public interface AdapterFactory<M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> {
     A create(KeycloakSession session, String componentId);
 }
 ```
+
+`AdapterFactory` must be **`public`**: it is a parameter type on the `public`
+`create`/`replace`/`delete`/`sync`/`refreshResources`/`importResources`
+methods, and every call site lives in a different package
+(`event`, `storage`, `ldap`, `reconcile`), as does the
+`ScimLdapStorageMapperTest` matcher that names the type. (`getAdapter` itself
+stays `protected` — internal to `ScimClient`.)
 
 - `getAdapter` becomes `getAdapter(AdapterFactory<M,S,A> factory)` with body
   `factory.create(session, model.getId())` — no reflection, no `try/catch`.
