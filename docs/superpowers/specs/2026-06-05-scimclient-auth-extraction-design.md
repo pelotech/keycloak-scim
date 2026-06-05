@@ -73,18 +73,29 @@ references type-check against the matching constructor.
 
 New class `core/ScimAuthHeaders.java` owning the auth/header concern.
 
-**Holds:** the `defaultHeaders` and `expectedResponseHeaders` maps and the
-`OAuthClientCredentialsTokenSource tokenSource`.
+**Holds:** the `defaultHeaders` and `expectedResponseHeaders` maps, the
+`OAuthClientCredentialsTokenSource tokenSource`, and a `ComponentModel model`
+reference. The `model` reference is required because `BasicAuthentication`
+reads config from it (see the "Latent bug" note below) — moving the method
+without the field would not compile. `tokenSource` is a **package-private
+field** (matching `ScimClient`'s current `:45`), so same-package unit tests
+read `client.auth.tokenSource` directly.
 
 **Constructor (`ComponentModel`):** runs the auth-mode switch
 (`BEARER` / `BASIC_AUTH` / `CLIENT_CREDENTIALS`), seeds the authorization
 header and content-type, and builds the token source — the
 `buildTokenSourceFromModel` logic moves here.
 
-**Methods (moved verbatim from `ScimClient`):** `sendWithAuthRefresh`,
-`refreshAuthHeader` (private), `BasicAuthentication`, `BearerAuthentication`.
-Exposes `headers()` and `expectedResponseHeaders()` accessors so the request
-builder can be configured.
+**Methods (moved verbatim from `ScimClient`):** `sendWithAuthRefresh`
+(package-private, preserving its current visibility), `refreshAuthHeader`
+(private), `BasicAuthentication`, `BearerAuthentication`.
+
+**Accessors:** `headers()` and `expectedResponseHeaders()`. **Constraint:**
+`headers()` MUST return the live map field itself, NOT a defensive/unmodifiable
+copy. The 401-refresh path depends on `genScimClientConfig` and
+`refreshAuthHeader` sharing one map instance (see "Why this seam"); a copy here
+silently breaks token refresh with no compile error — only `ScimResilienceIT`
+would catch it.
 
 **Package-private test constructor:** accepts an explicit
 `OAuthClientCredentialsTokenSource` (mirrors the one `ScimClient` has today)
@@ -132,8 +143,18 @@ Pure refactor; the existing suite is the oracle.
 - **`ScimClientTlsTest`**, **`ScimClientCreateResponseTest`**,
   **`UserAdapterTest`** — unaffected (no moved members; `getAdapter`/`*.class`
   not referenced).
-- Any test passing `XAdapter.class` (e.g. **`ScimLdapStorageMapperTest`**)
-  flips to `XAdapter::new`.
+- **`ScimLdapStorageMapperTest` (Mockito) — does NOT flip to `::new`.**
+  Lines `:70` and `:93` do
+  `verify(client).create(UserAdapter.class, user)` /
+  `verify(client).replace(UserAdapter.class, user)`. A method reference
+  (`UserAdapter::new`) is a fresh lambda instance with no stable
+  `equals`, so verifying against a second `::new` would never match. These
+  two verifications change to a type-appropriate matcher, e.g.
+  `verify(client).create(ArgumentMatchers.<AdapterFactory<UserModel, User, UserAdapter>>any(), eq(user))`
+  (existing `@SuppressWarnings` extended to cover the matcher as needed). The
+  production call sites in `ScimLdapStorageMapper.java:50,55` still flip to
+  `UserAdapter::new`; it is only the *verification* arguments that must use a
+  matcher.
 - Integration tests cover the wiring end-to-end: `ScimResilienceIT`
   (retry + 401 refresh), the propagation ITs (CRUD/sync), `ScimMultiTenancyIT`
   (multi-provider fan-out).
@@ -146,6 +167,23 @@ Pure refactor; the existing suite is the oracle.
 3. Add a focused `ScimAuthHeadersTest` only if it covers logic the migrated
    tests don't already exercise (avoid duplicate coverage).
 4. Final: `./gradlew test integrationTest`; LSP diagnostics clean.
+
+## Latent bug found during design (out of scope, flagged)
+
+`BasicAuthentication` (`ScimClient.java:120-126`) double-resolves its
+arguments: the caller passes `model.get("auth-user")` / `model.get("auth-pass")`
+(`:90`), and the method then calls `model.get(username)` / `model.get(password)`
+*again* — effectively `model.get(model.get("auth-user"))`. So `BASIC_AUTH`
+produces a correct header only if the configured username/password values
+happen to also be config keys; otherwise it's wrong. There is no test covering
+`BASIC_AUTH`, so this is untested today.
+
+**Decision for this refactor:** move `BasicAuthentication` **verbatim**
+(carrying the `model` field) to preserve behavior exactly — this refactor does
+not change behavior. The bug is recorded here and recommended as a *separate*
+follow-up (fix the double-lookup and add a `BASIC_AUTH` test), to be decided by
+the maintainer. Not fixed here because the fix is a behavior change on an
+untested path and falls outside the stated "behavior-preserving" scope.
 
 ## Non-goals
 
