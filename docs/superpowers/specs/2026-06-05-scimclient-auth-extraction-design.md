@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-05
 **Status:** Approved (design)
-**Type:** Behavior-preserving refactor
+**Type:** Refactor (behavior-preserving, except one scoped basic-auth bug fix)
 
 ## Background
 
@@ -80,22 +80,23 @@ references type-check against the matching constructor.
 
 New class `core/ScimAuthHeaders.java` owning the auth/header concern.
 
-**Holds:** the `defaultHeaders` and `expectedResponseHeaders` maps, the
-`OAuthClientCredentialsTokenSource tokenSource`, and a `ComponentModel model`
-reference. The `model` reference is required because `BasicAuthentication`
-reads config from it (see the "Latent bug" note below) — moving the method
-without the field would not compile. `tokenSource` is a **package-private
-field** (matching `ScimClient`'s current `:45`), so same-package unit tests
-read `client.auth.tokenSource` directly.
+**Holds:** the `defaultHeaders` and `expectedResponseHeaders` maps and the
+`OAuthClientCredentialsTokenSource tokenSource`. No retained `ComponentModel`
+field is needed: the constructor uses its `model` parameter locally to seed
+headers, and the corrected `BasicAuthentication` (see "Basic-auth bug fix"
+below) takes already-resolved credential strings rather than re-reading the
+model. `tokenSource` is a **package-private field** (matching `ScimClient`'s
+current `:45`), so same-package unit tests read `client.auth.tokenSource`
+directly.
 
 **Constructor (`ComponentModel`):** runs the auth-mode switch
 (`BEARER` / `BASIC_AUTH` / `CLIENT_CREDENTIALS`), seeds the authorization
 header and content-type, and builds the token source — the
 `buildTokenSourceFromModel` logic moves here.
 
-**Methods (moved verbatim from `ScimClient`):** `sendWithAuthRefresh`
+**Methods (moved from `ScimClient`):** `sendWithAuthRefresh`
 (package-private, preserving its current visibility), `refreshAuthHeader`
-(private), `BasicAuthentication`, `BearerAuthentication`.
+(private), `BasicAuthentication` (corrected — see below), `BearerAuthentication`.
 
 **Accessors:** `headers()` and `expectedResponseHeaders()`. **Constraint:**
 `headers()` MUST return the live map field itself, NOT a defensive/unmodifiable
@@ -171,11 +172,17 @@ Pure refactor; the existing suite is the oracle.
 1. Establish a green baseline — `./gradlew test` and confirm
    `integrationTest` compiles — *before* any edit.
 2. Change 1 → `./gradlew test`. Then Change 2 → `./gradlew test`.
-3. Add a focused `ScimAuthHeadersTest` only if it covers logic the migrated
-   tests don't already exercise (avoid duplicate coverage).
+3. Add a `BASIC_AUTH` test (in `ScimClientAuthBranchTest` or a focused
+   `ScimAuthHeadersTest`) asserting the authorization header equals
+   `Basic base64("user:pass")` for a model configured with
+   `auth-mode=BASIC_AUTH`, `auth-user`, `auth-pass`. This pins the corrected
+   behavior. This test is **expected to fail against the current buggy code**
+   and pass after the fix — write it first (red), then apply the fix (green).
+   Add other `ScimAuthHeaders` unit coverage only where it isn't already
+   exercised by the migrated tests (avoid duplication).
 4. Final: `./gradlew test integrationTest`; LSP diagnostics clean.
 
-## Latent bug found during design (out of scope, flagged)
+## Basic-auth bug fix (in scope)
 
 `BasicAuthentication` (`ScimClient.java:120-126`) double-resolves its
 arguments: the caller passes `model.get("auth-user")` / `model.get("auth-pass")`
@@ -185,17 +192,31 @@ produces a correct header only if the configured username/password values
 happen to also be config keys; otherwise it's wrong. There is no test covering
 `BASIC_AUTH`, so this is untested today.
 
-**Decision for this refactor:** move `BasicAuthentication` **verbatim**
-(carrying the `model` field) to preserve behavior exactly — this refactor does
-not change behavior. The bug is recorded here and recommended as a *separate*
-follow-up (fix the double-lookup and add a `BASIC_AUTH` test), to be decided by
-the maintainer. Not fixed here because the fix is a behavior change on an
-untested path and falls outside the stated "behavior-preserving" scope.
+**Decision:** fix it as part of this work. The corrected method takes the
+already-resolved credential strings and uses them directly:
+
+```java
+protected String BasicAuthentication(String username, String password) {
+    return BasicAuth.builder()
+        .username(username)
+        .password(password)
+        .build()
+        .getAuthorizationHeaderValue();
+}
+```
+
+The caller is unchanged — it still passes
+`BasicAuthentication(model.get("auth-user"), model.get("auth-pass"))` — so the
+header is now built from the configured credentials as intended.
+
+**This is the one intentional behavior change in the refactor**, on a
+previously-broken, untested path. It is covered by a new test (below) so the
+corrected behavior is pinned. Everything else remains behavior-preserving.
 
 ## Non-goals
 
 - No batch-sync (`ScimSyncService`) extraction or per-operation command
   classes (the "B"/"C" options). Revisit if `ScimClient` keeps growing.
-- No behavior change: no new retry semantics, no auth changes, no API changes
-  to the event/storage/ldap/reconcile callers beyond the `*.class` → `::new`
-  swap.
+- No behavior change beyond the scoped basic-auth fix: no new retry semantics,
+  no other auth changes, no API changes to the event/storage/ldap/reconcile
+  callers beyond the `*.class` → `::new` swap.
