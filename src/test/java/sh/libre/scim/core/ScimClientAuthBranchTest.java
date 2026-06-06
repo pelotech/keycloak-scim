@@ -38,8 +38,8 @@ class ScimClientAuthBranchTest {
 
         var client = new ScimClient(model, mock(KeycloakSession.class));
 
-        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer eyJ.test");
-        assertThat(client.tokenSource).isNotNull();
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer eyJ.test");
+        assertThat(client.auth.tokenSource).isNotNull();
     }
 
     @Test
@@ -55,8 +55,8 @@ class ScimClientAuthBranchTest {
 
         var client = new ScimClient(model, mock(KeycloakSession.class));
 
-        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer static-token");
-        assertThat(client.tokenSource).isNull();
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer static-token");
+        assertThat(client.auth.tokenSource).isNull();
     }
 
     @Test
@@ -75,7 +75,7 @@ class ScimClientAuthBranchTest {
 
         String expected = "Basic " + Base64.getEncoder()
             .encodeToString("scim-user:s3cr3t".getBytes(StandardCharsets.UTF_8));
-        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo(expected);
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo(expected);
     }
 
     @Test
@@ -111,7 +111,7 @@ class ScimClientAuthBranchTest {
             return n == 1 ? r401 : r201;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         assertThat(attempts.get()).isEqualTo(2);
         assertThat(result.getHttpStatus()).isEqualTo(201);
@@ -148,7 +148,7 @@ class ScimClientAuthBranchTest {
             return n == 1 ? r403 : r201;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         assertThat(attempts.get()).isEqualTo(2);
         assertThat(result.getHttpStatus()).isEqualTo(201);
@@ -177,7 +177,7 @@ class ScimClientAuthBranchTest {
             return r401;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         // Without a token source, no retry — exactly one invocation.
         assertThat(attempts.get()).isEqualTo(1);

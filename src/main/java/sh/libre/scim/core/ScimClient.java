@@ -1,9 +1,5 @@
 package sh.libre.scim.core;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.function.Supplier;
-
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.ProcessingException;
@@ -11,11 +7,9 @@ import jakarta.ws.rs.ProcessingException;
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
-import de.captaingoldfish.scim.sdk.client.http.BasicAuth;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
-import de.captaingoldfish.scim.sdk.common.resources.base.ScimObjectNode;
 import de.captaingoldfish.scim.sdk.common.response.ListResponse;
 
 import org.jboss.logging.Logger;
@@ -24,8 +18,6 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
 import org.keycloak.storage.user.SynchronizationResult;
-
-import com.google.common.net.HttpHeaders;
 
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.RetryConfig;
@@ -37,63 +29,24 @@ public class ScimClient {
     final protected ScimRequestBuilder scimRequestBuilder;
     final protected RetryRegistry registry;
     final protected KeycloakSession session;
-    final protected String contentType;
     final protected ComponentModel model;
     final protected String scimApplicationBaseUrl;
-    final protected Map<String, String> defaultHeaders;
-    final protected Map<String, String> expectedResponseHeaders;
-    final protected OAuthClientCredentialsTokenSource tokenSource;
+    final protected ScimAuthHeaders auth;
 
     public ScimClient(ComponentModel model, KeycloakSession session) {
-        this(model, session, buildTokenSourceFromModel(model));
+        this(model, session, new ScimAuthHeaders(model));
     }
 
-    private static OAuthClientCredentialsTokenSource buildTokenSourceFromModel(ComponentModel model) {
-        if ("CLIENT_CREDENTIALS".equals(model.get("auth-mode"))) {
-            return new OAuthClientCredentialsTokenSource(
-                model.getId(),
-                OAuthConfig.from(model),
-                new OAuthClientCredentialsTokenSource.HttpTokenMinter(model.getId()));
-        }
-        return null;
-    }
-
-    /**
-     * Package-private constructor for testing. Accepts an explicit
-     * {@link OAuthClientCredentialsTokenSource} so unit tests can inject a
-     * stub minter without making real HTTP calls.
-     *
-     * <p>This is also the single shared init path — the production constructor
-     * builds the token source via {@link #buildTokenSourceFromModel} and delegates
-     * here so setup logic is never duplicated.
-     */
-    // package-private for tests
+    // package-private for tests: inject an explicit token source.
     ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
+        this(model, session, new ScimAuthHeaders(model, tokenSource));
+    }
+
+    private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth) {
         this.model = model;
-        this.contentType = model.get("content-type");
         this.session = session;
         this.scimApplicationBaseUrl = model.get("endpoint");
-        this.defaultHeaders = new HashMap<>();
-        this.expectedResponseHeaders = new HashMap<>();
-        this.tokenSource = tokenSource;
-
-        if (tokenSource != null) {
-            defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
-        } else {
-            switch (model.get("auth-mode")) {
-                case "BEARER":
-                    defaultHeaders.put(HttpHeaders.AUTHORIZATION,
-                        BearerAuthentication(model.get("auth-pass")));
-                    break;
-                case "BASIC_AUTH":
-                    defaultHeaders.put(HttpHeaders.AUTHORIZATION,
-                        BasicAuthentication(model.get("auth-user"),
-                                            model.get("auth-pass")));
-                    break;
-            }
-        }
-
-        defaultHeaders.put(HttpHeaders.CONTENT_TYPE, contentType);
+        this.auth = auth;
 
         scimRequestBuilder = new ScimRequestBuilder(scimApplicationBaseUrl, genScimClientConfig());
 
@@ -117,21 +70,13 @@ public class ScimClient {
         registry = RetryRegistry.of(retryConfig);
     }
 
-    protected String BasicAuthentication(String username, String password) {
-        return  BasicAuth.builder()
-        .username(username)
-        .password(password)
-        .build()
-        .getAuthorizationHeaderValue();
-    }
-
     protected ScimClientConfig genScimClientConfig() {
         var builder = ScimClientConfig.builder()
-        .httpHeaders(defaultHeaders)
+        .httpHeaders(auth.headers())
         .connectTimeout(30)
         .requestTimeout(30)
         .socketTimeout(30)
-        .expectedHttpResponseHeaders(expectedResponseHeaders)
+        .expectedHttpResponseHeaders(auth.expectedResponseHeaders())
         // Override the SDK's hardcoded "no TCP connection reuse" + tiny
         // default pool. See KeepAliveConfigManipulator's javadoc for the
         // background — without this, every SCIM call pays full TCP
@@ -155,32 +100,6 @@ public class ScimClient {
     // package-private for tests
     static boolean tlsHostnameVerificationDisabled() {
         return Boolean.getBoolean("scim.tls.insecureHostnameVerification");
-    }
-
-    protected String BearerAuthentication(String token) {
-        return "Bearer " + token ;
-    }
-
-    private void refreshAuthHeader() {
-        assert tokenSource != null;
-        defaultHeaders.put(HttpHeaders.AUTHORIZATION, tokenSource.currentAuthorizationHeader());
-    }
-
-    // package-private for tests
-    <S extends ScimObjectNode> ServerResponse<S> sendWithAuthRefresh(
-            Supplier<ServerResponse<S>> op) {
-        if (tokenSource == null) {
-            return op.get();
-        }
-        refreshAuthHeader();
-        ServerResponse<S> r = op.get();
-        int status = r.getHttpStatus();
-        if (status == 401 || status == 403) {
-            tokenSource.invalidate();
-            refreshAuthHeader();
-            r = op.get();
-        }
-        return r;
     }
 
     protected String genScimUrl(String scimEndpoint, String resourcePath) {
@@ -226,7 +145,7 @@ public class ScimClient {
         // resilience4j's per-Retry state isn't per-resource anyway.
         var retry = registry.retry("create");
 
-        ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+        ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
             try {
                 return scimRequestBuilder
                 .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
@@ -284,7 +203,7 @@ public class ScimClient {
             adapter.apply(resource);
             String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
             var retry = registry.retry("replace");
-            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     LOGGER.info(adapter.getType());
                     if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
@@ -352,7 +271,7 @@ public class ScimClient {
 
             var retry = registry.retry("delete");
 
-            ServerResponse<S> response = sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                 try {
                     return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
                                                                 adapter.getResourceClass())
@@ -404,7 +323,7 @@ public class ScimClient {
             var adapter = getAdapter(factory);
             String listUrl = scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint();
             Class<S> resourceClass = adapter.getResourceClass();
-            ServerResponse<ListResponse<S>> response = sendWithAuthRefresh(() ->
+            ServerResponse<ListResponse<S>> response = auth.sendWithAuthRefresh(() ->
                 scimRequestBuilder.list(listUrl, resourceClass).get().sendRequest());
             ListResponse<S> resourceTypeListResponse = response.getResource();
 
