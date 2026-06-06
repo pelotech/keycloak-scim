@@ -7,6 +7,8 @@ import static org.mockito.Mockito.when;
 import com.google.common.net.HttpHeaders;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.resources.User;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,8 +38,8 @@ class ScimClientAuthBranchTest {
 
         var client = new ScimClient(model, mock(KeycloakSession.class));
 
-        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer eyJ.test");
-        assertThat(client.tokenSource).isNotNull();
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer eyJ.test");
+        assertThat(client.auth.tokenSource).isNotNull();
     }
 
     @Test
@@ -53,8 +55,27 @@ class ScimClientAuthBranchTest {
 
         var client = new ScimClient(model, mock(KeycloakSession.class));
 
-        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer static-token");
-        assertThat(client.tokenSource).isNull();
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer static-token");
+        assertThat(client.auth.tokenSource).isNull();
+    }
+
+    @Test
+    void basicAuth_buildsHeaderFromConfiguredCredentials() {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "BASIC_AUTH");
+        config.putSingle("auth-user", "scim-user");
+        config.putSingle("auth-pass", "s3cr3t");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId("comp-basic");
+
+        var client = new ScimClient(model, mock(KeycloakSession.class));
+
+        String expected = "Basic " + Base64.getEncoder()
+            .encodeToString("scim-user:s3cr3t".getBytes(StandardCharsets.UTF_8));
+        assertThat(client.auth.headers().get(HttpHeaders.AUTHORIZATION)).isEqualTo(expected);
     }
 
     @Test
@@ -90,7 +111,7 @@ class ScimClientAuthBranchTest {
             return n == 1 ? r401 : r201;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         assertThat(attempts.get()).isEqualTo(2);
         assertThat(result.getHttpStatus()).isEqualTo(201);
@@ -127,7 +148,7 @@ class ScimClientAuthBranchTest {
             return n == 1 ? r403 : r201;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         assertThat(attempts.get()).isEqualTo(2);
         assertThat(result.getHttpStatus()).isEqualTo(201);
@@ -156,7 +177,7 @@ class ScimClientAuthBranchTest {
             return r401;
         };
 
-        var result = client.sendWithAuthRefresh(op);
+        var result = client.auth.sendWithAuthRefresh(op);
 
         // Without a token source, no retry — exactly one invocation.
         assertThat(attempts.get()).isEqualTo(1);

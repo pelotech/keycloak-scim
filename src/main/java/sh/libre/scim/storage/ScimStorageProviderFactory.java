@@ -280,10 +280,10 @@ public class ScimStorageProviderFactory
                 session.getContext().setRealm(realm);
                 try (var dispatcher = new ScimDispatcher(session)) {
                     if ("true".equals(model.get("propagation-user"))) {
-                        dispatcher.runOne(model, client -> client.sync(UserAdapter.class, result));
+                        dispatcher.runOne(model, client -> client.sync(UserAdapter::new, result));
                     }
                     if ("true".equals(model.get("propagation-group"))) {
-                        dispatcher.runOne(model, client -> client.sync(GroupAdapter.class, result));
+                        dispatcher.runOne(model, client -> client.sync(GroupAdapter::new, result));
                     }
                 }
             }
