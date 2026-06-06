@@ -119,8 +119,8 @@ public class ScimClient {
 
     protected String BasicAuthentication(String username, String password) {
         return  BasicAuth.builder()
-        .username(model.get(username))
-        .password(model.get(password))
+        .username(username)
+        .password(password)
         .build()
         .getAuthorizationHeaderValue();
     }

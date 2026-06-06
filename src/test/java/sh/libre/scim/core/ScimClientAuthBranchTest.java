@@ -7,6 +7,8 @@ import static org.mockito.Mockito.when;
 import com.google.common.net.HttpHeaders;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.resources.User;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
@@ -55,6 +57,25 @@ class ScimClientAuthBranchTest {
 
         assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo("Bearer static-token");
         assertThat(client.tokenSource).isNull();
+    }
+
+    @Test
+    void basicAuth_buildsHeaderFromConfiguredCredentials() {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "BASIC_AUTH");
+        config.putSingle("auth-user", "scim-user");
+        config.putSingle("auth-pass", "s3cr3t");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId("comp-basic");
+
+        var client = new ScimClient(model, mock(KeycloakSession.class));
+
+        String expected = "Basic " + Base64.getEncoder()
+            .encodeToString("scim-user:s3cr3t".getBytes(StandardCharsets.UTF_8));
+        assertThat(client.defaultHeaders.get(HttpHeaders.AUTHORIZATION)).isEqualTo(expected);
     }
 
     @Test
