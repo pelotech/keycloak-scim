@@ -199,19 +199,14 @@ public class ScimClient {
     }
 
     protected <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> A getAdapter(
-            Class<A> aClass) {
-        try {
-            return aClass.getDeclaredConstructor(KeycloakSession.class, String.class)
-                    .newInstance(session, this.model.getId());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+            AdapterFactory<M, S, A> factory) {
+        return factory.create(session, this.model.getId());
     }
 
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(Class<A> aClass,
-            M kcModel) {
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(
+            AdapterFactory<M, S, A> factory, M kcModel) {
         long t0 = System.nanoTime();
-        var adapter = getAdapter(aClass);
+        var adapter = getAdapter(factory);
         adapter.apply(kcModel);
         if (adapter.skip) {
             return;
@@ -277,9 +272,9 @@ public class ScimClient {
         return true;
     }
 
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(Class<A> aClass,
-            M kcModel) {
-        var adapter = getAdapter(aClass);
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
+            AdapterFactory<M, S, A> factory, M kcModel) {
+        var adapter = getAdapter(factory);
         try {
             adapter.apply(kcModel);
             if (adapter.skip) {
@@ -346,9 +341,9 @@ public class ScimClient {
         }
     }
 
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void delete(Class<A> aClass,
-            String id) {
-        var adapter = getAdapter(aClass);
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void delete(
+            AdapterFactory<M, S, A> factory, String id) {
+        var adapter = getAdapter(factory);
         adapter.setId(id);
 
         try {
@@ -380,21 +375,21 @@ public class ScimClient {
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(
-            Class<A> aClass,
+            AdapterFactory<M, S, A> factory,
             SynchronizationResult syncRes) {
         LOGGER.info("Refresh resources");
-        getAdapter(aClass).getResourceStream().forEach(resource -> {
-            var adapter = getAdapter(aClass);
+        getAdapter(factory).getResourceStream().forEach(resource -> {
+            var adapter = getAdapter(factory);
             adapter.apply(resource);
             LOGGER.infof("Reconciling local resource %s", adapter.getId());
             if (!adapter.skipRefresh()) {
                 var mapping = adapter.getMapping();
                 if (mapping == null) {
                     LOGGER.info("Creating it");
-                    this.create(aClass, resource);
+                    this.create(factory, resource);
                 } else {
                     LOGGER.info("Replacing it");
-                    this.replace(aClass, resource);
+                    this.replace(factory, resource);
                 }
                 syncRes.increaseUpdated();
             }
@@ -403,10 +398,10 @@ public class ScimClient {
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
-            Class<A> aClass, SynchronizationResult syncRes) {
+            AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
         LOGGER.info("Import");
         try {
-            var adapter = getAdapter(aClass);
+            var adapter = getAdapter(factory);
             String listUrl = scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint();
             Class<S> resourceClass = adapter.getResourceClass();
             ServerResponse<ListResponse<S>> response = sendWithAuthRefresh(() ->
@@ -416,7 +411,7 @@ public class ScimClient {
             for (var resource : resourceTypeListResponse.getListedResources()) {
                 try {
                     LOGGER.infof("Reconciling remote resource %s", resource);
-                    adapter = getAdapter(aClass);
+                    adapter = getAdapter(factory);
                     adapter.apply(resource);
 
                     var mapping = adapter.getMapping();
@@ -469,13 +464,13 @@ public class ScimClient {
         }
     }
 
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(Class<A> aClass,
-            SynchronizationResult syncRes) {
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(
+            AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
         if (this.model.get("sync-import", false)) {
-            this.importResources(aClass, syncRes);
+            this.importResources(factory, syncRes);
         }
         if (this.model.get("sync-refresh", false)) {
-            this.refreshResources(aClass, syncRes);
+            this.refreshResources(factory, syncRes);
         }
     }
 

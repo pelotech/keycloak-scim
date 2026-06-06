@@ -10,8 +10,11 @@ import org.keycloak.models.UserModel;
 import org.keycloak.models.UserProvider;
 import org.keycloak.storage.ldap.idm.model.LDAPObject;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import de.captaingoldfish.scim.sdk.common.resources.User;
+import sh.libre.scim.core.AdapterFactory;
 import sh.libre.scim.core.ScimClient;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
@@ -67,7 +70,8 @@ class ScimLdapStorageMapperTest {
 
         var client = mock(ScimClient.class);
         ((BiConsumer<ScimClient, KeycloakSession>) captor.getValue()).accept(client, workerSession);
-        verify(client).create(UserAdapter.class, user);
+        verify(client).create(
+            ArgumentMatchers.<AdapterFactory<UserModel, User, UserAdapter>>any(), eq(user));
     }
 
     @Test
@@ -90,7 +94,8 @@ class ScimLdapStorageMapperTest {
 
         var client = mock(ScimClient.class);
         ((BiConsumer<ScimClient, KeycloakSession>) captor.getValue()).accept(client, workerSession);
-        verify(client).replace(UserAdapter.class, user);
+        verify(client).replace(
+            ArgumentMatchers.<AdapterFactory<UserModel, User, UserAdapter>>any(), eq(user));
     }
 
     @Test

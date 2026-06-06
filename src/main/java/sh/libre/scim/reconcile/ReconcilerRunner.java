@@ -129,7 +129,7 @@ public class ReconcilerRunner {
                     }
                     var workerClient = new ScimClient(component, workerSession);
                     try {
-                        workerClient.delete(UserAdapter.class, userId);
+                        workerClient.delete(UserAdapter::new, userId);
                     } finally {
                         workerClient.close();
                     }

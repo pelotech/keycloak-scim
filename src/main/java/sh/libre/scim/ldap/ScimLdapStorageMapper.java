@@ -47,12 +47,12 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
         if (isCreate) {
             dispatcher.runAsync(ScimDispatcher.SCOPE_USER, (client, workerSession) -> {
                 var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
-                if (u != null) client.create(UserAdapter.class, u);
+                if (u != null) client.create(UserAdapter::new, u);
             });
         } else {
             dispatcher.runAsync(ScimDispatcher.SCOPE_USER, (client, workerSession) -> {
                 var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
-                if (u != null) client.replace(UserAdapter.class, u);
+                if (u != null) client.replace(UserAdapter::new, u);
             });
         }
     }
