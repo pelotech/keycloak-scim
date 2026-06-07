@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.2](https://github.com/pelotech/keycloak-scim/compare/v1.0.1...v1.0.2) (2026-06-07)
+
+
+### Bug fixes
+
+* skip mapping persistence when SCIM create is rejected ([#22](https://github.com/pelotech/keycloak-scim/issues/22)) ([6c9383e](https://github.com/pelotech/keycloak-scim/commit/6c9383e727691ee989933c0ad4d8c0018b262e1c))
+
+
+### Refactors
+
+* **core:** extract ScimAuthHeaders from ScimClient ([#25](https://github.com/pelotech/keycloak-scim/issues/25)) ([62e64ed](https://github.com/pelotech/keycloak-scim/commit/62e64ed60e0b4a48a3901ba30faeae4f7e02d850))
+
+
+### Documentation
+
+* **spec:** multi-extension deploy & docs restructure design ([#24](https://github.com/pelotech/keycloak-scim/issues/24)) ([0cf63fc](https://github.com/pelotech/keycloak-scim/commit/0cf63fc705fa58232c7b449ad43be1a92633d369))
+
 ## [1.0.1](https://github.com/pelotech/keycloak-scim/compare/v1.0.0...v1.0.1) (2026-05-26)
 
 
