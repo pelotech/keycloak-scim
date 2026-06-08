@@ -167,3 +167,6 @@ describes the new 5xx + 429 retry behavior.
   Replace it with: (a) the SCIM 5xx/429 retry marked done, and (b) a
   new standalone fast-follow bullet for the still-open **token-endpoint
   5xx retry**, dropping the "cover both together" framing.
+- Touch up the roadmap Auth-mode bullet's "Token-endpoint 5xx retry"
+  line, whose "symmetric with the existing SCIM 5xx no-retry gap"
+  cross-reference goes stale once that gap is closed.
