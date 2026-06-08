@@ -61,10 +61,13 @@ public class ScimClient {
             // dead code for this client stack — every real-world transient
             // failure surfaces as IORuntimeException and bypasses retry.
             //
-            // Note: HTTP error responses (5xx) do NOT throw; they return a
-            // ServerResponse with isSuccess()=false. They are not currently
-            // retried. See ScimResilienceIT#serverErrorIsNotRetriedGap.
+            // HTTP error responses do NOT throw; they return a ServerResponse
+            // with isSuccess()=false. The result predicate below retries the
+            // transient ones (429 + any 5xx — see isRetryableStatus). See
+            // ScimResilienceIT#serverErrorIsRetriedAndEventuallySucceeds.
             .retryExceptions(ProcessingException.class, IORuntimeException.class)
+            .retryOnResult(result ->
+                result instanceof ServerResponse<?> resp && isRetryableStatus(resp.getHttpStatus()))
             .build();
 
         registry = RetryRegistry.of(retryConfig);
@@ -100,6 +103,14 @@ public class ScimClient {
     // package-private for tests
     static boolean tlsHostnameVerificationDisabled() {
         return Boolean.getBoolean("scim.tls.insecureHostnameVerification");
+    }
+
+    // 429 (rate-limited) + any 5xx are transient; retry with backoff.
+    // 401/403 are deliberately excluded — sendWithAuthRefresh handles those
+    // (token re-mint + one retry), and this retry runs inside that wrapper.
+    // package-private for tests
+    static boolean isRetryableStatus(int status) {
+        return status == 429 || status >= 500;
     }
 
     protected String genScimUrl(String scimEndpoint, String resourcePath) {

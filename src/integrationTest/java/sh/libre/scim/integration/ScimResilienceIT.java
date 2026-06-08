@@ -13,7 +13,6 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -23,12 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * default; existing tests use NONE).
  *
  * <p>Retry: pins what {@code ScimClient}'s resilience4j retry actually
- * does. Today it retries on {@code ProcessingException} (network-layer
- * failures) but does NOT retry on HTTP error responses. Both behaviors
- * are tested, including the 5xx no-retry case as a deliberate
- * gap-pinning assertion — if someone widens the retry policy to
- * include server errors, that test will turn red and prompt the
- * accompanying behavioral update.
+ * does. It retries on {@code ProcessingException} (network-layer
+ * failures) and, via a result predicate, on transient HTTP error
+ * responses — {@code 429} and any {@code 5xx} (see
+ * {@code ScimClient#isRetryableStatus}). Both paths are covered:
+ * connection-fault recovery and server-error/rate-limit recovery.
  */
 class ScimResilienceIT extends IntegrationTestBase {
 
@@ -99,37 +97,58 @@ class ScimResilienceIT extends IntegrationTestBase {
     }
 
     @Test
-    void serverErrorIsNotRetriedGap() {
-        // resilience4j is configured to retry only on ProcessingException
-        // (network-layer faults), not on HTTP error responses. A 503 from
-        // the SCIM sink results in a single attempt — no retry.
-        //
-        // This is a documented gap in the existing implementation: most
-        // operators would expect 5xx responses to retry. If the retry
-        // policy is widened to include error responses (RetryConfig with
-        // .retryOnResult(...)), this assertion will fail. Update the
-        // test to count >= 2 and update docs accordingly.
+    void serverErrorIsRetriedAndEventuallySucceeds() {
+        // A transient 429 (rate-limit) then a 503 (server error), then a
+        // clean 201. The resilience4j result predicate retries on both
+        // 429 and 5xx (ScimClient#isRetryableStatus), so the create
+        // eventually succeeds. Serving one of each status exercises both
+        // arms of the predicate end-to-end in a single scenario.
         wireMock.stubFor(post(urlPathEqualTo("/Users"))
+            .inScenario("server-error-retry")
+            .whenScenarioStateIs(Scenario.STARTED)
+            .willReturn(aResponse()
+                .withStatus(429)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("{\"detail\":\"slow down\"}"))
+            .willSetStateTo("rate-limited-done"));
+
+        wireMock.stubFor(post(urlPathEqualTo("/Users"))
+            .inScenario("server-error-retry")
+            .whenScenarioStateIs("rate-limited-done")
             .willReturn(aResponse()
                 .withStatus(503)
                 .withHeader("Content-Type", "application/scim+json")
-                .withBody("{\"detail\":\"transient backend failure\"}")));
+                .withBody("{\"detail\":\"transient backend failure\"}"))
+            .willSetStateTo("server-error-done"));
+
+        wireMock.stubFor(post(urlPathEqualTo("/Users"))
+            .inScenario("server-error-retry")
+            .whenScenarioStateIs("server-error-done")
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "%s",
+                      "userName": "placeholder",
+                      "displayName": "placeholder",
+                      "active": true,
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                    }""".formatted(UUID.randomUUID()))));
 
         var r = newRealmWithScimAndLdap();
         enableScimEventListener(r.realm());
 
-        createAdminUser(r.realm(), "retry-503", "retry-503@test.local");
+        createAdminUser(r.realm(), "retry-5xx", "retry-5xx@test.local");
 
-        // Wait long enough that any retry would have happened. Default
-        // backoff: 500ms, 750ms, 1125ms, ... — 5 seconds covers several.
-        sleepQuietly(5);
-
-        int attempts = wireMock.countRequestsMatching(
-            postRequestedFor(urlPathEqualTo("/Users")).build()
-        ).getCount();
-        assertEquals(1, attempts,
-            "gap pinned: 5xx responses currently do not trigger retry. "
-            + "If this fails with attempts > 1, retry policy has been "
-            + "widened — update the test and ScimClient docs accordingly.");
+        // Three attempts: 429, 503, then 201. Allow time for the
+        // 500ms + 750ms backoff intervals plus container processing.
+        await().atMost(20, SECONDS).untilAsserted(() -> {
+            int attempts = wireMock.countRequestsMatching(
+                postRequestedFor(urlPathEqualTo("/Users")).build()
+            ).getCount();
+            assertTrue(attempts >= 3,
+                "expected at least 3 attempts after a 429 and a 503 retry, got " + attempts);
+        });
     }
 }

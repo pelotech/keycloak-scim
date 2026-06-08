@@ -247,10 +247,11 @@ SCIM provider component in the realm.
 
 ## Status
 
-`1.0.0` is in active preparation; track open work at
-[`docs/release-1.0.0-todos.md`](docs/release-1.0.0-todos.md). Until
-that lands, image tags are pre-1.0 and breaking changes between
-patch versions are possible — pin by digest.
+`1.0.x` is released and stable; versioning follows
+[SemVer](https://semver.org/) and is driven by release-please from
+conventional commits. Pin production deployments to a released tag (or
+digest). Post-1.0 work — known gaps and refinements, none of which
+block normal operation — is tracked in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Troubleshooting
 
