@@ -88,14 +88,18 @@ HTTP status is transient" across both retry paths.
 
 ### Wiring
 
-`OAuthClientCredentialsTokenSource` gains an instance `Retry`:
+`OAuthClientCredentialsTokenSource` gains an instance `Retry`, built in
+the constructor via `Retry.of(name, config)` — no `RetryRegistry` (unlike
+`ScimClient`), since there is a single operation to guard:
 
 ```java
-RetryConfig.custom()
+RetryConfig config = RetryConfig.custom()
     .maxAttempts(3)
     .intervalFunction(IntervalFunction.ofExponentialBackoff())
     .retryOnException(OAuthClientCredentialsTokenSource::isRetryableMintFailure)
     .build();
+Retry retry = Retry.of("token-mint-" + componentId, config);
+retry.getEventPublisher().onRetry(ev -> LOG.warnf(...));  // one WARN per attempt
 ```
 
 `mintAndStore()` wraps the existing call:
