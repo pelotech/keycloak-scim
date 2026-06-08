@@ -33,6 +33,11 @@ What's added relative to upstream:
   access tokens via the client_credentials grant and send them as
   bearer tokens, matching what JWKS-verifying SCIM receivers expect.
   See [`docs/configuration.md`](docs/configuration.md) for setup.
+- **OpenTelemetry tracing.** Every outbound SCIM operation emits a
+  `CLIENT` span that nests under the active Keycloak request span.
+  Works automatically on Keycloak 26+ when tracing is enabled; falls
+  back to a no-op on 25.x. See [`docs/tracing.md`](docs/tracing.md)
+  for setup and examples.
 - **OCI image for K8s ImageVolume mounting.** Drop the plugin into
   a Keycloak pod without baking a custom image — see
   [Quick start](#quick-start) below.
@@ -238,6 +243,8 @@ SCIM provider component in the realm.
 
 - [`docs/configuration.md`](docs/configuration.md) — every
   config knob, attribute, endpoint, and JVM property.
+- [`docs/tracing.md`](docs/tracing.md) — OpenTelemetry tracing:
+  what's instrumented, how to enable it, Jaeger and Tempo examples.
 - [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
   — design doc for LDAP federation propagation and the reconciler.
 - [`docs/performance.md`](docs/performance.md) — scale measurements,
