@@ -83,6 +83,11 @@ in the private `ScimClient` constructor, alongside `.retryExceptions(...)`:
 `maxAttempts(10)` and `IntervalFunction.ofExponentialBackoff()` are
 reused unchanged.
 
+`importResources` is unaffected: it never calls `retry.executeSupplier`,
+so the predicate only runs for the suppliers actually wrapped by the
+retry (`create`/`replace`/`delete`). Adding `.retryOnResult` to the
+shared config does not retroactively wrap the list-GET.
+
 ### Behavior
 
 - **Transient 5xx/429:** retried up to the `maxAttempts` cap with
@@ -95,14 +100,27 @@ reused unchanged.
   `401/403`): predicate returns `false`, behavior unchanged. `401/403`
   remain the responsibility of `sendWithAuthRefresh`, which wraps the
   retry supplier.
+- **`replace` fallback paths unchanged.** A real `405/404/400` is
+  non-retryable, so it returns immediately from the supplier and
+  `replace`'s existing fallback logic (405→PATCH, 404/400 re-create)
+  runs exactly as today. The only change is that a transient `5xx` on
+  the initial PUT now retries *before* reaching that fallback block,
+  rather than falling straight through.
 
 ### Interaction with `sendWithAuthRefresh`
 
 The resilience4j retry executes *inside* the `sendWithAuthRefresh`
 supplier. A 5xx is therefore retried within a single auth-refresh
 cycle; the auth-refresh's own 401/403 re-mint-and-retry sits one level
-out and is unaffected. The two mechanisms compose without overlap
-because their status sets are disjoint.
+out. Their status sets are disjoint, so neither mechanism retries on
+the other's trigger.
+
+Note one bounded interaction: `sendWithAuthRefresh` re-invokes the
+*entire* supplier (i.e. the full `retry.executeSupplier`) once on a
+401/403. In the rare case where auth expiry and a 5xx outage overlap
+(`401 → re-mint → 5xx, 5xx, ...`), the second invocation gets a fresh
+retry budget — so a single operation can incur up to `2 × maxAttempts`.
+This is bounded and acceptable; it is not a new unbounded path.
 
 ## Testing
 
@@ -122,18 +140,30 @@ including `429`.
 Rewrite `ScimResilienceIT#serverErrorIsNotRetriedGap` →
 `serverErrorIsRetriedAndEventuallySucceeds`, mirroring the existing
 `retryOnConnectionFaultEventuallySucceeds`: a WireMock scenario serving
-`503`, `503`, then a clean `201`. Assert at least 3 attempts to
+`429`, `503`, then a clean `201`. Assert at least 3 attempts to
 `/Users` and eventual success.
 
-`429` and `503` traverse the identical retry path, so a second
-integration test for `429` is redundant — the unit test covers the
-status set, and the IT proves the wiring once.
+Serving both a `429` and a `503` before the success exercises **both**
+arms of `isRetryableStatus` (`== 429` and `>= 500`) end-to-end in a
+single scenario, at no extra cost — so no separate `429` IT is needed.
+The unit test remains the authoritative coverage for the full status
+set; the IT proves the wiring.
+
+The `ScimResilienceIT` class-level Javadoc currently documents the
+old "does NOT retry on HTTP error responses … 5xx no-retry gap-pinning
+assertion" behavior. Update it alongside the renamed test so it
+describes the new 5xx + 429 retry behavior.
 
 ## Docs
 
 - Update the retry-config comment in `ScimClient` (currently states 5xx
   "are not currently retried" and references the old IT name) to
   describe the 5xx + 429 result-based retry.
-- Update `docs/roadmap.md`: mark the SCIM 5xx item done, and break out
-  the **token-endpoint 5xx retry** as its own remaining fast-follow
-  entry under Resilience.
+- Update the `ScimResilienceIT` class-level Javadoc (see Integration
+  testing above).
+- Rewrite the `docs/roadmap.md` Resilience entry — do **not** just
+  check it off. The current bullet frames a *combined* SCIM+token gap
+  ("should cover both SCIM-endpoint and token-endpoint 5xx together").
+  Replace it with: (a) the SCIM 5xx/429 retry marked done, and (b) a
+  new standalone fast-follow bullet for the still-open **token-endpoint
+  5xx retry**, dropping the "cover both together" framing.
