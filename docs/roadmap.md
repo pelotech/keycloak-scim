@@ -44,8 +44,10 @@ a concrete IdP that requires it.
 - **Proactive refresh-ahead-of-expiry** — lazy refresh with 30s skew is
   in place; proactive would burn a thread for ~1–2% throughput at the
   expiry boundary.
-- **Token-endpoint 5xx retry** — symmetric with the existing SCIM 5xx
-  no-retry gap (see "Resilience" below).
+- **Token-endpoint 5xx retry** — symmetric with the SCIM-endpoint 5xx
+  retry now in place (see "Resilience" below). The token-mint request in
+  `Auth` has no retry wrapper, so a transient 5xx/429 from the token
+  endpoint still fails the operation outright.
 
 ## Reconciler refinements
 
@@ -60,12 +62,15 @@ a concrete IdP that requires it.
 
 ## Resilience
 
-- **5xx-not-retried gap.** Pinned by
-  `ScimResilienceIT#serverErrorIsNotRetriedGap`. The SCIM SDK returns
-  5xx as `ServerResponse` with `isSuccess()=false` rather than throwing,
-  so resilience4j's exception-based retry doesn't fire. Widening
-  requires `retryOnResult(...)` and should cover both SCIM-endpoint and
-  token-endpoint 5xx together.
+- **SCIM-endpoint 5xx/429 retry.** _Done._ The SCIM SDK returns 5xx as
+  `ServerResponse` with `isSuccess()=false` rather than throwing, so
+  resilience4j's exception-based retry didn't fire. Now `ScimClient`'s
+  `RetryConfig` adds a `retryOnResult(...)` predicate
+  (`isRetryableStatus`: 429 + any 5xx) covering create/replace/delete.
+  Verified by
+  `ScimResilienceIT#serverErrorIsRetriedAndEventuallySucceeds` and
+  `ScimClientRetryTest`. The token-endpoint side remains — see
+  "Token-endpoint 5xx retry" above.
 
 ## SCIM protocol features
 
