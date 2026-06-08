@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/pelotech/keycloak-scim/compare/v1.0.2...v1.1.0) (2026-06-08)
+
+
+### Features
+
+* retry transient SCIM and token-endpoint failures ([#26](https://github.com/pelotech/keycloak-scim/issues/26)) ([cb8ca31](https://github.com/pelotech/keycloak-scim/commit/cb8ca31b732461e4c40df85ee6f78924a82a82e3))
+* **tracing:** add OTel span instrumentation for SCIM operations ([#28](https://github.com/pelotech/keycloak-scim/issues/28)) ([aeebe37](https://github.com/pelotech/keycloak-scim/commit/aeebe37afd42ff841e7807e9a5fecffddd33e74d))
+
 ## [1.0.2](https://github.com/pelotech/keycloak-scim/compare/v1.0.1...v1.0.2) (2026-06-07)
 
 
