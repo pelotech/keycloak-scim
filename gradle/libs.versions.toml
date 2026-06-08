@@ -12,6 +12,7 @@ mockito = "5.14.2"
 nimbus-jose-jwt = "9.37.3"
 openrewrite = "6.24.0"
 openrewrite-recipe-bom = "2.20.0"
+opentelemetry = "1.44.1"
 resilience4j = "2.2.0"
 scim-sdk = "1.25.1"
 slf4j = "2.0.16"
@@ -38,6 +39,7 @@ mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
 mockito-junit-jupiter = { module = "org.mockito:mockito-junit-jupiter", version.ref = "mockito" }
 nimbus-jose-jwt = { module = "com.nimbusds:nimbus-jose-jwt", version.ref = "nimbus-jose-jwt" }
 openrewrite-recipe-bom = { module = "org.openrewrite.recipe:rewrite-recipe-bom", version.ref = "openrewrite-recipe-bom" }
+opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
 resilience4j-retry = { module = "io.github.resilience4j:resilience4j-retry", version.ref = "resilience4j" }
 scim-sdk-client = { module = "de.captaingoldfish:scim-sdk-client", version.ref = "scim-sdk" }
 scim-sdk-common = { module = "de.captaingoldfish:scim-sdk-common", version.ref = "scim-sdk" }
