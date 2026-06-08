@@ -44,10 +44,6 @@ a concrete IdP that requires it.
 - **Proactive refresh-ahead-of-expiry** — lazy refresh with 30s skew is
   in place; proactive would burn a thread for ~1–2% throughput at the
   expiry boundary.
-- **Token-endpoint 5xx retry** — symmetric with the SCIM-endpoint 5xx
-  retry now in place (see "Resilience" below). The token-mint request in
-  `Auth` has no retry wrapper, so a transient 5xx/429 from the token
-  endpoint still fails the operation outright.
 
 ## Reconciler refinements
 
@@ -69,8 +65,17 @@ a concrete IdP that requires it.
   (`isRetryableStatus`: 429 + any 5xx) covering create/replace/delete.
   Verified by
   `ScimResilienceIT#serverErrorIsRetriedAndEventuallySucceeds` and
-  `ScimClientRetryTest`. The token-endpoint side remains — see
-  "Token-endpoint 5xx retry" above.
+  `ScimClientRetryTest`.
+- **Token-endpoint 5xx/429 retry.** _Done._ `HttpTokenMinter` mints
+  tokens outside the SCIM retry path and threw a bare `RuntimeException`
+  on any failure. Now `OAuthClientCredentialsTokenSource` wraps the mint
+  in a resilience4j `Retry` (`maxAttempts(3)`, exponential backoff) that
+  retries transient failures — transport faults + 429 + any 5xx, via
+  `isRetryableMintFailure` reusing `ScimClient.isRetryableStatus` — and
+  never 4xx config errors. The smaller budget reflects that mints run
+  under the per-component lock. Verified by
+  `ScimOidcAuthIT#tokenEndpointTransientErrorIsRetried` and
+  `OAuthClientCredentialsTokenSourceRetryTest`.
 
 ## SCIM protocol features
 

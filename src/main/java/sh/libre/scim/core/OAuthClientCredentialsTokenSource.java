@@ -2,6 +2,9 @@ package sh.libre.scim.core;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -43,14 +46,33 @@ public final class OAuthClientCredentialsTokenSource {
     private static final Set<String> WARNED_NO_EXPIRES_IN = ConcurrentHashMap.newKeySet();
     private static volatile Clock clock = Clock.systemUTC();
 
+    // Token-mint retry budget. Deliberately smaller than the SCIM-endpoint
+    // retry (maxAttempts 10): mints run under entry.lock, so each attempt +
+    // backoff stalls every token-needing thread. The 401/403 auth-refresh
+    // path supplies a second re-mint cycle on top of this.
+    private static final int MINT_MAX_ATTEMPTS = 3;
+
     private final String componentId;
     private final OAuthConfig config;
     private final TokenMinter minter;
+    private final Retry retry;
 
     public OAuthClientCredentialsTokenSource(String componentId, OAuthConfig config, TokenMinter minter) {
         this.componentId = componentId;
         this.config = config;
         this.minter = minter;
+
+        RetryConfig retryConfig = RetryConfig.custom()
+            .maxAttempts(MINT_MAX_ATTEMPTS)
+            .intervalFunction(IntervalFunction.ofExponentialBackoff())
+            .retryOnException(OAuthClientCredentialsTokenSource::isRetryableMintFailure)
+            .build();
+        // No RetryRegistry (unlike ScimClient): a single operation to guard.
+        this.retry = Retry.of("token-mint-" + componentId, retryConfig);
+        this.retry.getEventPublisher().onRetry(ev ->
+            LOG.warnf("Retrying token mint for component %s (attempt %d) after: %s",
+                componentId, ev.getNumberOfRetryAttempts() + 1,
+                ev.getLastThrowable() == null ? "unknown" : ev.getLastThrowable().getMessage()));
     }
 
     public String currentAuthorizationHeader() {
@@ -71,7 +93,10 @@ public final class OAuthClientCredentialsTokenSource {
                 && clock.instant().isBefore(current.refreshAt)) {
                 return current.authorizationHeader;
             }
-            MintResult r = minter.mint(config);
+            // Retry transient mint failures (5xx/429/transport) under the lock,
+            // so concurrent token-needing threads queue behind one retry sequence
+            // rather than each hammering a down endpoint.
+            MintResult r = retry.executeSupplier(() -> minter.mint(config));
             Instant refreshAt = clock.instant().plusSeconds(
                 Math.max(0, r.expiresInSeconds() - EXPIRY_SKEW_SECONDS));
             // Reuse entry.lock so concurrent mints serialize on the same lock,
@@ -82,6 +107,42 @@ public final class OAuthClientCredentialsTokenSource {
         } finally {
             entry.lock.unlock();
         }
+    }
+
+    /**
+     * Raised by a {@link TokenMinter} when a mint attempt fails. Carries enough
+     * information to classify the failure as transient (retryable) or fatal:
+     * {@link #status} holds the HTTP status of a non-2xx response, or {@code 0}
+     * for a transport-level fault that occurred before any response arrived.
+     */
+    static final class TokenEndpointException extends RuntimeException {
+        final int status;
+
+        private TokenEndpointException(int status, String message, Throwable cause) {
+            super(message, cause);
+            this.status = status;
+        }
+
+        /** A non-2xx HTTP response from the token endpoint. */
+        static TokenEndpointException http(int status, String message) {
+            return new TokenEndpointException(status, message, null);
+        }
+
+        /** A transport-level fault (no HTTP response); {@code status} is 0. */
+        static TokenEndpointException transport(String message, Throwable cause) {
+            return new TokenEndpointException(0, message, cause);
+        }
+    }
+
+    /**
+     * Retry policy for token mints: transport faults ({@code status == 0}) and
+     * transient HTTP errors (429 + any 5xx, per {@link ScimClient#isRetryableStatus})
+     * are retryable. Everything else — 4xx config errors, malformed-response
+     * {@link IllegalStateException}s, and any other throwable — is fatal.
+     */
+    static boolean isRetryableMintFailure(Throwable t) {
+        return t instanceof TokenEndpointException te
+            && (te.status == 0 || ScimClient.isRetryableStatus(te.status));
     }
 
     public void invalidate() { CACHE.remove(componentId); }
@@ -163,9 +224,16 @@ public final class OAuthClientCredentialsTokenSource {
                         : EntityUtils.toString(entity, StandardCharsets.UTF_8);
                     if (status < 200 || status >= 300) {
                         String truncated = truncate(body, 200);
-                        LOG.errorf("OAuth token endpoint returned %d for component %s: %s",
-                            status, componentId, truncated);
-                        throw new RuntimeException(
+                        // Retryable (5xx/429) → WARN: a retry may recover it.
+                        // Fatal 4xx (e.g. invalid_client) → ERROR: config problem.
+                        if (ScimClient.isRetryableStatus(status)) {
+                            LOG.warnf("OAuth token endpoint returned %d for component %s: %s",
+                                status, componentId, truncated);
+                        } else {
+                            LOG.errorf("OAuth token endpoint returned %d for component %s: %s",
+                                status, componentId, truncated);
+                        }
+                        throw TokenEndpointException.http(status,
                             "token endpoint returned " + status + ": " + truncated);
                     }
                     ParsedToken parsed = parseTokenResponse(body);
@@ -175,7 +243,10 @@ public final class OAuthClientCredentialsTokenSource {
                     return parsed.result();
                 }
             } catch (IOException e) {
-                throw new RuntimeException("token endpoint request failed: " + e.getMessage(), e);
+                LOG.warnf("OAuth token endpoint request failed for component %s: %s",
+                    componentId, e.getMessage());
+                throw TokenEndpointException.transport(
+                    "token endpoint request failed: " + e.getMessage(), e);
             }
         }
 

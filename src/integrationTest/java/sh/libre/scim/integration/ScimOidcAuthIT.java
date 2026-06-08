@@ -339,10 +339,12 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         // First event: token endpoint is down — mint fails, SCIM POST never happens.
         createAdminUser(realm, "dave", "dave@test.local");
 
-        // Wait until the async dispatcher has tried to mint a token at least once.
+        // Wait until the async dispatcher has retried the mint. The retry
+        // policy (maxAttempts 3) means a persistent outage produces multiple
+        // token POSTs before giving up — at least two confirms retry fired.
         await().atMost(20, TimeUnit.SECONDS).untilAsserted(() -> {
             int attempts = wireMock.findAll(postRequestedFor(urlEqualTo(stubPath))).size();
-            assertThat(attempts).isGreaterThanOrEqualTo(1);
+            assertThat(attempts).isGreaterThanOrEqualTo(2);
         });
 
         // Now we can assert: no SCIM POST happened for dave (the 503 short-circuited it).
@@ -361,6 +363,43 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         wireMock.verify(1, postRequestedFor(urlPathMatching("/Users.*"))
             .withRequestBody(matchingJsonPath("$.userName", equalTo("erin")))
             .withHeader("Authorization", equalTo("Bearer eyJ.recovered")));
+    }
+
+    /**
+     * A transient token-endpoint failure (a 503 then a clean token) is retried
+     * under the mint lock, so the SCIM operation eventually succeeds rather than
+     * failing fail-open. Proves the resilience4j wiring in
+     * {@code OAuthClientCredentialsTokenSource} end-to-end.
+     */
+    @Test
+    void tokenEndpointTransientErrorIsRetried() throws Exception {
+        String stubPath = "/oauth/token-transient";
+        wireMock.stubFor(post(urlEqualTo(stubPath))
+            .inScenario("token-transient-retry")
+            .whenScenarioStateIs(STARTED)
+            .willReturn(aResponse().withStatus(503).withBody("service unavailable"))
+            .willSetStateTo("token-recovered"));
+        wireMock.stubFor(post(urlEqualTo(stubPath))
+            .inScenario("token-transient-retry")
+            .whenScenarioStateIs("token-recovered")
+            .willReturn(okJson(
+                "{\"access_token\":\"eyJ.retried\",\"token_type\":\"Bearer\",\"expires_in\":300}")));
+        useWireMockTokenEndpoint(stubPath);
+
+        stubScimUserCreateOk();
+
+        // The first mint hits the 503; the retry gets the clean token, so
+        // frank's SCIM POST goes through instead of being dropped.
+        createAdminUser(realm, "frank", "frank@test.local");
+        awaitUserPostFor("frank");
+
+        // Token endpoint hit at least twice: one 503 + one success.
+        assertThat(wireMock.findAll(postRequestedFor(urlEqualTo(stubPath))).size())
+            .isGreaterThanOrEqualTo(2);
+        // frank's SCIM POST carried the bearer minted on the retry.
+        wireMock.verify(1, postRequestedFor(urlPathMatching("/Users.*"))
+            .withRequestBody(matchingJsonPath("$.userName", equalTo("frank")))
+            .withHeader("Authorization", equalTo("Bearer eyJ.retried")));
     }
 
     /**
