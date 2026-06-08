@@ -60,6 +60,7 @@ dependencies {
     rewrite(platform(libs.openrewrite.recipe.bom))
     rewrite("org.openrewrite.recipe:rewrite-migrate-java")
 
+    compileOnly(libs.opentelemetry.api)
     compileOnly(libs.keycloak.core)
     compileOnly(libs.keycloak.server.spi)
     compileOnly(libs.keycloak.server.spi.private)

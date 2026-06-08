@@ -25,6 +25,8 @@ import io.github.resilience4j.retry.RetryRegistry;
 
 
 public class ScimClient {
+    private static final ScimTracingBridge TRACING = ScimTracingBridge.create();
+
     final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
     final protected ScimRequestBuilder scimRequestBuilder;
     final protected RetryRegistry registry;
@@ -156,20 +158,22 @@ public class ScimClient {
         // resilience4j's per-Retry state isn't per-resource anyway.
         var retry = registry.retry("create");
 
-        ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-            try {
-                return scimRequestBuilder
-                .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
-                .setResource(adapter.toSCIM(false))
-                .sendRequest();
-            } catch (ResponseException e) {
-                throw new RuntimeException(e);
-            }
-        }));
-        long t3 = System.nanoTime();
-        ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
-
-        handleCreateResponse(adapter, response);
+        try (var span = TRACING.startSpan("scim.create", adapter.getType(), scimApplicationBaseUrl)) {
+            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                try {
+                    return scimRequestBuilder
+                    .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
+                    .setResource(adapter.toSCIM(false))
+                    .sendRequest();
+                } catch (ResponseException e) {
+                    throw new RuntimeException(e);
+                }
+            }));
+            long t3 = System.nanoTime();
+            ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
+            span.setHttpStatus(response.getHttpStatus());
+            handleCreateResponse(adapter, response);
+        }
     };
 
     /**
@@ -205,69 +209,74 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
             AdapterFactory<M, S, A> factory, M kcModel) {
         var adapter = getAdapter(factory);
-        try {
-            adapter.apply(kcModel);
-            if (adapter.skip) {
-                return;
-            }
-            var resource = adapter.query("findById", adapter.getId()).getSingleResult();
-            adapter.apply(resource);
-            String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
-            var retry = registry.retry("replace");
-            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-                try {
-                    LOGGER.info(adapter.getType());
-                    if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
-                         || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
-                        return adapter.toPatchBuilder(scimRequestBuilder, url)
-                                      .sendRequest();
-                    }
-                    else {
-                        return scimRequestBuilder
-                            .update(url, adapter.getResourceClass())
-                            .setResource(adapter.toSCIM(false))
-                            .sendRequest();
-                    }
-                } catch (ResponseException e) {
-                    throw new RuntimeException(e);
+        try (var span = TRACING.startSpan("scim.replace", adapter.getType(), scimApplicationBaseUrl)) {
+            try {
+                adapter.apply(kcModel);
+                if (adapter.skip) {
+                    return;
                 }
-            }));
-            if (!response.isSuccess()) {
-                int statusCode = response.getHttpStatus();
-                if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
-                    LOGGER.infof("PUT not supported (405) for group %s, falling back to PATCH", adapter.getId());
-                    response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
-                }
-                if (!response.isSuccess()) {
-                    int currentStatus = response.getHttpStatus();
-                    if (currentStatus == 404 || currentStatus == 400) {
-                        LOGGER.infof("Remote resource %s not found (%d), re-creating", adapter.getId(), currentStatus);
-                        ServerResponse<S> createResponse = scimRequestBuilder
-                            .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
-                            .setResource(adapter.toSCIM(false))
-                            .sendRequest();
-                        if (createResponse.isSuccess()) {
-                            adapter.apply(createResponse.getResource());
-                            var existingMapping = adapter.getMapping();
-                            if (existingMapping != null) {
-                                existingMapping.setExternalId(adapter.getExternalId());
-                                getEM().merge(existingMapping);
-                            } else {
-                                adapter.saveMapping();
-                            }
+                var resource = adapter.query("findById", adapter.getId()).getSingleResult();
+                adapter.apply(resource);
+                String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
+                var retry = registry.retry("replace");
+                ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                    try {
+                        LOGGER.info(adapter.getType());
+                        if ((adapter.getType() == "Group" && this.model.get("group-patchOp", false))
+                             || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
+                            return adapter.toPatchBuilder(scimRequestBuilder, url)
+                                          .sendRequest();
                         }
-                        response = createResponse;
+                        else {
+                            return scimRequestBuilder
+                                .update(url, adapter.getResourceClass())
+                                .setResource(adapter.toSCIM(false))
+                                .sendRequest();
+                        }
+                    } catch (ResponseException e) {
+                        throw new RuntimeException(e);
+                    }
+                }));
+                if (!response.isSuccess()) {
+                    int statusCode = response.getHttpStatus();
+                    if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get("group-patchOp", false)) {
+                        LOGGER.infof("PUT not supported (405) for group %s, falling back to PATCH", adapter.getId());
+                        response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
+                    }
+                    if (!response.isSuccess()) {
+                        int currentStatus = response.getHttpStatus();
+                        if (currentStatus == 404 || currentStatus == 400) {
+                            LOGGER.infof("Remote resource %s not found (%d), re-creating", adapter.getId(), currentStatus);
+                            ServerResponse<S> createResponse = scimRequestBuilder
+                                .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
+                                .setResource(adapter.toSCIM(false))
+                                .sendRequest();
+                            if (createResponse.isSuccess()) {
+                                adapter.apply(createResponse.getResource());
+                                var existingMapping = adapter.getMapping();
+                                if (existingMapping != null) {
+                                    existingMapping.setExternalId(adapter.getExternalId());
+                                    getEM().merge(existingMapping);
+                                } else {
+                                    adapter.saveMapping();
+                                }
+                            }
+                            response = createResponse;
+                        }
+                    }
+                    if (!response.isSuccess()) {
+                        LOGGER.warn(response.getResponseBody());
+                        LOGGER.warn(response.getHttpStatus());
                     }
                 }
-                if (!response.isSuccess()) {
-                    LOGGER.warn(response.getResponseBody());
-                    LOGGER.warn(response.getHttpStatus());
-                }
+                span.setHttpStatus(response.getHttpStatus());
+            } catch (NoResultException e) {
+                span.recordError(e);
+                LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
+            } catch (Exception e) {
+                span.recordError(e);
+                LOGGER.error(e);
             }
-        } catch (NoResultException e) {
-            LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
-        } catch (Exception e) {
-            LOGGER.error(e);
         }
     }
 
@@ -276,31 +285,35 @@ public class ScimClient {
         var adapter = getAdapter(factory);
         adapter.setId(id);
 
-        try {
-            var resource = adapter.query("findById", adapter.getId()).getSingleResult();
-            adapter.apply(resource);
+        try (var span = TRACING.startSpan("scim.delete", adapter.getType(), scimApplicationBaseUrl)) {
+            try {
+                var resource = adapter.query("findById", adapter.getId()).getSingleResult();
+                adapter.apply(resource);
 
-            var retry = registry.retry("delete");
+                var retry = registry.retry("delete");
 
-            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-                try {
-                    return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
-                                                                adapter.getResourceClass())
-                                             .sendRequest();
-                } catch (ResponseException e) {
-                    throw new RuntimeException(e);
+                ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                    try {
+                        return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
+                                                                    adapter.getResourceClass())
+                                                 .sendRequest();
+                    } catch (ResponseException e) {
+                        throw new RuntimeException(e);
+                    }
+                }));
+
+                span.setHttpStatus(response.getHttpStatus());
+                if (!response.isSuccess()) {
+                    LOGGER.warn(response.getResponseBody());
+                    LOGGER.warn(response.getHttpStatus());
                 }
-            }));
 
-            if (!response.isSuccess()){
-                LOGGER.warn(response.getResponseBody());
-                LOGGER.warn(response.getHttpStatus());
+                getEM().remove(resource);
+
+            } catch (NoResultException e) {
+                span.recordError(e);
+                LOGGER.warnf("Failed to delete resource %s, scim mapping not found", id);
             }
-
-            getEM().remove(resource);
-
-        } catch (NoResultException e) {
-            LOGGER.warnf("Failed to delete resource %s, scim mapping not found", id);
         }
     }
 
@@ -308,89 +321,92 @@ public class ScimClient {
             AdapterFactory<M, S, A> factory,
             SynchronizationResult syncRes) {
         LOGGER.info("Refresh resources");
-        getAdapter(factory).getResourceStream().forEach(resource -> {
-            var adapter = getAdapter(factory);
-            adapter.apply(resource);
-            LOGGER.infof("Reconciling local resource %s", adapter.getId());
-            if (!adapter.skipRefresh()) {
-                var mapping = adapter.getMapping();
-                if (mapping == null) {
-                    LOGGER.info("Creating it");
-                    this.create(factory, resource);
-                } else {
-                    LOGGER.info("Replacing it");
-                    this.replace(factory, resource);
+        try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
+            getAdapter(factory).getResourceStream().forEach(resource -> {
+                var adapter = getAdapter(factory);
+                adapter.apply(resource);
+                LOGGER.infof("Reconciling local resource %s", adapter.getId());
+                if (!adapter.skipRefresh()) {
+                    var mapping = adapter.getMapping();
+                    if (mapping == null) {
+                        LOGGER.info("Creating it");
+                        this.create(factory, resource);
+                    } else {
+                        LOGGER.info("Replacing it");
+                        this.replace(factory, resource);
+                    }
+                    syncRes.increaseUpdated();
                 }
-                syncRes.increaseUpdated();
-            }
-        });
-
+            });
+        }
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
             AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
         LOGGER.info("Import");
-        try {
-            var adapter = getAdapter(factory);
-            String listUrl = scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint();
-            Class<S> resourceClass = adapter.getResourceClass();
-            ServerResponse<ListResponse<S>> response = auth.sendWithAuthRefresh(() ->
-                scimRequestBuilder.list(listUrl, resourceClass).get().sendRequest());
-            ListResponse<S> resourceTypeListResponse = response.getResource();
+        try (var ignored = TRACING.startSpan("scim.sync.import", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
+            try {
+                var adapter = getAdapter(factory);
+                String listUrl = scimApplicationBaseUrl + "/" + adapter.getSCIMEndpoint();
+                Class<S> resourceClass = adapter.getResourceClass();
+                ServerResponse<ListResponse<S>> response = auth.sendWithAuthRefresh(() ->
+                    scimRequestBuilder.list(listUrl, resourceClass).get().sendRequest());
+                ListResponse<S> resourceTypeListResponse = response.getResource();
 
-            for (var resource : resourceTypeListResponse.getListedResources()) {
-                try {
-                    LOGGER.infof("Reconciling remote resource %s", resource);
-                    adapter = getAdapter(factory);
-                    adapter.apply(resource);
+                for (var resource : resourceTypeListResponse.getListedResources()) {
+                    try {
+                        LOGGER.infof("Reconciling remote resource %s", resource);
+                        adapter = getAdapter(factory);
+                        adapter.apply(resource);
 
-                    var mapping = adapter.getMapping();
-                    if (mapping != null) {
-                        adapter.apply(mapping);
-                        if (adapter.entityExists()) {
-                            LOGGER.info("Valid mapping found, skipping");
-                            continue;
+                        var mapping = adapter.getMapping();
+                        if (mapping != null) {
+                            adapter.apply(mapping);
+                            if (adapter.entityExists()) {
+                                LOGGER.info("Valid mapping found, skipping");
+                                continue;
+                            } else {
+                                LOGGER.info("Delete a dangling mapping");
+                                adapter.deleteMapping();
+                            }
+                        }
+
+                        var mapped = adapter.tryToMap();
+                        if (mapped) {
+                            LOGGER.info("Matched");
+                            adapter.saveMapping();
                         } else {
-                            LOGGER.info("Delete a dangling mapping");
-                            adapter.deleteMapping();
+                            switch (this.model.get("sync-import-action")) {
+                                case "CREATE_LOCAL":
+                                    LOGGER.info("Create local resource");
+                                    try {
+                                        adapter.createEntity();
+                                        adapter.saveMapping();
+                                        syncRes.increaseAdded();
+                                    } catch (Exception e) {
+                                        LOGGER.error(e);
+                                    }
+                                    break;
+                                case "DELETE_REMOTE":
+                                    LOGGER.info("Delete remote resource");
+                                    scimRequestBuilder
+                                        .delete(genScimUrl(adapter.getSCIMEndpoint(),
+                                                           resource.getId().get()),
+                                                           adapter.getResourceClass())
+                                        .sendRequest();
+                                    syncRes.increaseRemoved();
+                                    break;
+                            }
                         }
+                    } catch (Exception e) {
+                        LOGGER.error(e);
+                        e.printStackTrace();
+                        syncRes.increaseFailed();
                     }
-
-                    var mapped = adapter.tryToMap();
-                    if (mapped) {
-                        LOGGER.info("Matched");
-                        adapter.saveMapping();
-                    } else {
-                        switch (this.model.get("sync-import-action")) {
-                            case "CREATE_LOCAL":
-                                LOGGER.info("Create local resource");
-                                try {
-                                    adapter.createEntity();
-                                    adapter.saveMapping();
-                                    syncRes.increaseAdded();
-                                } catch (Exception e) {
-                                    LOGGER.error(e);
-                                }
-                                break;
-                            case "DELETE_REMOTE":
-                                LOGGER.info("Delete remote resource");
-                                scimRequestBuilder
-                                    .delete(genScimUrl(adapter.getSCIMEndpoint(),
-                                                       resource.getId().get()),
-                                                       adapter.getResourceClass())
-                                    .sendRequest();
-                                syncRes.increaseRemoved();
-                                break;
-                        }
-                    }
-                } catch (Exception e) {
-                    LOGGER.error(e);
-                    e.printStackTrace();
-                    syncRes.increaseFailed();
                 }
+            } catch (ResponseException e) {
+                throw new RuntimeException(e);
             }
-        } catch (ResponseException e) {
-            throw new RuntimeException(e);
         }
     }
 
