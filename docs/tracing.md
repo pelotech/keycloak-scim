@@ -27,6 +27,8 @@ wrapping all per-resource create/replace calls.
 | `scim.create` | User or group creation propagation |
 | `scim.replace` | User or group update propagation |
 | `scim.delete` | User or group deletion propagation |
+| `scim.group.member.add` | Single user added to a group (`group-patchOp=true`) |
+| `scim.group.member.remove` | Single user removed from a group (`group-patchOp=true`) |
 | `scim.sync.refresh` | `refreshResources` (outbound triggerFullSync) |
 | `scim.sync.import` | `importResources` (inbound sync) |
 
