@@ -2,9 +2,11 @@ package sh.libre.scim.integration;
 
 import org.junit.jupiter.api.Test;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -191,6 +193,68 @@ class ScimGroupPropagationIT extends IntegrationTestBase {
         assertTrue(putsAfterSync > putsBeforeSync,
             "expected sync to produce some refresh PUTs; before=" + putsBeforeSync
                 + " after=" + putsAfterSync);
+    }
+
+    private TestRealm setupRealmWithGroupPatchOp() {
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("propagation-group", "true");
+            cfg.putSingle("group-patchOp", "true");
+        });
+        enableScimEventListener(r.realm());
+        return r;
+    }
+
+    @Test
+    void groupMembershipAddWithPatchOpSendsDeltaAdd() {
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        stubScimGroupCreateOk();
+        stubScimGroupPatchOk();
+        var r = setupRealmWithGroupPatchOp();
+
+        String userId = createAdminUser(r.realm(), "groupie", "groupie@test.local");
+        awaitUserPostFor("groupie");
+        String groupId = createGroup(r.realm(), "admins");
+        awaitGroupPostFor("admins");
+
+        // With group-patchOp=true, GROUP_MEMBERSHIP/CREATE dispatches a
+        // single-member delta PATCH (op=add) rather than a full-list PUT.
+        r.realm().users().get(userId).joinGroup(groupId);
+
+        await().atMost(20, SECONDS).untilAsserted(() ->
+            wireMock.verify(patchRequestedFor(urlPathMatching("/Groups/.*"))
+                .withRequestBody(containing("\"op\":\"add\""))
+                .withRequestBody(containing("members"))));
+    }
+
+    @Test
+    void groupMembershipRemoveWithPatchOpSendsDeltaRemove() {
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        stubScimGroupCreateOk();
+        stubScimGroupPatchOk();
+        var r = setupRealmWithGroupPatchOp();
+
+        String userId = createAdminUser(r.realm(), "groupie", "groupie@test.local");
+        awaitUserPostFor("groupie");
+        String groupId = createGroup(r.realm(), "admins");
+        awaitGroupPostFor("admins");
+
+        r.realm().users().get(userId).joinGroup(groupId);
+        await().atMost(20, SECONDS).until(() ->
+            wireMock.countRequestsMatching(
+                patchRequestedFor(urlPathMatching("/Groups/.*"))
+                    .withRequestBody(containing("\"op\":\"add\"")).build()
+            ).getCount() >= 1);
+
+        // Removing fires GROUP_MEMBERSHIP/DELETE → delta PATCH op=remove with
+        // the RFC 7644 filter path targeting just this member.
+        r.realm().users().get(userId).leaveGroup(groupId);
+
+        await().atMost(20, SECONDS).untilAsserted(() ->
+            wireMock.verify(patchRequestedFor(urlPathMatching("/Groups/.*"))
+                .withRequestBody(containing("\"op\":\"remove\""))
+                .withRequestBody(containing("members[value eq"))));
     }
 
     @Test
