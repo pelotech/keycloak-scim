@@ -40,6 +40,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.delete;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.patch;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
@@ -390,6 +391,19 @@ public abstract class IntegrationTestBase {
     protected void stubScimGroupDeleteOk() {
         wireMock.stubFor(delete(urlPathMatching("/Groups/.*"))
             .willReturn(aResponse().withStatus(204)));
+    }
+
+    protected void stubScimGroupPatchOk() {
+        wireMock.stubFor(patch(urlMatching("/Groups/.*"))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "ext-patched",
+                      "displayName": "placeholder",
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"]
+                    }""")));
     }
 
     /** Polls until WireMock has seen at least one POST to /Users with the given userName. */

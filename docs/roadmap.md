@@ -17,12 +17,16 @@ inefficient at scale, and federated-from-LDAP groups don't propagate
 at all. These two are the same problem space — a coherent solution
 touches both.
 
-- **Incremental PATCH delta.** `group-patchOp=true` switches the group
-  update path from PUT to PATCH, but the body still contains the full
-  member list (just expressed as a REPLACE operation on `members`).
-  For a 10k-member group, every membership change re-sends all 10k
-  members. Real fix: send incremental ADD/REMOVE patches based on the
-  delta. The mapping table can compute the delta cheaply.
+- **Incremental PATCH delta.** _Done._ `GROUP_MEMBERSHIP` events now
+  dispatch `ScimClient.patchGroupMembership`, which (when
+  `group-patchOp=true`) sends a single-member ADD/REMOVE PATCH instead
+  of re-sending the full member list — a user joining a 10k-member group
+  produces a one-member request. REMOVE uses the RFC 7644 filter path
+  `members[value eq "..."]`. `group-patchOp=false` deployments fall back
+  to the existing full `replace`. Verified by `GroupMembershipPatchTest`
+  (wire shape) and `ScimGroupPropagationIT` (end-to-end add/remove).
+  Note: this covers membership *changes*; a full group `replace` (name
+  edits, sync-refresh) still sends the whole list via `toPatchBuilder`.
 - **LDAP-federated group membership.** No `onImportGroupFromLDAP`
   analogue in the LDAP mapper. Groups federated from LDAP don't
   propagate to SCIM. Architectural addition.

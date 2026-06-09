@@ -9,12 +9,14 @@ import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
+import de.captaingoldfish.scim.sdk.common.resources.Group;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
 import de.captaingoldfish.scim.sdk.common.response.ListResponse;
 
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
 import org.keycloak.storage.user.SynchronizationResult;
@@ -313,6 +315,66 @@ public class ScimClient {
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.warnf("Failed to delete resource %s, scim mapping not found", id);
+            }
+        }
+    }
+
+    /**
+     * Propagates a single group-membership change as a minimal SCIM PATCH —
+     * one member ADD or REMOVE — rather than re-sending the entire member list
+     * via {@link #replace}. Only the {@code GROUP_MEMBERSHIP} event path uses
+     * this; group attribute changes still go through {@code replace}.
+     *
+     * <p>When {@code group-patchOp} is disabled (the remote doesn't support
+     * PATCH), this falls back to a full {@code replace} so behaviour is
+     * unchanged for those deployments. A missing group or user mapping (e.g.
+     * the user was never synced) is logged and skipped, mirroring {@link #delete}.
+     */
+    public void patchGroupMembership(
+            AdapterFactory<GroupModel, Group, GroupAdapter> factory,
+            String groupId, String userId, boolean isAdd) {
+
+        if (!this.model.get("group-patchOp", false)) {
+            var group = session.groups().getGroupById(
+                    session.getContext().getRealm(), groupId);
+            this.replace(factory, group);
+            return;
+        }
+
+        var adapter = getAdapter(factory);
+        try (var span = TRACING.startSpan(
+                isAdd ? "scim.group.member.add" : "scim.group.member.remove",
+                "Group", scimApplicationBaseUrl)) {
+            try {
+                adapter.setId(groupId);
+                var groupMapping = adapter.query("findById", groupId).getSingleResult();
+                adapter.apply(groupMapping);
+
+                var userMapping = adapter.query("findById", userId, "User").getSingleResult();
+                String userExternalId = userMapping.getExternalId();
+                String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
+
+                var retry = registry.retry("patchMembership");
+                ServerResponse<Group> response = auth.sendWithAuthRefresh(
+                    () -> retry.executeSupplier(() -> {
+                        try {
+                            return adapter.toMembershipPatchBuilder(
+                                    scimRequestBuilder, url, userExternalId, isAdd)
+                                .sendRequest();
+                        } catch (ResponseException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }));
+
+                span.setHttpStatus(response.getHttpStatus());
+                if (!response.isSuccess()) {
+                    LOGGER.warnf("Failed to PATCH membership for group %s / user %s: %d %s",
+                            groupId, userId, response.getHttpStatus(), response.getResponseBody());
+                }
+            } catch (NoResultException e) {
+                span.recordError(e);
+                LOGGER.infof("Skipping membership patch: no SCIM mapping for group %s or user %s",
+                        groupId, userId);
             }
         }
     }

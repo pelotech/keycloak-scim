@@ -196,4 +196,34 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         LOGGER.info(patchBuilder.getResource());
         return patchBuilder;
     }
+
+    /**
+     * Builds a minimal single-member PATCH for a {@code GROUP_MEMBERSHIP}
+     * change — one ADD or one REMOVE — rather than re-sending the full member
+     * list as {@link #toPatchBuilder} does. This is the delta path: a user
+     * joining or leaving a 10k-member group produces a one-member request.
+     */
+    public PatchBuilder<Group> toMembershipPatchBuilder(
+            ScimRequestBuilder scimRequestBuilder,
+            String url,
+            String userExternalId,
+            boolean isAdd) {
+        var patchBuilder = scimRequestBuilder.patch(url, Group.class);
+        if (isAdd) {
+            patchBuilder.addOperation()
+                .path("members")
+                .op(PatchOp.ADD)
+                .valueNodes(List.of(Member.builder().value(userExternalId).build()))
+                .next()
+                .build();
+        } else {
+            // RFC 7644 §3.5.2.2: filter path targets exactly this member.
+            patchBuilder.addOperation()
+                .path("members[value eq \"" + userExternalId + "\"]")
+                .op(PatchOp.REMOVE)
+                .next()
+                .build();
+        }
+        return patchBuilder;
+    }
 }

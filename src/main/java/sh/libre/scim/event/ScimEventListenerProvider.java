@@ -117,8 +117,9 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             var userId = matcher.group(1);
             var groupId = matcher.group(2);
             LOGGER.infof("%s %s from %s", event.getOperationType(), userId, groupId);
-            var group = getGroup(groupId);
-            dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter::new, group));
+            boolean isAdd = event.getOperationType() == OperationType.CREATE;
+            dispatcher.run(ScimDispatcher.SCOPE_GROUP,
+                    client -> client.patchGroupMembership(GroupAdapter::new, groupId, userId, isAdd));
             var user = getUser(userId);
             dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
         }
