@@ -13,8 +13,10 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 import javax.naming.AuthenticationException;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
@@ -23,6 +25,8 @@ import sh.libre.scim.core.UserAdapter;
 public class ScimLdapStorageMapper implements LDAPStorageMapper {
 
     public static final String LAST_SEEN_ATTRIBUTE = "ldap-federation-last-seen";
+
+    public static final String PROPAGATED_GROUPS_ATTR_PREFIX = "scim-propagated-groups-";
 
     private static final Logger LOGGER = Logger.getLogger(ScimLdapStorageMapper.class);
 
@@ -57,17 +61,44 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
             });
         }
 
-        // Propagate the user's current group memberships. LDAP-driven
-        // membership changes never fire GROUP_MEMBERSHIP admin events, so this
-        // hook is the only signal. Additions only; idempotent, so re-asserting
-        // on every import is safe (see the design doc). Runs on SCOPE_GROUP,
-        // independent of the user dispatch above — interoperates only with
-        // components configured for both user and group propagation.
+        // Reconcile the user's group memberships. LDAP-driven changes fire no
+        // GROUP_MEMBERSHIP event, so this hook is the only signal.
+        //   - removals: groups we last propagated but the user has left -> REMOVE PATCH
+        //   - additions: re-assert the user's current memberships (idempotent)
+        // getGroupsStream() reads the user's OWN groups; it does NOT enumerate any
+        // group's members, so it cannot retrigger the federated re-import loop.
         dispatcher.runAsync(ScimDispatcher.SCOPE_GROUP, (client, workerSession) -> {
-            var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
+            var u = workerSession.users().getUserById(
+                    workerSession.getContext().getRealm(), userId);
             if (u == null) return;
-            u.getGroupsStream().forEach(group ->
-                client.ensureGroupMembership(GroupAdapter::new, group.getId(), userId));
+
+            Set<String> current = u.getGroupsStream()
+                    .map(GroupModel::getId)
+                    .collect(Collectors.toSet());
+
+            String attr = PROPAGATED_GROUPS_ATTR_PREFIX + client.getComponentId();
+            Set<String> stored = u.getAttributeStream(attr).collect(Collectors.toSet());
+
+            // Removals — keep any whose REMOVE did not apply, so the next import retries.
+            Set<String> kept = new HashSet<>();
+            stored.stream().filter(gid -> !current.contains(gid)).forEach(gid -> {
+                if (!client.patchGroupMembership(GroupAdapter::new, gid, userId, false)) {
+                    kept.add(gid);
+                }
+            });
+
+            // Additions — re-assert current memberships (idempotent).
+            current.forEach(gid ->
+                    client.ensureGroupMembership(GroupAdapter::new, gid, userId));
+
+            // Record what SCIM now reflects = current ∪ failed-removals.
+            Set<String> next = new HashSet<>(current);
+            next.addAll(kept);
+            if (next.isEmpty()) {
+                u.removeAttribute(attr);
+            } else {
+                u.setAttribute(attr, List.copyOf(next));
+            }
         });
     }
 
