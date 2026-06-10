@@ -49,13 +49,13 @@ class EnsureGroupMembershipTest {
     void groupPatchOpOn_ensuresGroupThenAddsMember() {
         var group = mock(GroupModel.class);
         var client = spy(newClient(true, group));
-        doNothing().when(client).create(any(), eq(group));
+        doNothing().when(client).provisionGroupForMembership(any(), eq(group));
         doNothing().when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
 
         client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
         InOrder order = inOrder(client);
-        order.verify(client).create(any(), eq(group));
+        order.verify(client).provisionGroupForMembership(any(), eq(group));
         order.verify(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
     }
 
@@ -67,7 +67,7 @@ class EnsureGroupMembershipTest {
 
         client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
-        verify(client, never()).create(any(), eq(group));
+        verify(client, never()).provisionGroupForMembership(any(), eq(group));
         verify(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
     }
 
@@ -77,7 +77,7 @@ class EnsureGroupMembershipTest {
 
         client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
-        verify(client, never()).create(any(), any());
+        verify(client, never()).provisionGroupForMembership(any(), any());
         verify(client, never()).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
     }
 }
