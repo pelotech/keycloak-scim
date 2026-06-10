@@ -56,6 +56,21 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
     }
 
+    /**
+     * Like {@link #apply(GroupModel)} but WITHOUT enumerating the group's
+     * members. Used to provision a group for membership propagation, where the
+     * member list is neither needed (members are added via the single-member
+     * delta PATCH) nor safe to read: on a federated group,
+     * {@code getGroupMembersStream} re-imports every member, re-firing
+     * {@code onImportUserFromLDAP} and causing an unbounded re-import loop.
+     * Sets id, displayName, and the {@code scim-skip} flag only.
+     */
+    public void applyForProvisioning(GroupModel group) {
+        setId(group.getId());
+        setDisplayName(group.getName());
+        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+    }
+
     @Override
     public void apply(Group group) {
         setExternalId(group.getId().get());
