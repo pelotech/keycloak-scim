@@ -37,10 +37,12 @@ import java.util.UUID;
 import java.util.function.Consumer;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
+import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.delete;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.patch;
+import static com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
@@ -51,6 +53,7 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Shared scaffolding for end-to-end integration tests against the full stack:
@@ -163,6 +166,45 @@ public abstract class IntegrationTestBase {
         addLdapAttributeMapper(realm, ldapId, "lastName", "lastName", "sn");
         attachScimMapper(realm, ldapId);
         return new TestRealm(realmName, ldapId, realm);
+    }
+
+    /**
+     * Like {@link #newRealmWithScimAndLdapAndConfig}, but additionally attaches
+     * a group-ldap-mapper to the LDAP provider so an LDAP user's group
+     * memberships (seeded as {@code groupOfNames} entries under
+     * {@code ou=groups,dc=test,dc=local}) materialize onto the imported
+     * Keycloak UserModel via {@code getGroupsStream()}.
+     */
+    protected TestRealm newRealmWithScimAndLdapGroups(
+            Consumer<MultivaluedHashMap<String, String>> scimCfgCustomizer) {
+        TestRealm r = newRealmWithScimAndLdapAndConfig(scimCfgCustomizer);
+        addLdapGroupMapper(r.realm(), r.ldapId());
+        return r;
+    }
+
+    protected void addLdapGroupMapper(RealmResource realm, String ldapId) {
+        var mapper = new ComponentRepresentation();
+        mapper.setName("groups");
+        mapper.setProviderType("org.keycloak.storage.ldap.mappers.LDAPStorageMapper");
+        mapper.setProviderId("group-ldap-mapper");
+        mapper.setParentId(ldapId);
+        var cfg = new MultivaluedHashMap<String, String>();
+        cfg.putSingle("groups.dn", "ou=groups,dc=test,dc=local");
+        cfg.putSingle("membership.ldap.attribute", "member");
+        cfg.putSingle("membership.attribute.type", "DN");
+        cfg.putSingle("group.name.ldap.attribute", "cn");
+        cfg.putSingle("group.object.classes", "groupOfNames");
+        cfg.putSingle("mode", "READ_ONLY");
+        cfg.putSingle("preserve.group.inheritance", "false");
+        cfg.putSingle("membership.user.ldap.attribute", "uid");
+        cfg.putSingle("groups.path", "/");
+        cfg.putSingle("user.roles.retrieve.strategy", "LOAD_GROUPS_BY_MEMBER_ATTRIBUTE");
+        mapper.setConfig(cfg);
+        try (Response r = realm.components().add(mapper)) {
+            if (r.getStatus() >= 400) {
+                throw new IllegalStateException("LDAP group mapper create failed: " + r.getStatus());
+            }
+        }
     }
 
     /**
@@ -420,6 +462,25 @@ public abstract class IntegrationTestBase {
             wireMock.verify(postRequestedFor(urlPathEqualTo("/Groups"))
                 .withRequestBody(matchingJsonPath("$.displayName", equalTo(displayName))))
         );
+    }
+
+    /** Current count of single-member delta add PATCHes (op=add with a members body) to /Groups/*. */
+    protected int memberAddPatchCount() {
+        return wireMock.countRequestsMatching(
+            patchRequestedFor(urlPathMatching("/Groups/.*"))
+                .withRequestBody(containing("\"op\":\"add\""))
+                .withRequestBody(containing("members"))
+                .build()
+        ).getCount();
+    }
+
+    /** Polls until WireMock has seen at least {@code atLeast} member-add PATCHes to /Groups/*. */
+    protected void awaitMemberAddPatchCount(int atLeast) {
+        await().atMost(30, SECONDS).untilAsserted(() -> {
+            int memberAdds = memberAddPatchCount();
+            assertTrue(memberAdds >= atLeast,
+                "expected at least " + atLeast + " member-add PATCH(es) to /Groups/*, got " + memberAdds);
+        });
     }
 
     protected String createGroup(RealmResource realm, String name) {
