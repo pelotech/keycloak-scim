@@ -60,20 +60,37 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    would set `stored = current`, masking the diff for every other
    component. Distinct per-component attributes are independent, so the
    workers don't race, and the design stays correct when an operator runs
-   multiple SCIM providers. The attribute is keyed by the SCIM component
-   id available to the worker's `ScimClient`. It mirrors the existing
-   `LAST_SEEN_ATTRIBUTE` pattern (a mapper-owned user attribute), stored
-   multi-valued (`setAttribute(name, List)`) rather than as a delimited
-   string.
+   multiple SCIM providers. **Precondition:** the attribute key uses the
+   SCIM provider's component id, reached from the worker's `ScimClient`
+   via its `ComponentModel.getId()` — a persisted id, stable across syncs
+   and restarts (a small package accessor exposes it). The attribute
+   mirrors the existing `LAST_SEEN_ATTRIBUTE` pattern (a mapper-owned user
+   attribute), stored multi-valued (`setAttribute(name, List)`) rather
+   than as a delimited string.
 
 4. **The diff runs in the `SCOPE_GROUP` worker, against the committed
-   view.** The worker already re-fetches the user (`getUserById`) to read
-   committed group state. There it computes `current` (group ids),
-   reads `stored` (the per-component attribute), applies removals
-   (`removed = stored − current` → `patchGroupMembership(isAdd=false)`),
-   runs the unchanged add path, then writes the attribute to `current`.
-   Writing once per worker (one per component, keyed per component) keeps
-   it race-free.
+   view; removals are tracked, additions are re-asserted.** The worker
+   already re-fetches the user (`getUserById`) to read committed group
+   state. There it computes `current` (the user's current group ids),
+   reads `stored` (the per-component attribute), and reconciles
+   asymmetrically:
+   - **Removals (diff-driven):** `removed = stored − current` →
+     `patchGroupMembership(isAdd=false)` per group.
+   - **Additions (full re-assert, unchanged):** `ensureGroupMembership`
+     for **every** group in `current` (not a diff — see Decision 2).
+
+   It then records what it believes SCIM now reflects. Because additions
+   re-assert the whole of `current` every import, a failed add self-heals
+   on the next import; removals do **not** re-assert, so a removal that
+   fails must be retried explicitly. The new stored set is therefore
+   `current ∪ {groups whose REMOVE did not apply}` — a failed removal
+   stays in `stored` so the next import re-detects and retries it; a
+   removal that applied (or had no SCIM mapping to remove) is dropped.
+   This requires the removal call to signal whether it was applied (see
+   Architecture). Writing the attribute once per worker — keyed per
+   component, and removing the attribute entirely when the new set is
+   empty (Keycloak's empty-list write is not a reliable round-trip) —
+   keeps it race-free.
 
 5. **Empty-group cleanup is delegated, not handled here.** Removing the
    last member leaves the SCIM group memberless; the group-delete
@@ -97,25 +114,35 @@ dispatcher.runAsync(SCOPE_GROUP, (client, workerSession) -> {
     var attr    = PROPAGATED_GROUPS_PREFIX + client.getComponentId();
     var stored  = u.getAttributeStream(attr).collect(toSet());
 
-    // removals (new): groups we propagated but the user has left
-    stored.stream().filter(g -> !current.contains(g))
-          .forEach(g -> client.patchGroupMembership(GroupAdapter::new, g, userId, false));
+    // removals (new): groups we propagated but the user has left.
+    // keep any that did NOT apply, so the next import retries them.
+    var kept = new HashSet<String>();
+    stored.stream().filter(g -> !current.contains(g)).forEach(g -> {
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, g, userId, false);
+        if (!applied) kept.add(g);
+    });
 
-    // additions (unchanged): re-assert current memberships
+    // additions (unchanged): full re-assert of current memberships
     current.forEach(g -> client.ensureGroupMembership(GroupAdapter::new, g, userId));
 
-    // record what we propagated this import
-    u.setAttribute(attr, List.copyOf(current));
+    // record what SCIM now reflects = current ∪ failed-removals
+    var next = new HashSet<>(current); next.addAll(kept);
+    if (next.isEmpty()) u.removeAttribute(attr);
+    else u.setAttribute(attr, List.copyOf(next));
 });
 ```
 
-The exact factoring (helper method vs. inline; whether `getComponentId`
-already exists on `ScimClient` or needs a small accessor) is an
-implementation detail for the plan. `patchGroupMembership(..., isAdd=false)`
-and the REMOVE filter path (`members[value eq "..."]`) are unchanged and
-already covered by tests; a removal whose group has no SCIM mapping is a
-no-op (the existing not-found handling), so a never-propagated group in
-`stored` does no harm.
+The exact factoring (helper method vs. inline; the `getComponentId`
+accessor) is an implementation detail for the plan. To signal applied-or-not,
+`patchGroupMembership`'s REMOVE path returns a `boolean`: **true** when the
+PATCH succeeded **or** there is no SCIM mapping to remove (the existing
+`NoResultException` skip — nothing to do, so a never-propagated group in
+`stored` is correctly dropped, not retried forever); **false** only on a
+genuine failure (the `!response.isSuccess()` branch, after resilience4j's
+429/5xx retries are exhausted). Today the method returns `void` and swallows
+both cases; threading a `boolean` out is the one change to it (admin-event
+callers ignore the return). The REMOVE filter path (`members[value eq
+"..."]`) itself is unchanged.
 
 ### What does not change
 
@@ -137,11 +164,20 @@ no-op (the existing not-found handling), so a never-propagated group in
 - **Initial deploy (attribute absent):** `stored = {}` ⇒ `removed = {}`,
   so **no spurious removals**; the attribute is simply populated on the
   first import. No migration.
-- **Transient REMOVE failure:** the SCIM client's existing resilience4j
-  retry (429/5xx) covers transient faults. A removal that ultimately
-  fails is not retried on a later import (the user is already absent from
-  `current`, so it is not re-detected) — acceptable, and consistent with
-  how a hard failure surfaces in logs for operator attention.
+- **REMOVE failure (transient or hard):** resilience4j (429/5xx) covers
+  transient faults inside the call. A removal that still fails returns
+  `false`, so the group is **kept in `stored`** and re-attempted on the
+  next import — the departed user does not silently linger in the SCIM
+  group. The cost is that a *permanently* failing REMOVE (e.g. a server
+  that 4xx-es the filter) is retried every import; that is a server/config
+  fault that should surface to an operator, and the repeated warn log is
+  the signal.
+- **Concurrent imports of the same user (same component):** two
+  `SCOPE_GROUP` workers for one user in one component would race on the
+  attribute, but the race is benign — both read the **same committed**
+  group membership, so they compute identical `current`/`removed` sets and
+  converge to the same written value. Last-writer-wins is safe. (Distinct
+  components never share an attribute; per Decision 3.)
 
 ## Testing
 
@@ -154,9 +190,18 @@ no-op (the existing not-found handling), so a never-propagated group in
   from the LDAP `groupOfNames`; sync again; assert a single-member
   **REMOVE** PATCH fires for that user/group and the stored attribute no
   longer lists the group.
-- **Guard:** a sync with **no** membership change emits **no** REMOVE
-  PATCH (the stored set already equals current) — protects against
-  re-removing on every sync.
+- **Guard — idempotence:** a sync with **no** membership change emits
+  **no** REMOVE PATCH (the stored set already equals current) — protects
+  against re-removing on every sync.
+- **Guard — failed-removal retry:** when the REMOVE returns `false`, the
+  group stays in the stored attribute and the next import re-emits the
+  REMOVE (unit-level, with a stubbed failing `patchGroupMembership`).
+- **Guard — loop safety:** the diff path must not enumerate a group's
+  members. The central hazard is that someone "optimizes" the diff toward
+  `getGroupMembersStream` and reintroduces the re-import loop. Assert the
+  import/diff path triggers no member-set materialization / re-import
+  (e.g. the existing re-import-loop measurement stays flat with removals
+  active), not merely that the set math is correct.
 
 ## Non-goals
 
@@ -169,3 +214,8 @@ no-op (the existing not-found handling), so a never-propagated group in
   the full `replace`, which already re-sends the complete member list, so
   removals already propagate via replace; the stored-set diff targets the
   default `group-patchOp=true` delta path.
+- **Cleaning up orphaned `scim-propagated-groups-<componentId>`
+  attributes.** Deleting and recreating a SCIM provider component leaves
+  the old-id attribute orphaned on every previously-synced user; nothing
+  reaps it. Accepted as minor debt — the attribute is small and inert, and
+  component re-creation is rare. Not handled here.
