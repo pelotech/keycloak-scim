@@ -114,7 +114,14 @@ a concrete IdP that requires it.
   sets id + displayName + `scim-skip` only, and `ensureGroupMembership`
   now calls it instead of the member-enumerating `create`/`apply`.
   Re-measured: 2 invocations / ~1 PATCH per 2-member sync, zero
-  re-import recursion on `scim-dispatch` threads.
+  re-import recursion on `scim-dispatch` threads (on the default
+  `group-patchOp=true` path). **Residual:** when `group-patchOp=false`,
+  `ensureGroupMembership` defers to `patchGroupMembership`'s full
+  `replace` fallback, which still calls `GroupAdapter.apply(GroupModel)`
+  → `getGroupMembersStream`, so the loop can still occur on that
+  non-default path. Unmeasured (the re-measurement covered
+  `group-patchOp=true` only); fix the same way — provision/replace
+  without enumerating members — if it proves to loop.
 - **Concurrent group provisioning can double-POST.** The runaway
   re-import storm that amplified this race is now gone (see entry
   above), but the underlying **check-then-act race** in

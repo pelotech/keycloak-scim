@@ -405,14 +405,20 @@ public class ScimClient {
      * memberships on every import (additions only — removals are out of scope).
      *
      * <p>Both underlying operations are idempotent, so re-asserting every import
-     * is cheap after the first time: {@link #create} short-circuits once the
-     * group has a local mapping, and the member-add is a single-member delta
-     * PATCH the server already has.
+     * is cheap after the first time: {@link #provisionGroupForMembership}
+     * short-circuits once the group has a local mapping, and the member-add is a
+     * single-member delta PATCH the server already has. Provisioning is
+     * deliberately <em>member-less</em> — it must not enumerate the group's
+     * members, because on a federated group that re-imports every member and
+     * re-fires {@code onImportUserFromLDAP} (an unbounded re-import loop).
      *
      * <p>When {@code group-patchOp=false}, {@link #patchGroupMembership} falls
      * back to a full {@code replace} that itself provisions the group and the
-     * membership, so the explicit ensure-group {@link #create} is redundant and
-     * skipped. A missing local group is logged and skipped.
+     * membership, so the explicit member-less provisioning is redundant and
+     * skipped. NOTE: that {@code replace} path <em>does</em> enumerate members
+     * (via {@code GroupAdapter.apply(GroupModel)}), so the re-import loop can
+     * still occur on the non-default {@code group-patchOp=false} path — a known
+     * residual (see docs/roadmap.md). A missing local group is logged and skipped.
      */
     public void ensureGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
