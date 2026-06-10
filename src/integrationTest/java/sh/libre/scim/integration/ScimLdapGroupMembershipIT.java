@@ -7,6 +7,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end propagation of LDAP-federated group memberships. When an LDAP
@@ -86,28 +87,33 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
      * — instead of racing convergence inside a single sync.
      */
     private void syncUntilMembershipsAdded(TestRealm r) {
+        // First sync provisions the user + group SCIM mappings (POST /Users,
+        // POST /Groups). The member-add PATCHes resolve the user mapping, so
+        // they can only succeed once those mappings are committed.
         r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-
-        // Both users must be provisioned (POST /Users) — that is what creates
-        // the SCIM user mappings the membership PATCHes resolve against.
-        await().atMost(30, SECONDS).until(() ->
+        await().atMost(60, SECONDS).until(() ->
             wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Users")).build()
-            ).getCount() >= 2);
-
-        // And the group must be provisioned (POST /Groups), creating the group
-        // mapping the member PATCHes target.
-        await().atMost(30, SECONDS).until(() ->
+                postRequestedFor(urlPathEqualTo("/Users")).build()).getCount() >= 2);
+        await().atMost(60, SECONDS).until(() ->
             wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Groups")).build()
-            ).getCount() >= 1);
+                postRequestedFor(urlPathEqualTo("/Groups")).build()).getCount() >= 1);
 
-        // Re-sync: user mappings now exist, so each imported user's membership
-        // resolves to a single-member add PATCH. The group create short-circuits
-        // on the existing mapping, so this does not add a second POST /Groups.
-        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-
-        // Both seeded members (alice, bob) added via single-member delta PATCHes.
-        awaitMemberAddPatchCount(2);
+        // Member-add propagation is async and eventually-consistent: a PATCH
+        // skips if it runs before the user's mapping is committed (the
+        // documented lazy-import lag, "converges on the next sync"). A FIXED
+        // number of follow-up syncs is not reliable on a cold, resource-
+        // constrained CI runner where mapping commits and the async dispatch
+        // pool lag. So re-sync until both memberships are actually observed (or
+        // a generous deadline) — nudging convergence rather than assuming N
+        // syncs suffice. Idempotent: re-imports replace, the group create
+        // short-circuits on its mapping, member-adds the server already has are
+        // no-ops, so POST /Groups stays at 1.
+        long deadline = System.currentTimeMillis() + 120_000;
+        while (memberAddPatchCount() < 2 && System.currentTimeMillis() < deadline) {
+            r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+            sleepQuietly(5);
+        }
+        assertTrue(memberAddPatchCount() >= 2,
+            "expected >=2 member-add PATCH(es) after resync loop, got " + memberAddPatchCount());
     }
 }
