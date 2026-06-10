@@ -77,21 +77,24 @@ user per sync (no recursion).
    re-run a single full sync; confirm `onImportUserFromLDAP` fires ~once
    per user (no `scim-dispatch`-thread re-imports) and member-add PATCHes ≈
    member count, not thousands. Also confirm no *secondary* re-import
-   trigger remains via the `SCOPE_USER` path (the spike only surfaced the
-   group path; the `UserAdapter` create/replace could in principle
-   enumerate groups → materialize → re-import; measurement settles it).
+   trigger remains via the `SCOPE_USER` path. This is a light check, not a
+   symmetric risk: `UserAdapter.apply` reads only the importing user's
+   *own* `getGroupsStream()` for role mappings — it does **not** materialize
+   those groups' member sets, so it cannot fan out across members the way
+   the group path does. Measurement just confirms it stays quiet.
 
 ## Architecture
 
 ### The member-less provisioning
 
-`GroupAdapter` gains a way to populate id + displayName + skip from a
-`GroupModel` **without** the member enumeration (e.g. an
-`applyForProvisioning(GroupModel)` that does what `apply(GroupModel)` does
-minus the `getGroupMembersStream` block, or an equivalent that the
-provisioning path uses via the existing `setId`/`setDisplayName` setters).
-The existing `apply(GroupModel)` (with enumeration) remains for
-`create`/`replace`.
+`GroupAdapter` gains a way to populate the group from a `GroupModel`
+**without** the member enumeration: it must still set `id`, `displayName`,
+**and the `scim-skip` flag** (`group.getFirstAttribute("scim-skip")`) — it
+omits *only* the `getGroupMembersStream` block. Dropping the `scim-skip`
+read would silently break `create`'s skip short-circuit for skip-flagged
+groups, so the contract is: **everything `apply(GroupModel)` does except
+member enumeration.** The existing `apply(GroupModel)` (with enumeration)
+remains for `create`/`replace`.
 
 `ensureGroupMembership` provisions the group through a dedicated path that
 reuses the existing create semantics — idempotent short-circuit on an
