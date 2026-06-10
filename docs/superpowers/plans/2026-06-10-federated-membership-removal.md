@@ -119,7 +119,7 @@ with:
 doReturn(true).when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
 ```
 
-Add `import static org.mockito.Mockito.doReturn;` and remove the now-unused `import static org.mockito.Mockito.doNothing;` if no other usage remains (check with a grep first).
+Add `import static org.mockito.Mockito.doReturn;`. **Keep** the `import static org.mockito.Mockito.doNothing;` — line 52 still uses `doNothing().when(client).provisionGroupForMembership(...)`. This task only *adds* `doReturn` and edits the two `patchGroupMembership` stubs; nothing is removed.
 
 - [ ] **Step 4: Compile + run the affected unit tests**
 
@@ -146,7 +146,9 @@ Rewrite the `SCOPE_GROUP` dispatch lambda from add-only to the stored-set diff. 
 
 - [ ] **Step 1: Write the failing unit tests**
 
-Add these to `ScimLdapStorageMapperTest`. They mirror the file's existing capture pattern (capture the `BiConsumer` handed to `runAsync`, then invoke it with mocks). Capture the **`SCOPE_GROUP`** consumer specifically. Add imports: `java.util.List`, `java.util.stream.Stream`, `org.keycloak.models.GroupModel`, `org.keycloak.models.GroupProvider` (not needed), `sh.libre.scim.core.GroupAdapter`, `static org.mockito.ArgumentMatchers.any`, `static org.mockito.Mockito.never`, `org.mockito.ArgumentMatchers.argThat`.
+Add these to `ScimLdapStorageMapperTest`. They mirror the file's existing capture pattern (capture the `BiConsumer` handed to `runAsync`, then invoke it with mocks). Capture the **`SCOPE_GROUP`** consumer specifically. Add imports: `java.util.stream.Stream`, `org.keycloak.models.GroupModel`, `sh.libre.scim.core.GroupAdapter`, `static org.mockito.ArgumentMatchers.any`, `static org.mockito.ArgumentMatchers.argThat`, `static org.mockito.Mockito.never`. (`java.util.List` and `org.keycloak.models.GroupProvider` are already imported in the test file.)
+
+**Strictness:** the class is currently strict (`@ExtendWith(MockitoExtension.class)` with no settings). These tests stub `client.getComponentId()`, `user.getGroupsStream()`, and `user.getAttributeStream(...)`, and capture the `SCOPE_USER` consumer without invoking it. To avoid `UnnecessaryStubbingException` on the shared/uninvoked stubs, add `@MockitoSettings(strictness = Strictness.LENIENT)` to the class (import `org.mockito.junit.jupiter.MockitoSettings` and `org.mockito.quality.Strictness`). The red signal for Step 2 then comes from the **verifies** (the missing `patchGroupMembership(...,false)` / `setAttribute` / `removeAttribute` calls), not from stubbing strictness.
 
 A small helper builds the worker mocks and returns the captured `SCOPE_GROUP` consumer:
 
@@ -258,7 +260,7 @@ void removesAttributeWhenNoGroupsRemain() {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `./gradlew test --tests 'sh.libre.scim.ldap.ScimLdapStorageMapperTest'`
-Expected: the four new tests FAIL — the current lambda is add-only (no `patchGroupMembership(...,false)`, no `getAttributeStream`/`setAttribute`/`removeAttribute`), and `getComponentId()` is stubbed on the mock but never called. (Existing tests still pass.)
+Expected: the four new tests FAIL on their verifies — the current lambda is add-only, so it never calls `patchGroupMembership(...,false)`, `getAttributeStream`, `setAttribute`, or `removeAttribute`. (Existing tests still pass; class is now LENIENT so the unused stubs don't themselves error.)
 
 - [ ] **Step 3: Implement the diff lambda**
 
@@ -343,54 +345,75 @@ Prove the removal propagates through a real federated sync and — critically �
 **Files:**
 - Modify: `src/integrationTest/java/sh/libre/scim/integration/ScimLdapGroupMembershipIT.java`
 
-- [ ] **Step 1: Read the existing IT to reuse its harness**
+- [ ] **Step 1: Read the existing IT + base harness to reuse**
 
-Read `ScimLdapGroupMembershipIT.java` in full. Note: how it provisions the LDAP `groupOfNames` fixture and adds members; the WireMock SCIM stub; the existing `memberAddPatchCount()` (or equivalent) helper and the `syncUntilMembershipsAdded(...)` resync-until-converged loop; and how it triggers a federation full sync. The removal scenario reuses all of this.
+Read `ScimLdapGroupMembershipIT.java` in full, and these `IntegrationTestBase.java` helpers you will reuse:
+- `memberAddPatchCount()` (468–475) — `wireMock.countRequestsMatching(patchRequestedFor(urlPathMatching("/Groups/.*")).withRequestBody(containing("\"op\":\"add\"")).withRequestBody(containing("members")).build()).getCount()`.
+- `awaitMemberAddPatchCount(int)` (477–484) — the `await().atMost(...).untilAsserted(...)` poll pattern to copy.
+- `modifyLdapAttribute(dn, attr, value)` (534–544) — does a JNDI **`REPLACE_ATTRIBUTE`** of `attr` to a single `value`.
+- The seeded group: `cn=engineers,ou=groups,dc=test,dc=local`, a `groupOfNames` with `member: uid=alice,...` and `member: uid=bob,...` (`seed.ldif:33–37`).
+
+Key constraint: a `groupOfNames` requires ≥1 `member`, so the scenario removes **alice** and leaves **bob** — it must not empty the group.
 
 - [ ] **Step 2: Add a member-REMOVE counter helper**
 
-Mirror the existing add-PATCH counter. A single-member REMOVE is a `PATCH /Groups/{id}` whose body contains `"op":"remove"` and the RFC filter `members[value eq "<externalId>"]`. Add:
+Mirror `memberAddPatchCount` exactly, swapping the op. Add to `IntegrationTestBase` (next to `memberAddPatchCount`) so it shares the established idiom:
 
 ```java
-private int memberRemovePatchCount() {
-    return findAll(patchRequestedFor(urlPathMatching("/scim/v2/Groups/.*"))).stream()
-        .filter(r -> r.getBodyAsString().contains("\"op\":\"remove\""))
-        .filter(r -> r.getBodyAsString().contains("value eq"))
-        .toList().size();
+/** Current count of single-member delta remove PATCHes (op=remove) to /Groups/*. */
+protected int memberRemovePatchCount() {
+    return wireMock.countRequestsMatching(
+        patchRequestedFor(urlPathMatching("/Groups/.*"))
+            .withRequestBody(containing("\"op\":\"remove\""))
+            .withRequestBody(containing("members"))
+            .build()
+    ).getCount();
 }
 ```
-(Adjust to the exact WireMock import style already used in the file — e.g. `getServeEvents()`/`findAll(...)`.)
 
 - [ ] **Step 3: Write the failing removal scenario**
 
+Removing alice from the group is a `REPLACE_ATTRIBUTE` of `member` to bob's DN only (reuses `modifyLdapAttribute`, keeps the group non-empty). The test (in `ScimLdapGroupMembershipIT`):
+
 ```java
 @Test
-void removingUserFromLdapGroupEmitsRemovePatch() {
-    // 1. Seed the LDAP group with the user as a member and sync until propagated.
-    //    (Reuse the existing setup that adds the user to the groupOfNames + the
-    //    add-convergence loop, so SCIM has group + member and the stored
-    //    attribute records the membership.)
-    syncUntilMembershipsAdded(...);            // existing helper / setup
+void removingUserFromLdapGroupEmitsRemovePatch() throws Exception {
+    // 1. Sync until alice+bob are propagated as members of engineers, so SCIM
+    //    holds the group + both members and each user's stored attribute records
+    //    engineers. (Reuse the file's existing membership-add setup/convergence,
+    //    e.g. triggerFullSync + awaitMemberAddPatchCount(2).)
+    triggerFullSync();
+    awaitMemberAddPatchCount(2);
     assertThat(memberRemovePatchCount()).isZero();
 
-    // 2. Remove the user from the LDAP groupOfNames (modify the member attribute
-    //    in OpenLDAP via the existing LDAP admin/util used to seed it).
-    removeUserFromLdapGroup(<groupDn>, <userDn>);   // add this helper if absent
+    // 2. Drop alice from the LDAP group (REPLACE member -> bob only; group keeps bob).
+    modifyLdapAttribute("cn=engineers,ou=groups,dc=test,dc=local",
+        "member", "uid=bob,ou=users,dc=test,dc=local");
 
-    // 3. Re-sync; a removal is detected on the import that re-imports the user.
-    //    Re-use the resync-until-converged pattern, awaiting memberRemovePatchCount() >= 1.
-    syncUntilRemovePatch();
-
-    // 4. Assert exactly the removed user's membership was REMOVE-patched.
-    assertThat(memberRemovePatchCount()).isGreaterThanOrEqualTo(1);
+    // 3. Re-sync; alice's next import sees engineers gone from her current groups
+    //    while it is still in her stored set -> single-member REMOVE PATCH.
+    await().atMost(120, SECONDS).untilAsserted(() -> {
+        triggerFullSync();
+        assertTrue(memberRemovePatchCount() >= 1,
+            "expected a member-remove PATCH after dropping alice, got "
+                + memberRemovePatchCount());
+    });
 }
 ```
 
-Model `syncUntilRemovePatch()` on the existing `syncUntilMembershipsAdded` loop (trigger full sync, await condition or 120s deadline). Keep the assertion a lower bound (`>= 1`) — the resync loop may re-trigger; the guard against *spurious* re-removal every sync is the unit test `noMembershipChangeEmitsNoRemoval`, not this IT.
+Match `triggerFullSync()` to whatever the file already calls to run a federation sync. Keep the assertion a lower bound (`>= 1`) — the resync loop may re-trigger; the guard against *spurious* re-removal on an unchanged sync is the unit test `noMembershipChangeEmitsNoRemoval`, not this IT.
 
-- [ ] **Step 4: Add the loop-safety guard to the scenario**
+- [ ] **Step 4: Add the loop-safety guard (non-optional)**
 
-The central hazard is reintroducing the re-import loop. The existing IT (or `ScimLdapGroupMembershipIT`'s bounded group-POST assertion) already guards add-side amplification; extend the removal scenario to assert the removal sync does not produce a storm. Concretely, after the removal converges, assert the total `PATCH /Groups` count stays bounded (e.g. on the order of the member/group count, not thousands) — reuse whatever bounded-count assertion style the file already uses for the add path. If the file exposes an `onImportUserFromLDAP` invocation counter from the loop-fix work, assert it stays flat across the removal sync.
+The central hazard is reawakening the re-import loop, which manifested as **thousands** of member PATCHes for a 2-member group (measured 1,388). Group POSTs short-circuit on the mapping so they do *not* reflect the loop; the member-PATCH volume does. After the removal converges (end of the test above), assert the total member-PATCH volume stays in the low dozens, which cleanly separates bounded per-sync re-assertion (a few PATCHes × a few resyncs) from a regression (>1000):
+
+```java
+    // Loop-safety: a re-import regression would balloon member PATCHes into the
+    // thousands; bounded re-assertion across a handful of resyncs stays tiny.
+    assertThat(memberAddPatchCount() + memberRemovePatchCount()).isLessThan(50);
+```
+
+If the loop-fix work left an `onImportUserFromLDAP` invocation counter exposed in the IT, additionally assert it stays flat across the removal resyncs; otherwise the member-PATCH bound is the guard.
 
 - [ ] **Step 5: Run the integration test**
 
@@ -409,12 +432,12 @@ git commit -m "test(group): integration-cover LDAP-driven membership removal + l
 ### Task 4: Documentation
 
 **Files:**
-- Modify: `docs/roadmap.md` (the "LDAP-federated group membership" bullet, ~lines 30–45)
+- Modify: `docs/roadmap.md` (the "LDAP-federated group membership" bullet)
 - Modify: `docs/ldap-federation-support.md` (if it states membership is additions-only)
 
 - [ ] **Step 1: Update the roadmap bullet**
 
-In the "LDAP-federated group membership" entry, replace the closing sentences that defer removal:
+Grep `docs/roadmap.md` for the bullet by text (`grep -n "deferred reconciler-style follow-up" docs/roadmap.md`) rather than trusting a line range. In the "LDAP-federated group membership" entry, replace the closing sentences that defer removal:
 
 > Membership REMOVAL (user dropped from an LDAP group) is not yet handled; it is a deferred reconciler-style follow-up.
 
