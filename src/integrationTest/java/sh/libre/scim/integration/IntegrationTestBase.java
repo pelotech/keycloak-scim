@@ -474,6 +474,16 @@ public abstract class IntegrationTestBase {
         ).getCount();
     }
 
+    /** Current count of single-member delta remove PATCHes (op=remove) to /Groups/*. */
+    protected int memberRemovePatchCount() {
+        return wireMock.countRequestsMatching(
+            patchRequestedFor(urlPathMatching("/Groups/.*"))
+                .withRequestBody(containing("\"op\":\"remove\""))
+                .withRequestBody(containing("members"))
+                .build()
+        ).getCount();
+    }
+
     /** Polls until WireMock has seen at least {@code atLeast} member-add PATCHes to /Groups/*. */
     protected void awaitMemberAddPatchCount(int atLeast) {
         await().atMost(30, SECONDS).untilAsserted(() -> {
