@@ -279,4 +279,24 @@ class ScimLdapStorageMapperTest {
         verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 2 && l.contains("A") && l.contains("C")));
     }
+
+    @Test
+    void firstImportRecordsCurrentWithNoRemovals() {
+        // No prior bookkeeping (the common first-import path): additions only,
+        // nothing to remove, and the current set is recorded.
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = mock(ScimClient.class);
+        when(client.getComponentId()).thenReturn("comp-1");
+        var groupA = group("A");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA));            // current = {A}
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups());  // stored = {} (empty)
+
+        consumer.accept(client, ws);
+
+        verify(client, never()).patchGroupMembership(any(), any(), eq("u1"), eq(false));
+        verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 1 && l.contains("A")));
+    }
 }
