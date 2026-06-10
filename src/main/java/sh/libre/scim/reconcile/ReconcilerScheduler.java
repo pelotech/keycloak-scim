@@ -63,8 +63,10 @@ public final class ReconcilerScheduler {
                 return;
             }
             try {
-                int deleted = new ReconcilerRunner(innerSession, latest, threshold).run();
-                LOGGER.infof("Reconciler %s: deleted %d SCIM resource(s)", taskName, deleted);
+                var result = new ReconcilerRunner(innerSession, latest, threshold).run();
+                LOGGER.infof(
+                    "Reconciler %s: users deleted=%d; groups deleted=%d",
+                    taskName, result.usersDeleted(), result.groupsDeleted());
             } catch (Exception e) {
                 LOGGER.errorf(e, "Reconciler %s failed", taskName);
             }

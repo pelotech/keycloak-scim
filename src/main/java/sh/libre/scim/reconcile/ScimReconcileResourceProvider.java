@@ -25,8 +25,10 @@ import sh.libre.scim.storage.ScimStorageProviderFactory;
  * <p>Request body: none. Query params: {@code thresholdHours} (optional,
  * default 48).
  *
- * <p>Response: 200 with a JSON body {@code {"deleted": N}} indicating how
- * many SCIM DELETE calls were issued.
+ * <p>Response: 200 with a JSON body
+ * {@code {"deleted": N, "groupsDeleted": D}}. The {@code deleted} key carries
+ * the number of user SCIM DELETE calls issued; {@code groupsDeleted} reports the
+ * number of federated groups with zero local members deleted by the group phase.
  */
 public class ScimReconcileResourceProvider implements RealmResourceProvider {
 
@@ -57,9 +59,12 @@ public class ScimReconcileResourceProvider implements RealmResourceProvider {
         }
 
         Duration threshold = Duration.ofHours(thresholdHours != null ? thresholdHours : 48L);
-        int deleted = new ReconcilerRunner(session, component, threshold).run();
+        var result = new ReconcilerRunner(session, component, threshold).run();
 
-        return Response.ok("{\"deleted\":" + deleted + "}", MediaType.APPLICATION_JSON).build();
+        return Response.ok(
+            "{\"deleted\":" + result.usersDeleted()
+            + ",\"groupsDeleted\":" + result.groupsDeleted() + "}",
+            MediaType.APPLICATION_JSON).build();
     }
 
     /**

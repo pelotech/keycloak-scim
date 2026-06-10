@@ -42,8 +42,24 @@ touches both.
   members. Verified by `EnsureGroupMembershipTest` (unit) and
   `ScimLdapGroupMembershipIT` (integration). Membership REMOVAL
   (user dropped from an LDAP group) is not yet handled; it is a
-  deferred reconciler-style follow-up. Group rename and delete for
-  federated groups are also not yet handled.
+  deferred reconciler-style follow-up.
+- **Group rename and delete for federated groups.** _Done
+  (delete-based)._ Federated group deletes and renames now propagate
+  via a member-presence pass in the reconciler: a mapped group with
+  zero members (or a gone local model) receives a SCIM DELETE.
+  Rename propagates as delete-old + create-new — the renamed group
+  provisions fresh with a new SCIM id; the old, now-memberless group
+  is deleted on the next reconcile. Accepted limitations: rename
+  yields a new SCIM id, and SCIM transiently holds both the old and
+  new group for the window between the rename sync and the next
+  reconcile pass. Group reconciliation rides the existing
+  `reconciler-enabled` flag; no group-specific threshold is needed
+  (the `reconciler-stale-threshold-seconds` and its
+  `> fullSyncPeriod` validation apply to the user phase only). A
+  provisioned group that legitimately loses all its LDAP members is
+  also deleted (re-provisioned when it regains a member). Verified by
+  `ScimGroupReconcileIT` (delete, rename-as-recreate,
+  live-group-not-deleted).
 
 ## Auth-mode follow-ups
 

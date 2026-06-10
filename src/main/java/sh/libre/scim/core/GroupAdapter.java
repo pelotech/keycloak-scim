@@ -241,4 +241,5 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         }
         return patchBuilder;
     }
+
 }
