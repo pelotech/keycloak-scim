@@ -114,6 +114,19 @@ a concrete IdP that requires it.
   characteristic. A potential optimization: deduplicate within a sync
   window (e.g. a per-session seen-set) so each membership is
   asserted at most once per sync run.
+- **Concurrent group provisioning can double-POST.** When several
+  members of a not-yet-provisioned group are imported concurrently in
+  the same sync, `ScimClient.create`'s short-circuit is check-then-act
+  (query mapping → POST → save mapping) and is not atomic across the
+  async dispatch workers, so they can each POST `/Groups` once before
+  either saves the mapping — up to one redundant create per
+  concurrently-imported member, on first provisioning only. A
+  conformant SCIM server `409`s the duplicate (logged, no mapping
+  saved), so it is bounded and mostly benign, but a non-idempotent
+  server could end up with a duplicate group. Make first-time group
+  provisioning atomic (e.g. insert-mapping-first with rollback on POST
+  failure, a DB guard, or per-group serialization). Surfaced by the
+  Keycloak-26 sync timing in `ScimLdapGroupMembershipIT`.
 - **Perf-rig sibling container.** The Testcontainers + Keycloak +
   WireMock setup routes SCIM traffic through an SSH tunnel
   (`host.testcontainers.internal`), adding ~25–30 ms per request to
