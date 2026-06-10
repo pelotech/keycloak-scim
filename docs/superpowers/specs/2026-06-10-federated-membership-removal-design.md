@@ -51,22 +51,42 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    tracked roadmap item ("redundant per-sync re-assertions") and is out
    of scope here.
 
-3. **Storage = a per-component multi-valued user attribute**
-   (`scim-propagated-groups-<componentId>`), holding the group ids that
+3. **Storage = a per-component multi-valued attribute in Keycloak's
+   federated-user storage** (`UserFederatedStorageProvider`), keyed
+   `scim-propagated-groups-<componentId>`, holding the group ids that
    component last propagated for the user. Per-component (not a single
-   shared attribute) because the `SCOPE_GROUP` dispatch **fans out one
-   worker per group-propagation component**, each in its own session: a
-   single shared attribute would race — the first component to write it
-   would set `stored = current`, masking the diff for every other
-   component. Distinct per-component attributes are independent, so the
-   workers don't race, and the design stays correct when an operator runs
-   multiple SCIM providers. **Precondition:** the attribute key uses the
-   SCIM provider's component id, reached from the worker's `ScimClient`
-   via its `ComponentModel.getId()` — a persisted id, stable across syncs
-   and restarts (a small package accessor exposes it). The attribute
-   mirrors the existing `LAST_SEEN_ATTRIBUTE` pattern (a mapper-owned user
-   attribute), stored multi-valued (`setAttribute(name, List)`) rather
-   than as a delimited string.
+   shared key) because the `SCOPE_GROUP` dispatch **fans out one worker
+   per group-propagation component**, each in its own session: a single
+   shared key would race — the first component to write it would set
+   `stored = current`, masking the diff for every other component.
+   Distinct per-component keys are independent, so the workers don't race,
+   and the design stays correct when an operator runs multiple SCIM
+   providers. **Precondition:** the key uses the SCIM provider's component
+   id, reached from the worker's `ScimClient` via its
+   `ComponentModel.getId()` — a persisted id, stable across syncs and
+   restarts (a small public accessor exposes it).
+
+   **Why federated storage and not a plain user attribute (load-bearing,
+   verified by spike):** the obvious choice — `user.setAttribute` like the
+   sibling `LAST_SEEN_ATTRIBUTE` — does **not** work here. `LAST_SEEN` is
+   written synchronously on the import-thread `UserModel`, inside the
+   import transaction, where writes succeed. The membership diff instead
+   runs in the **post-commit async worker** on a re-fetched user, and
+   under the common `editMode=READ_ONLY` LDAP federation that proxy is
+   read-only: `setAttribute`/`removeAttribute` throw
+   `ReadOnlyException: Federated storage is not writable`. A spike
+   confirmed two hard constraints that force the split: (a) the
+   import-thread `user.getGroupsStream()` is **empty** at hook time
+   (group memberships aren't materialized until later in the import
+   pipeline), so the diff *cannot* run there — only the re-fetched worker
+   user sees the real memberships; (b) the worker *can* persist via
+   `UserStorageUtil.userFederatedStorage(session)` (equivalently
+   `session.getProvider(UserFederatedStorageProvider.class)`), the
+   JPA-backed local store Keycloak keeps for federated users — it is
+   **not** gated by the LDAP read-only edit mode, and round-trips across
+   syncs (`getAttributes`/`setAttribute`/`removeAttribute` keyed by
+   `(realm, userId)`). So the diff and the bookkeeping both live in the
+   worker, against federated storage — never the read-only user proxy.
 
 4. **The diff runs in the `SCOPE_GROUP` worker, against the committed
    view; removals are tracked, additions are re-asserted.** The worker
@@ -89,10 +109,10 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    This requires the removal call to signal whether it was applied (see
    Architecture). Two independent properties of the write: it is keyed per
    component, which is what makes it **race-free** under the worker fan-out
-   (Decision 3); and when the new set is empty the attribute is **removed**
-   rather than written empty, which is what makes the round-trip
-   **reliable** (Keycloak's empty-list write is not a dependable
-   round-trip). The attribute is written once per worker.
+   (Decision 3); and when the new set is empty the federated-storage key is
+   **removed** (`removeAttribute`) rather than written as an empty list,
+   so the next read sees a clean absence rather than a possibly-ambiguous
+   empty value. The key is written once per worker.
 
 5. **Empty-group cleanup is delegated, not handled here.** Removing the
    last member leaves the SCIM group memberless; the group-delete
@@ -109,12 +129,16 @@ component-bound `ScimClient`). Sketch:
 
 ```
 dispatcher.runAsync(SCOPE_GROUP, (client, workerSession) -> {
+    var realm = workerSession.getContext().getRealm();
     var u = workerSession.users().getUserById(realm, userId);
     if (u == null) return;
-    var current = u.getGroupsStream().map(GroupModel::getId).collect(toSet());
+    var current = u.getGroupsStream().map(GroupModel::getId).collect(toSet()); // worker user: real
 
-    var attr    = PROPAGATED_GROUPS_PREFIX + client.getComponentId();
-    var stored  = u.getAttributeStream(attr).collect(toSet());
+    // bookkeeping in federated storage (READ_ONLY-safe), NOT the user proxy
+    var fed    = workerSession.getProvider(UserFederatedStorageProvider.class);
+    var attr   = PROPAGATED_GROUPS_PREFIX + client.getComponentId();
+    var sl     = fed.getAttributes(realm, userId).get(attr);
+    var stored = sl == null ? new HashSet<String>() : new HashSet<>(sl);
 
     // removals (new): groups we propagated but the user has left.
     // keep any that did NOT apply, so the next import retries them.
@@ -129,8 +153,8 @@ dispatcher.runAsync(SCOPE_GROUP, (client, workerSession) -> {
 
     // record what SCIM now reflects = current ∪ failed-removals
     var next = new HashSet<>(current); next.addAll(kept);
-    if (next.isEmpty()) u.removeAttribute(attr);
-    else u.setAttribute(attr, List.copyOf(next));
+    if (next.isEmpty()) fed.removeAttribute(realm, userId, attr);
+    else fed.setAttribute(realm, userId, attr, new ArrayList<>(next));
 });
 ```
 
