@@ -103,30 +103,33 @@ a concrete IdP that requires it.
 
 ## Performance / observability
 
-- **Redundant per-sync membership re-assertions.** On a full sync,
-  `onImportUserFromLDAP` fires multiple times per user (Keycloak
-  calls it for each mapper in the chain, and again on each sync
-  pass), so each invocation re-asserts all of that user's group
-  memberships. The operations are idempotent (op=add on an existing
-  member is a no-op at the SCIM level), but the call volume grows
-  linearly with users × groups × invocations-per-user-per-sync. The
-  existing user-propagation path has the same multiplication
-  characteristic. A potential optimization: deduplicate within a sync
-  window (e.g. a per-session seen-set) so each membership is
-  asserted at most once per sync run.
-- **Concurrent group provisioning can double-POST.** When several
-  members of a not-yet-provisioned group are imported concurrently in
-  the same sync, `ScimClient.create`'s short-circuit is check-then-act
-  (query mapping → POST → save mapping) and is not atomic across the
-  async dispatch workers, so they can each POST `/Groups` once before
-  either saves the mapping — up to one redundant create per
-  concurrently-imported member, on first provisioning only. A
+- **Redundant per-sync membership re-assertions (federated re-import
+  loop).** _Done/Fixed._ `GroupAdapter.apply(GroupModel)` enumerated
+  a federated group's members during membership provisioning via
+  `getGroupMembersStream`; on a federated `groupOfNames` this
+  re-imported every member, re-firing `onImportUserFromLDAP` →
+  re-dispatch → unbounded recursion (measured: 2,776 invocations /
+  1,388 member-add PATCHes for a 2-member group per sync). Fixed by
+  provisioning groups member-lessly: `GroupAdapter.applyForProvisioning`
+  sets id + displayName + `scim-skip` only, and `ensureGroupMembership`
+  now calls it instead of the member-enumerating `create`/`apply`.
+  Re-measured: 2 invocations / ~1 PATCH per 2-member sync, zero
+  re-import recursion on `scim-dispatch` threads.
+- **Concurrent group provisioning can double-POST.** The runaway
+  re-import storm that amplified this race is now gone (see entry
+  above), but the underlying **check-then-act race** in
+  `ScimClient.create`/`sendCreate` persists independently: when
+  several members of a not-yet-provisioned group are imported
+  concurrently, each worker queries the mapping, finds none, and
+  POSTs `/Groups` before either saves the mapping. Re-measurement
+  after the re-import fix still shows 2 POSTs for a 2-member group;
+  `ScimLdapGroupMembershipIT` asserts the bounded `1..2` count. A
   conformant SCIM server `409`s the duplicate (logged, no mapping
   saved), so it is bounded and mostly benign, but a non-idempotent
-  server could end up with a duplicate group. Make first-time group
-  provisioning atomic (e.g. insert-mapping-first with rollback on POST
-  failure, a DB guard, or per-group serialization). Surfaced by the
-  Keycloak-26 sync timing in `ScimLdapGroupMembershipIT`.
+  server could end up with a duplicate group. Follow-up: make
+  first-time group provisioning atomic (e.g. insert-mapping-first
+  with rollback on POST failure, a DB guard, or per-group
+  serialization).
 - **Perf-rig sibling container.** The Testcontainers + Keycloak +
   WireMock setup routes SCIM traffic through an SSH tunnel
   (`host.testcontainers.internal`), adding ~25–30 ms per request to
