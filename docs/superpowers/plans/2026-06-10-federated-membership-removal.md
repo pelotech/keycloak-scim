@@ -146,7 +146,7 @@ Rewrite the `SCOPE_GROUP` dispatch lambda from add-only to the stored-set diff. 
 
 - [ ] **Step 1: Write the failing unit tests**
 
-Add these to `ScimLdapStorageMapperTest`. They mirror the file's existing capture pattern (capture the `BiConsumer` handed to `runAsync`, then invoke it with mocks). Capture the **`SCOPE_GROUP`** consumer specifically. Add imports: `java.util.stream.Stream`, `org.keycloak.models.GroupModel`, `sh.libre.scim.core.GroupAdapter`, `static org.mockito.ArgumentMatchers.any`, `static org.mockito.ArgumentMatchers.argThat`, `static org.mockito.Mockito.never`. (`java.util.List` and `org.keycloak.models.GroupProvider` are already imported in the test file.)
+Add these to `ScimLdapStorageMapperTest`. They mirror the file's existing capture pattern (capture the `BiConsumer` handed to `runAsync`, then invoke it with mocks). Capture the **`SCOPE_GROUP`** consumer specifically. Imports to add (verified against the current file's import block, lines 3–32): `java.util.stream.Stream`, `org.keycloak.models.GroupModel`, `sh.libre.scim.core.GroupAdapter`, `static org.mockito.ArgumentMatchers.any`, `static org.mockito.ArgumentMatchers.argThat`, `static org.mockito.Mockito.never`. (`org.keycloak.models.UserProvider`, `KeycloakContext`, `RealmModel`, `ScimClient`, `ScimDispatcher`, `ArgumentCaptor`, `BiConsumer` are already imported and reused by the helpers below. The `argThat` lambda parameter is an inferred `List<String>` — no `java.util.List` import is needed. `GroupProvider` is **not** used.)
 
 **Strictness:** the class is currently strict (`@ExtendWith(MockitoExtension.class)` with no settings). These tests stub `client.getComponentId()`, `user.getGroupsStream()`, and `user.getAttributeStream(...)`, and capture the `SCOPE_USER` consumer without invoking it. To avoid `UnnecessaryStubbingException` on the shared/uninvoked stubs, add `@MockitoSettings(strictness = Strictness.LENIENT)` to the class (import `org.mockito.junit.jupiter.MockitoSettings` and `org.mockito.quality.Strictness`). The red signal for Step 2 then comes from the **verifies** (the missing `patchGroupMembership(...,false)` / `setAttribute` / `removeAttribute` calls), not from stubbing strictness.
 
@@ -347,10 +347,11 @@ Prove the removal propagates through a real federated sync and — critically �
 
 - [ ] **Step 1: Read the existing IT + base harness to reuse**
 
-Read `ScimLdapGroupMembershipIT.java` in full, and these `IntegrationTestBase.java` helpers you will reuse:
+Read `ScimLdapGroupMembershipIT.java` in full (it already has the `newRealmWithScimAndLdapGroups` setup, the `stubScim*Ok()` stubs, and the private `syncUntilMembershipsAdded(TestRealm r)` convergence helper this scenario reuses), plus these `IntegrationTestBase.java` helpers:
 - `memberAddPatchCount()` (468–475) — `wireMock.countRequestsMatching(patchRequestedFor(urlPathMatching("/Groups/.*")).withRequestBody(containing("\"op\":\"add\"")).withRequestBody(containing("members")).build()).getCount()`.
-- `awaitMemberAddPatchCount(int)` (477–484) — the `await().atMost(...).untilAsserted(...)` poll pattern to copy.
-- `modifyLdapAttribute(dn, attr, value)` (534–544) — does a JNDI **`REPLACE_ATTRIBUTE`** of `attr` to a single `value`.
+- `modifyLdapAttribute(dn, attr, value)` (534–544) — a JNDI **`REPLACE_ATTRIBUTE`** of `attr` to a single `value` (throws `NamingException`).
+- `sleepQuietly(int seconds)` — used by the existing resync loop.
+- The sync trigger used throughout the IT: `r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync")` (the string `"triggerFullSync"` is an *argument*, not a method).
 - The seeded group: `cn=engineers,ou=groups,dc=test,dc=local`, a `groupOfNames` with `member: uid=alice,...` and `member: uid=bob,...` (`seed.ldif:33–37`).
 
 Key constraint: a `groupOfNames` requires ≥1 `member`, so the scenario removes **alice** and leaves **bob** — it must not empty the group.
@@ -373,47 +374,64 @@ protected int memberRemovePatchCount() {
 
 - [ ] **Step 3: Write the failing removal scenario**
 
-Removing alice from the group is a `REPLACE_ATTRIBUTE` of `member` to bob's DN only (reuses `modifyLdapAttribute`, keeps the group non-empty). The test (in `ScimLdapGroupMembershipIT`):
+Use the file's real harness — `newRealmWithScimAndLdapGroups(cfg -> ...)`, the `syncUntilMembershipsAdded(r)` convergence helper, `r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync")` as the sync trigger, `sleepQuietly(int)`, and JUnit `assertTrue` (already imported). There is **no** `triggerFullSync()` method and AssertJ is not imported here — do not introduce either. Dropping alice is a `REPLACE_ATTRIBUTE` of `member` to bob's DN only (`modifyLdapAttribute`), which keeps the `groupOfNames` non-empty. Add this `@Test` to `ScimLdapGroupMembershipIT`:
 
 ```java
 @Test
 void removingUserFromLdapGroupEmitsRemovePatch() throws Exception {
-    // 1. Sync until alice+bob are propagated as members of engineers, so SCIM
-    //    holds the group + both members and each user's stored attribute records
-    //    engineers. (Reuse the file's existing membership-add setup/convergence,
-    //    e.g. triggerFullSync + awaitMemberAddPatchCount(2).)
-    triggerFullSync();
-    awaitMemberAddPatchCount(2);
-    assertThat(memberRemovePatchCount()).isZero();
+    stubScimUserCreateOk();
+    stubScimGroupCreateOk();
+    stubScimGroupPatchOk();
 
-    // 2. Drop alice from the LDAP group (REPLACE member -> bob only; group keeps bob).
+    var r = newRealmWithScimAndLdapGroups(cfg -> {
+        cfg.putSingle("propagation-user", "true");
+        cfg.putSingle("propagation-group", "true");
+        cfg.putSingle("group-patchOp", "true");
+    });
+
+    // 1. Converge alice+bob as members of engineers (SCIM holds the group + both
+    //    members; each user's stored attribute records engineers).
+    syncUntilMembershipsAdded(r);
+    assertTrue(memberRemovePatchCount() == 0,
+        "no removals expected before dropping a member, got " + memberRemovePatchCount());
+
+    // 2. Drop alice from the LDAP group (REPLACE member -> bob only; keeps bob).
     modifyLdapAttribute("cn=engineers,ou=groups,dc=test,dc=local",
         "member", "uid=bob,ou=users,dc=test,dc=local");
 
-    // 3. Re-sync; alice's next import sees engineers gone from her current groups
-    //    while it is still in her stored set -> single-member REMOVE PATCH.
-    await().atMost(120, SECONDS).untilAsserted(() -> {
-        triggerFullSync();
-        assertTrue(memberRemovePatchCount() >= 1,
-            "expected a member-remove PATCH after dropping alice, got "
-                + memberRemovePatchCount());
-    });
+    // 3. Re-sync until alice's removal is observed. Her next import sees engineers
+    //    gone from her current groups while her stored set still records it ->
+    //    single-member REMOVE PATCH. (Mirror syncUntilMembershipsAdded's loop.)
+    long deadline = System.currentTimeMillis() + 120_000;
+    while (memberRemovePatchCount() < 1 && System.currentTimeMillis() < deadline) {
+        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+        sleepQuietly(5);
+    }
+    assertTrue(memberRemovePatchCount() >= 1,
+        "expected >=1 member-remove PATCH after dropping alice, got " + memberRemovePatchCount());
 }
 ```
 
-Match `triggerFullSync()` to whatever the file already calls to run a federation sync. Keep the assertion a lower bound (`>= 1`) — the resync loop may re-trigger; the guard against *spurious* re-removal on an unchanged sync is the unit test `noMembershipChangeEmitsNoRemoval`, not this IT.
+Keep the assertion a lower bound (`>= 1`) — the resync loop may re-trigger; the guard against *spurious* re-removal on an unchanged sync is the unit test `noMembershipChangeEmitsNoRemoval`, not this IT.
 
 - [ ] **Step 4: Add the loop-safety guard (non-optional)**
 
-The central hazard is reawakening the re-import loop, which manifested as **thousands** of member PATCHes for a 2-member group (measured 1,388). Group POSTs short-circuit on the mapping so they do *not* reflect the loop; the member-PATCH volume does. After the removal converges (end of the test above), assert the total member-PATCH volume stays in the low dozens, which cleanly separates bounded per-sync re-assertion (a few PATCHes × a few resyncs) from a regression (>1000):
+The central hazard is reawakening the re-import loop, whose signature is **per-sync** explosion — it produced ~1,388 member PATCHes from a *single* affected sync for 2 members. Bounded re-assertion, by contrast, sends only ~1–2 PATCHes per sync. So measure the **delta across one additional clean sync** (robust to however many convergence resyncs ran), not a total. Append to the test:
 
 ```java
-    // Loop-safety: a re-import regression would balloon member PATCHes into the
-    // thousands; bounded re-assertion across a handful of resyncs stays tiny.
-    assertThat(memberAddPatchCount() + memberRemovePatchCount()).isLessThan(50);
+    // Loop-safety: one more sync must add only a bounded number of member
+    // PATCHes (re-assertion is ~1-2 per member). A re-import regression would
+    // add thousands in this single sync.
+    int before = memberAddPatchCount() + memberRemovePatchCount();
+    r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+    sleepQuietly(10);
+    int delta = (memberAddPatchCount() + memberRemovePatchCount()) - before;
+    assertTrue(delta < 20,
+        "a single sync must add only bounded member PATCHes (loop regression -> "
+            + "thousands), got " + delta);
 ```
 
-If the loop-fix work left an `onImportUserFromLDAP` invocation counter exposed in the IT, additionally assert it stays flat across the removal resyncs; otherwise the member-PATCH bound is the guard.
+(There is no `onImportUserFromLDAP` invocation counter exposed in the integration tests, so the per-sync member-PATCH delta is the guard.)
 
 - [ ] **Step 5: Run the integration test**
 
