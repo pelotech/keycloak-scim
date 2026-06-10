@@ -13,10 +13,13 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 import javax.naming.AuthenticationException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+
+import org.keycloak.storage.federated.UserFederatedStorageProvider;
 
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
@@ -68,16 +71,24 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
         // getGroupsStream() reads the user's OWN groups; it does NOT enumerate any
         // group's members, so it cannot retrigger the federated re-import loop.
         dispatcher.runAsync(ScimDispatcher.SCOPE_GROUP, (client, workerSession) -> {
-            var u = workerSession.users().getUserById(
-                    workerSession.getContext().getRealm(), userId);
+            var workerRealm = workerSession.getContext().getRealm();
+            var u = workerSession.users().getUserById(workerRealm, userId);
             if (u == null) return;
 
             Set<String> current = u.getGroupsStream()
                     .map(GroupModel::getId)
                     .collect(Collectors.toSet());
 
+            // Bookkeeping lives in federated storage (a JPA-backed local store for
+            // federated users), NOT in the user's LDAP-backed attributes — the latter
+            // are read-only under editMode=READ_ONLY and throw on write from this
+            // post-commit worker. getGroupsStream() (materialized only on this
+            // re-fetched worker user) stays the source of `current`.
+            var fed = workerSession.getProvider(UserFederatedStorageProvider.class);
             String attr = PROPAGATED_GROUPS_ATTR_PREFIX + client.getComponentId();
-            Set<String> stored = u.getAttributeStream(attr).collect(Collectors.toSet());
+            List<String> storedList = fed.getAttributes(workerRealm, userId).get(attr);
+            Set<String> stored = storedList == null
+                    ? new HashSet<>() : new HashSet<>(storedList);
 
             // Removals — keep any whose REMOVE did not apply, so the next import retries.
             Set<String> kept = new HashSet<>();
@@ -95,9 +106,9 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
             Set<String> next = new HashSet<>(current);
             next.addAll(kept);
             if (next.isEmpty()) {
-                u.removeAttribute(attr);
+                fed.removeAttribute(workerRealm, userId, attr);
             } else {
-                u.setAttribute(attr, List.copyOf(next));
+                fed.setAttribute(workerRealm, userId, attr, new ArrayList<>(next));
             }
         });
     }

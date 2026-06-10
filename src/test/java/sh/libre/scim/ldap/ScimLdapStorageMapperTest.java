@@ -9,6 +9,8 @@ import org.keycloak.models.GroupModel;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserProvider;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.storage.federated.UserFederatedStorageProvider;
 import org.keycloak.storage.ldap.idm.model.LDAPObject;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
@@ -24,6 +26,8 @@ import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.BiConsumer;
 import java.util.stream.Stream;
 
@@ -47,6 +51,7 @@ class ScimLdapStorageMapperTest {
     @Mock UserModel user;
     @Mock RealmModel realm;
     @Mock LDAPObject ldapObject;
+    @Mock UserFederatedStorageProvider fed;
 
     private ScimLdapStorageMapper mapper;
 
@@ -162,6 +167,7 @@ class ScimLdapStorageMapperTest {
         when(ctx.getRealm()).thenReturn(wRealm);
         when(ws.users()).thenReturn(users);
         when(users.getUserById(wRealm, userId)).thenReturn(user);
+        when(ws.getProvider(UserFederatedStorageProvider.class)).thenReturn(fed);
         return ws;
     }
 
@@ -169,6 +175,15 @@ class ScimLdapStorageMapperTest {
         var g = mock(GroupModel.class);
         when(g.getId()).thenReturn(id);
         return g;
+    }
+
+    /** Federated-storage attributes map holding the propagated-group set (empty if no ids). */
+    private MultivaluedHashMap<String, String> storedGroups(String... ids) {
+        var m = new MultivaluedHashMap<String, String>();
+        if (ids.length > 0) {
+            m.put("scim-propagated-groups-comp-1", new ArrayList<>(List.of(ids)));
+        }
+        return m;
     }
 
     @Test
@@ -179,14 +194,14 @@ class ScimLdapStorageMapperTest {
         when(client.getComponentId()).thenReturn("comp-1");
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));
-        when(user.getAttributeStream("scim-propagated-groups-comp-1")).thenReturn(Stream.of("A", "B"));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
         when(client.patchGroupMembership(any(), eq("B"), eq("u1"), eq(false))).thenReturn(true);
 
         consumer.accept(client, ws);
 
         verify(client).patchGroupMembership(any(), eq("B"), eq("u1"), eq(false));
         verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
-        verify(user).setAttribute(eq("scim-propagated-groups-comp-1"),
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 1 && l.contains("A")));
     }
 
@@ -198,12 +213,12 @@ class ScimLdapStorageMapperTest {
         when(client.getComponentId()).thenReturn("comp-1");
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));
-        when(user.getAttributeStream("scim-propagated-groups-comp-1")).thenReturn(Stream.of("A", "B"));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
         when(client.patchGroupMembership(any(), eq("B"), eq("u1"), eq(false))).thenReturn(false);
 
         consumer.accept(client, ws);
 
-        verify(user).setAttribute(eq("scim-propagated-groups-comp-1"),
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 2 && l.contains("A") && l.contains("B")));
     }
 
@@ -216,7 +231,7 @@ class ScimLdapStorageMapperTest {
         var groupA = group("A");
         var groupB = group("B");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
-        when(user.getAttributeStream("scim-propagated-groups-comp-1")).thenReturn(Stream.of("A", "B"));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
 
         consumer.accept(client, ws);
 
@@ -232,13 +247,13 @@ class ScimLdapStorageMapperTest {
         var client = mock(ScimClient.class);
         when(client.getComponentId()).thenReturn("comp-1");
         when(user.getGroupsStream()).thenReturn(Stream.empty());
-        when(user.getAttributeStream("scim-propagated-groups-comp-1")).thenReturn(Stream.of("A"));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A"));
         when(client.patchGroupMembership(any(), eq("A"), eq("u1"), eq(false))).thenReturn(true);
 
         consumer.accept(client, ws);
 
         verify(client).patchGroupMembership(any(), eq("A"), eq("u1"), eq(false));
-        verify(user).removeAttribute("scim-propagated-groups-comp-1");
+        verify(fed).removeAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"));
         verify(client, never()).ensureGroupMembership(any(), any(), any());
     }
 
@@ -251,8 +266,8 @@ class ScimLdapStorageMapperTest {
         when(client.getComponentId()).thenReturn("comp-1");
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));               // current = {A}
-        when(user.getAttributeStream("scim-propagated-groups-comp-1"))
-                .thenReturn(Stream.of("A", "B", "C"));                            // stored = {A,B,C}
+        when(fed.getAttributes(any(), eq("u1")))
+                .thenReturn(storedGroups("A", "B", "C"));                         // stored = {A,B,C}
         when(client.patchGroupMembership(any(), eq("B"), eq("u1"), eq(false))).thenReturn(true);
         when(client.patchGroupMembership(any(), eq("C"), eq("u1"), eq(false))).thenReturn(false);
 
@@ -261,7 +276,7 @@ class ScimLdapStorageMapperTest {
         verify(client).patchGroupMembership(any(), eq("B"), eq("u1"), eq(false));
         verify(client).patchGroupMembership(any(), eq("C"), eq("u1"), eq(false));
         // next = current ∪ failed-removals = {A} ∪ {C}; B (applied) is dropped.
-        verify(user).setAttribute(eq("scim-propagated-groups-comp-1"),
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 2 && l.contains("A") && l.contains("C")));
     }
 }
