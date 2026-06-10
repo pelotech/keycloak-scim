@@ -467,8 +467,30 @@ to at import time, the call sequence is:
    (RFC 7644) is sent for the user. This is the same delta-PATCH
    mechanism used by the `GROUP_MEMBERSHIP` event-listener path.
 
-This covers additions only. Membership is re-asserted on every import,
-so periodic and full syncs self-heal any drift.
+Additions are re-asserted on every import, so periodic and full syncs
+self-heal any drift. **Removals** are handled too (see below): the same
+import hook also propagates a user being dropped from an LDAP group.
+
+### Membership removal
+
+A user removed from an LDAP group fires no `GROUP_MEMBERSHIP` event, so
+removal rides the import hook rather than an event. On each import the
+`SCOPE_GROUP` worker compares the user's *current* groups against a
+per-component record of the groups it last propagated for that user, and
+sends a single-member **REMOVE** PATCH for each group the user has left.
+Only removals are diff-driven; additions remain a full re-assert. A
+REMOVE that fails after retries is retained in the record and retried on
+the next import, so a departed user does not silently linger in the SCIM
+group. The now-memberless group is reaped by the group-reconciler
+(member-presence).
+
+The per-user record is stored in Keycloak's **federated-user storage**
+(`UserFederatedStorageProvider`, key `scim-propagated-groups-<componentId>`),
+not as a user attribute. This matters under `editMode=READ_ONLY`
+federation (the common case): the diff runs in the post-commit async
+worker on a re-fetched federated user, whose LDAP-backed attributes are
+read-only there, whereas federated storage is the writable JPA-backed
+local store Keycloak keeps for federated users.
 
 ### Operator requirement
 
@@ -487,13 +509,6 @@ mapping has been persisted and skip. This is the expected behaviour:
 the next periodic sync re-asserts all memberships, so the state
 converges without operator intervention. The accepted lag is one sync
 interval.
-
-### Not yet handled
-
-- **Membership removal.** When a user is dropped from an LDAP group,
-  the removal is not propagated to SCIM. This is a deferred
-  reconciler-style follow-up (analogous to the user-deletion gap
-  tracked in scenario 4 above).
 
 ## Group reconciliation (member-presence)
 

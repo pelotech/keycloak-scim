@@ -40,9 +40,24 @@ touches both.
   — membership resolution looks up the user's SCIM mapping under the
   same component id, so a group-only component cannot resolve
   members. Verified by `EnsureGroupMembershipTest` (unit) and
-  `ScimLdapGroupMembershipIT` (integration). Membership REMOVAL
-  (user dropped from an LDAP group) is not yet handled; it is a
-  deferred reconciler-style follow-up.
+  `ScimLdapGroupMembershipIT` (integration).
+- **LDAP-federated membership removal.** _Done._ A user dropped from
+  an LDAP group fires no `GROUP_MEMBERSHIP` event, so removal rides the
+  same import hook: on each import the `SCOPE_GROUP` worker diffs the
+  user's current groups against a per-component record of what it last
+  propagated and sends a single-member REMOVE PATCH for each group the
+  user has left; additions stay re-asserted (only removals are
+  diff-driven). A REMOVE that fails after retries is retained and
+  retried on the next import. The bookkeeping is stored via
+  `UserFederatedStorageProvider` (key `scim-propagated-groups-<componentId>`),
+  **not** as a user attribute: the diff runs in the post-commit async
+  worker on a re-fetched federated user, whose attributes are read-only
+  under `editMode=READ_ONLY` (the common config) — federated storage is
+  the JPA-backed local store Keycloak keeps for federated users and is
+  writable there. The now-empty group is reaped by the member-presence
+  reconciler. Verified by `ScimLdapStorageMapperTest` (diff / failed-
+  removal retry / idempotence units) and `ScimLdapGroupMembershipIT`
+  (end-to-end remove + loop-safety, run under `READ_ONLY` federation).
 - **Group rename and delete for federated groups.** _Done
   (delete-based)._ Federated group deletes and renames now propagate
   via a member-presence pass in the reconciler: a mapped group with
