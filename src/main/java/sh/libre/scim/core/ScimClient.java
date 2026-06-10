@@ -143,17 +143,23 @@ public class ScimClient {
         long t0 = System.nanoTime();
         var adapter = getAdapter(factory);
         adapter.apply(kcModel);
+        if (!adapter.skip) {
+            ScimClientMetrics.APPLY_MODEL_NANOS.add(System.nanoTime() - t0);
+        }
+        sendCreate(adapter);
+    }
+
+    // Shared create send/persist path: skip + idempotent short-circuit on an
+    // existing mapping, then POST and persist the mapping. Used by create()
+    // (full apply) and the member-less group-membership provisioning path.
+    private <S extends ResourceNode> void sendCreate(Adapter<?, S> adapter) {
         if (adapter.skip) {
             return;
         }
-        long t1 = System.nanoTime();
-        ScimClientMetrics.APPLY_MODEL_NANOS.add(t1 - t0);
-        // If mapping exist then it was created by import so skip.
+        // If a mapping already exists (created by a prior import or provision), skip.
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
-        long t2 = System.nanoTime();
-        ScimClientMetrics.QUERY_NANOS.add(t2 - t1);
         // Fixed retry name (was "create-" + adapter.getId()). With ScimClient
         // instances now cached across many calls in ScimDispatcher, per-id
         // names would let the RetryRegistry accumulate Retry instances
@@ -172,12 +178,24 @@ public class ScimClient {
                     throw new RuntimeException(e);
                 }
             }));
-            long t3 = System.nanoTime();
-            ScimClientMetrics.HTTP_NANOS.add(t3 - t2);
             span.setHttpStatus(response.getHttpStatus());
             handleCreateResponse(adapter, response);
         }
-    };
+    }
+
+    // Provision the group for membership propagation WITHOUT enumerating its
+    // members. The member-enumerating create()/apply(GroupModel) re-imports
+    // every member on a federated group and triggers an unbounded re-import
+    // loop; this path sets id + displayName + scim-skip only.
+    // Package-private (not private) so EnsureGroupMembershipTest can spy-verify it.
+    void provisionGroupForMembership(
+            AdapterFactory<GroupModel, Group, GroupAdapter> factory, GroupModel group) {
+        var adapter = getAdapter(factory);
+        adapter.applyForProvisioning(group);
+        // (No APPLY_MODEL_NANOS metric here — applyForProvisioning is a couple of
+        // setters, unlike the member-enumerating apply() that create() times.)
+        sendCreate(adapter);
+    }
 
     /**
      * Persists the SCIM mapping from a create response, but only when the POST
@@ -387,14 +405,20 @@ public class ScimClient {
      * memberships on every import (additions only — removals are out of scope).
      *
      * <p>Both underlying operations are idempotent, so re-asserting every import
-     * is cheap after the first time: {@link #create} short-circuits once the
-     * group has a local mapping, and the member-add is a single-member delta
-     * PATCH the server already has.
+     * is cheap after the first time: {@link #provisionGroupForMembership}
+     * short-circuits once the group has a local mapping, and the member-add is a
+     * single-member delta PATCH the server already has. Provisioning is
+     * deliberately <em>member-less</em> — it must not enumerate the group's
+     * members, because on a federated group that re-imports every member and
+     * re-fires {@code onImportUserFromLDAP} (an unbounded re-import loop).
      *
      * <p>When {@code group-patchOp=false}, {@link #patchGroupMembership} falls
      * back to a full {@code replace} that itself provisions the group and the
-     * membership, so the explicit ensure-group {@link #create} is redundant and
-     * skipped. A missing local group is logged and skipped.
+     * membership, so the explicit member-less provisioning is redundant and
+     * skipped. NOTE: that {@code replace} path <em>does</em> enumerate members
+     * (via {@code GroupAdapter.apply(GroupModel)}), so the re-import loop can
+     * still occur on the non-default {@code group-patchOp=false} path — a known
+     * residual (see docs/roadmap.md). A missing local group is logged and skipped.
      */
     public void ensureGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
@@ -405,7 +429,7 @@ public class ScimClient {
             return;
         }
         if (this.model.get(GROUP_PATCH_OP_KEY, false)) {
-            this.create(factory, group);
+            provisionGroupForMembership(factory, group);
         }
         this.patchGroupMembership(factory, groupId, userId, true);
     }
