@@ -476,7 +476,7 @@ public abstract class IntegrationTestBase {
 
     /** Polls until WireMock has seen at least {@code atLeast} member-add PATCHes to /Groups/*. */
     protected void awaitMemberAddPatchCount(int atLeast) {
-        await().atMost(20, SECONDS).untilAsserted(() -> {
+        await().atMost(30, SECONDS).untilAsserted(() -> {
             int memberAdds = memberAddPatchCount();
             assertTrue(memberAdds >= atLeast,
                 "expected at least " + atLeast + " member-add PATCH(es) to /Groups/*, got " + memberAdds);

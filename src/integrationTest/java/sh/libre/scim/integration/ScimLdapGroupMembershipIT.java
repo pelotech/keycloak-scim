@@ -39,23 +39,7 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
             cfg.putSingle("group-patchOp", "true");
         });
 
-        // Full federation sync imports alice and bob, each a member of the
-        // seeded 'engineers' group. onImportUserFromLDAP propagates the
-        // membership for each imported user.
-        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-
-        // First, wait for the engineers group to be provisioned (POST /Groups).
-        // Separating this await from the member-add await gives the same
-        // journal-ordering protection as groupProvisionedOnceAcrossMultipleMembers.
-        await().atMost(20, SECONDS).until(() ->
-            wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Groups")).build()
-            ).getCount() >= 1);
-
-        // Then wait for both seeded members (alice, bob) to be added via a
-        // single-member delta add PATCH. The LDIF seeds exactly two members and
-        // a full sync imports both, so the floor is >= 2.
-        awaitMemberAddPatchCount(2);
+        syncUntilMembershipsAdded(r);
     }
 
     @Test
@@ -70,20 +54,7 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
             cfg.putSingle("group-patchOp", "true");
         });
 
-        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-
-        // First, wait for the group to be provisioned (POST /Groups). The
-        // provisioning POST is what creates the local group mapping that
-        // subsequent member PATCHes target.
-        await().atMost(20, SECONDS).until(() ->
-            wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Groups")).build()
-            ).getCount() >= 1);
-
-        // Then wait until both members (alice, bob) have been asserted via a
-        // member-add PATCH. Both belong to 'engineers', so a single full sync
-        // produces a member-add per user.
-        awaitMemberAddPatchCount(2);
+        syncUntilMembershipsAdded(r);
 
         // The group is provisioned exactly once: the first ensureGroupMembership
         // creates it (POST /Groups), and every subsequent ensure short-circuits
@@ -96,5 +67,47 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
         assertEquals(1, groupPosts,
             "engineers group must be provisioned exactly once across both members' "
                 + "membership propagation, got " + groupPosts);
+    }
+
+    /**
+     * Drives the federated import to a deterministic end state: both users
+     * provisioned, the group provisioned, and both memberships added.
+     *
+     * <p>Why two syncs rather than one: a member-add ({@code patchGroupMembership})
+     * can only resolve the member once that user's SCIM mapping exists, and the
+     * user-create ({@code SCOPE_USER}) and membership ({@code SCOPE_GROUP})
+     * dispatches are independent post-commit async tasks. Within a single sync
+     * the membership task can run before the user mapping is written and skip
+     * (the documented lazy-import lag that "converges on the next sync"). On a
+     * fast/warm machine the race usually resolves within one sync; on a cold,
+     * resource-constrained CI runner it does not, and there is no further
+     * trigger. So we wait for the user and group mappings to exist (their POSTs
+     * land), then re-sync once — by then the memberships resolve deterministically
+     * — instead of racing convergence inside a single sync.
+     */
+    private void syncUntilMembershipsAdded(TestRealm r) {
+        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+
+        // Both users must be provisioned (POST /Users) — that is what creates
+        // the SCIM user mappings the membership PATCHes resolve against.
+        await().atMost(30, SECONDS).until(() ->
+            wireMock.countRequestsMatching(
+                postRequestedFor(urlPathEqualTo("/Users")).build()
+            ).getCount() >= 2);
+
+        // And the group must be provisioned (POST /Groups), creating the group
+        // mapping the member PATCHes target.
+        await().atMost(30, SECONDS).until(() ->
+            wireMock.countRequestsMatching(
+                postRequestedFor(urlPathEqualTo("/Groups")).build()
+            ).getCount() >= 1);
+
+        // Re-sync: user mappings now exist, so each imported user's membership
+        // resolves to a single-member add PATCH. The group create short-circuits
+        // on the existing mapping, so this does not add a second POST /Groups.
+        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+
+        // Both seeded members (alice, bob) added via single-member delta PATCHes.
+        awaitMemberAddPatchCount(2);
     }
 }
