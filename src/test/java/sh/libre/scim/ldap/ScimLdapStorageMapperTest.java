@@ -241,4 +241,27 @@ class ScimLdapStorageMapperTest {
         verify(user).removeAttribute("scim-propagated-groups-comp-1");
         verify(client, never()).ensureGroupMembership(any(), any(), any());
     }
+
+    @Test
+    void successfulRemovalDropsWhileFailedRemovalIsKept() {
+        // One import, two removals: B applies (drops from stored), C fails (stays).
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = mock(ScimClient.class);
+        when(client.getComponentId()).thenReturn("comp-1");
+        var groupA = group("A");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA));               // current = {A}
+        when(user.getAttributeStream("scim-propagated-groups-comp-1"))
+                .thenReturn(Stream.of("A", "B", "C"));                            // stored = {A,B,C}
+        when(client.patchGroupMembership(any(), eq("B"), eq("u1"), eq(false))).thenReturn(true);
+        when(client.patchGroupMembership(any(), eq("C"), eq("u1"), eq(false))).thenReturn(false);
+
+        consumer.accept(client, ws);
+
+        verify(client).patchGroupMembership(any(), eq("B"), eq("u1"), eq(false));
+        verify(client).patchGroupMembership(any(), eq("C"), eq("u1"), eq(false));
+        // next = current ∪ failed-removals = {A} ∪ {C}; B (applied) is dropped.
+        verify(user).setAttribute(eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 2 && l.contains("A") && l.contains("C")));
+    }
 }
