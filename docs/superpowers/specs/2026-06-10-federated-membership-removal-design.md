@@ -87,10 +87,12 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    stays in `stored` so the next import re-detects and retries it; a
    removal that applied (or had no SCIM mapping to remove) is dropped.
    This requires the removal call to signal whether it was applied (see
-   Architecture). Writing the attribute once per worker — keyed per
-   component, and removing the attribute entirely when the new set is
-   empty (Keycloak's empty-list write is not a reliable round-trip) —
-   keeps it race-free.
+   Architecture). Two independent properties of the write: it is keyed per
+   component, which is what makes it **race-free** under the worker fan-out
+   (Decision 3); and when the new set is empty the attribute is **removed**
+   rather than written empty, which is what makes the round-trip
+   **reliable** (Keycloak's empty-list write is not a dependable
+   round-trip). The attribute is written once per worker.
 
 5. **Empty-group cleanup is delegated, not handled here.** Removing the
    last member leaves the SCIM group memberless; the group-delete
@@ -133,22 +135,34 @@ dispatcher.runAsync(SCOPE_GROUP, (client, workerSession) -> {
 ```
 
 The exact factoring (helper method vs. inline; the `getComponentId`
-accessor) is an implementation detail for the plan. To signal applied-or-not,
-`patchGroupMembership`'s REMOVE path returns a `boolean`: **true** when the
-PATCH succeeded **or** there is no SCIM mapping to remove (the existing
-`NoResultException` skip — nothing to do, so a never-propagated group in
-`stored` is correctly dropped, not retried forever); **false** only on a
-genuine failure (the `!response.isSuccess()` branch, after resilience4j's
-429/5xx retries are exhausted). Today the method returns `void` and swallows
-both cases; threading a `boolean` out is the one change to it (admin-event
-callers ignore the return). The REMOVE filter path (`members[value eq
-"..."]`) itself is unchanged.
+accessor) is an implementation detail for the plan. To signal
+applied-or-not, the method's signature changes from `void` to `boolean`:
+
+```
+boolean patchGroupMembership(factory, groupId, userId, boolean isAdd)
+```
+
+The returned value is **only consulted on the REMOVE path** (`isAdd=false`),
+where it means: **true** when the PATCH succeeded **or** there is no SCIM
+mapping to remove (the existing `NoResultException` skip — nothing to do, so
+a never-propagated group in `stored` is correctly dropped, not retried
+forever); **false** only on a genuine failure (the `!response.isSuccess()`
+branch, after resilience4j's 429/5xx retries are exhausted). The ADD path
+(`isAdd=true`) and the `group-patchOp=false` `replace` fallback simply return
+`true`; their callers — the admin `GROUP_MEMBERSHIP` event listener and the
+`ensureGroupMembership` add path — ignore the return entirely, so their
+behavior is unchanged apart from the now-`boolean` (for them, meaningless)
+signature. The REMOVE filter path (`members[value eq "..."]`) itself is
+unchanged.
 
 ### What does not change
 
 - `ensureGroupMembership` and the member-less provisioning path
   (`provisionGroupForMembership`) — unchanged.
-- `patchGroupMembership` (both ADD and the REMOVE filter path) — unchanged.
+- `patchGroupMembership`'s ADD path and REMOVE filter wire shape —
+  unchanged. The only edit to the method is the `void → boolean` return
+  (consulted on REMOVE only; see Architecture); ADD/event callers are
+  behaviorally unchanged.
 - The admin `GROUP_MEMBERSHIP` event path — unchanged (still the primary,
   immediate path for admin-initiated add/remove).
 - The `SCOPE_USER` dispatch and the `LAST_SEEN_ATTRIBUTE` stamp —
