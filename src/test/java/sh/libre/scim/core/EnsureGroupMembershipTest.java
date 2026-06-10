@@ -3,6 +3,7 @@ package sh.libre.scim.core;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -50,7 +51,7 @@ class EnsureGroupMembershipTest {
         var group = mock(GroupModel.class);
         var client = spy(newClient(true, group));
         doNothing().when(client).provisionGroupForMembership(any(), eq(group));
-        doNothing().when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
+        doReturn(true).when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
 
         client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
@@ -63,7 +64,7 @@ class EnsureGroupMembershipTest {
     void groupPatchOpOff_skipsEnsureCreate_stillAddsMember() {
         var group = mock(GroupModel.class);
         var client = spy(newClient(false, group));
-        doNothing().when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
+        doReturn(true).when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
 
         client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 

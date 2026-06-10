@@ -78,6 +78,11 @@ public class ScimClient {
         registry = RetryRegistry.of(retryConfig);
     }
 
+    /** The SCIM provider component id — stable across syncs/restarts. */
+    public String getComponentId() {
+        return model.getId();
+    }
+
     protected ScimClientConfig genScimClientConfig() {
         var builder = ScimClientConfig.builder()
         .httpHeaders(auth.headers())
@@ -349,7 +354,7 @@ public class ScimClient {
      * unchanged for those deployments. A missing group or user mapping (e.g.
      * the user was never synced) is logged and skipped, mirroring {@link #delete}.
      */
-    public void patchGroupMembership(
+    public boolean patchGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
             String groupId, String userId, boolean isAdd) {
 
@@ -357,7 +362,7 @@ public class ScimClient {
             var group = session.groups().getGroupById(
                     session.getContext().getRealm(), groupId);
             this.replace(factory, group);
-            return;
+            return true;
         }
 
         var adapter = getAdapter(factory);
@@ -389,11 +394,14 @@ public class ScimClient {
                 if (!response.isSuccess()) {
                     LOGGER.warnf("Failed to PATCH membership for group %s / user %s: %d %s",
                             groupId, userId, response.getHttpStatus(), response.getResponseBody());
+                    return false;
                 }
+                return true;
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.infof("Skipping membership patch: no SCIM mapping for group %s or user %s",
                         groupId, userId);
+                return true;
             }
         }
     }
