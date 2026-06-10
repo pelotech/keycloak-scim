@@ -3,8 +3,11 @@ package sh.libre.scim.reconcile;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimClient;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
@@ -35,8 +38,12 @@ public class ReconcilerRunner {
 
     private static final Logger LOGGER = Logger.getLogger(ReconcilerRunner.class);
 
+    /** Outcome of one reconciliation pass. */
+    public record ReconcileResult(int usersDeleted, int groupsDeleted) {}
+
     private final KeycloakSession session;
     private final ComponentModel scimProvider;
+    /** Stale-liveness threshold; consumed by the USER phase only (the group phase uses member presence, not timestamps). */
     private final Duration staleThreshold;
 
     public ReconcilerRunner(KeycloakSession session, ComponentModel scimProvider,
@@ -47,9 +54,9 @@ public class ReconcilerRunner {
     }
 
     /**
-     * @return number of SCIM DELETE calls issued during this pass.
+     * @return the outcome of this pass (user and group deletes).
      */
-    public int run() {
+    public ReconcileResult run() {
         var realm = session.getContext().getRealm();
         var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
         List<AbsenceWitness> witnesses = List.of(
@@ -98,55 +105,151 @@ public class ReconcilerRunner {
             }
         }
 
+        int usersDeleted;
+        if (toDelete.isEmpty()) {
+            usersDeleted = 0;
+        } else {
+            // Phase 2: parallel SCIM DELETEs via the shared worker pool.
+            // Each worker opens its own KeycloakSession (so mapping cleanup runs
+            // in its own transaction) and constructs a ScimClient bound to that
+            // session. The N HTTP calls saturate the worker pool's concurrency
+            // budget instead of serializing on the caller's thread.
+            //
+            // Sized at ScimDispatcher.dispatchAsync's pool (default 8). For 1k
+            // deletes at ~43 ms HTTP each: synchronous ~46 s -> parallel ~5.4 s
+            // (matches the import-side gain).
+            var sessionFactory = session.getKeycloakSessionFactory();
+            var realmId = realm.getId();
+            var componentId = scimProvider.getId();
+
+            List<CompletableFuture<Void>> futures = new ArrayList<>(toDelete.size());
+            for (String userId : toDelete) {
+                futures.add(ScimDispatcher.dispatchAsync(() -> {
+                    KeycloakModelUtils.runJobInTransaction(sessionFactory, workerSession -> {
+                        var workerRealm = workerSession.realms().getRealm(realmId);
+                        if (workerRealm == null) return;
+                        workerSession.getContext().setRealm(workerRealm);
+                        var component = workerRealm.getComponent(componentId);
+                        if (component == null
+                            || !ScimStorageProviderFactory.ID.equals(component.getProviderId())) {
+                            return;
+                        }
+                        var workerClient = new ScimClient(component, workerSession);
+                        try {
+                            workerClient.delete(UserAdapter::new, userId);
+                        } finally {
+                            workerClient.close();
+                        }
+                    });
+                }));
+            }
+
+            try {
+                CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+            } catch (CompletionException e) {
+                // Individual delete failures are logged inside ScimClient.delete;
+                // join() throws if ANY future completed exceptionally. We don't
+                // want one failed delete to abort the count or prevent the
+                // others from finishing — they've already run by the time join()
+                // sees the exception. Just log and return what we attempted.
+                LOGGER.warnf(e.getCause(), "reconciler: one or more parallel deletes failed");
+            }
+            usersDeleted = toDelete.size();
+        }
+
+        int groupsDeleted = reconcileGroups();
+        return new ReconcileResult(usersDeleted, groupsDeleted);
+    }
+
+    enum GroupAction { DELETE, KEEP }
+
+    /**
+     * Classifies a group mapping for the member-presence reconciler.
+     *
+     * <ul>
+     *   <li>{@code null} group — local model gone (orphan backstop) → DELETE.</li>
+     *   <li>{@code !hasMembers} — the LDAP group was renamed-away or deleted;
+     *       Keycloak drains its members to zero during the next full sync
+     *       → DELETE.</li>
+     *   <li>Has members — group is still active in LDAP → KEEP.</li>
+     * </ul>
+     *
+     * No federation filter is needed: a purely local group will have members
+     * (real users) and is therefore kept.
+     */
+    static GroupAction classifyGroup(GroupModel group, boolean hasMembers) {
+        if (group == null) {
+            return GroupAction.DELETE;
+        }
+        return hasMembers ? GroupAction.KEEP : GroupAction.DELETE;
+    }
+
+    /**
+     * The group reconciliation phase, mirroring the user phase: Phase 1 scans
+     * our group mappings sequentially in this session, classifying each into a
+     * delete bucket; Phase 2 dispatches those deletes in parallel over the
+     * shared worker pool.
+     *
+     * @return the number of group SCIM DELETE calls issued.
+     */
+    private int reconcileGroups() {
+        var realm = session.getContext().getRealm();
+        var em = session.getProvider(JpaConnectionProvider.class).getEntityManager();
+        var mappings = em.createNamedQuery("findByComponentAndType", ScimResource.class)
+            .setParameter("realmId", realm.getId())
+            .setParameter("componentId", scimProvider.getId())
+            .setParameter("type", "Group")
+            .getResultList();
+
+        List<String> toDelete = new ArrayList<>();
+        for (ScimResource m : mappings) {
+            var group = session.groups().getGroupById(realm, m.getId());
+            boolean hasMembers = group != null
+                && session.users().getGroupMembersStream(realm, group).findAny().isPresent();
+            if (classifyGroup(group, hasMembers) == GroupAction.DELETE) {
+                toDelete.add(m.getId());
+            }
+        }
         if (toDelete.isEmpty()) {
             return 0;
         }
 
-        // Phase 2: parallel SCIM DELETEs via the shared worker pool.
-        // Each worker opens its own KeycloakSession (so mapping cleanup runs
-        // in its own transaction) and constructs a ScimClient bound to that
-        // session. The N HTTP calls saturate the worker pool's concurrency
-        // budget instead of serializing on the caller's thread.
-        //
-        // Sized at ScimDispatcher.dispatchAsync's pool (default 8). For 1k
-        // deletes at ~43 ms HTTP each: synchronous ~46 s -> parallel ~5.4 s
-        // (matches the import-side gain).
         var sessionFactory = session.getKeycloakSessionFactory();
         var realmId = realm.getId();
         var componentId = scimProvider.getId();
-
+        // Worker scaffolding mirrors the user phase intentionally; with only two call sites a
+        // shared abstraction would trade readable locality for indirection.
         List<CompletableFuture<Void>> futures = new ArrayList<>(toDelete.size());
-        for (String userId : toDelete) {
-            futures.add(ScimDispatcher.dispatchAsync(() -> {
-                KeycloakModelUtils.runJobInTransaction(sessionFactory, workerSession -> {
-                    var workerRealm = workerSession.realms().getRealm(realmId);
-                    if (workerRealm == null) return;
-                    workerSession.getContext().setRealm(workerRealm);
-                    var component = workerRealm.getComponent(componentId);
-                    if (component == null
-                        || !ScimStorageProviderFactory.ID.equals(component.getProviderId())) {
-                        return;
-                    }
-                    var workerClient = new ScimClient(component, workerSession);
-                    try {
-                        workerClient.delete(UserAdapter::new, userId);
-                    } finally {
-                        workerClient.close();
-                    }
-                });
-            }));
+        for (String id : toDelete) {
+            futures.add(dispatchGroupOp(sessionFactory, realmId, componentId, id));
         }
-
         try {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         } catch (CompletionException e) {
-            // Individual delete failures are logged inside ScimClient.delete;
-            // join() throws if ANY future completed exceptionally. We don't
-            // want one failed delete to abort the count or prevent the
-            // others from finishing — they've already run by the time join()
-            // sees the exception. Just log and return what we attempted.
-            LOGGER.warnf(e.getCause(), "reconciler: one or more parallel deletes failed");
+            LOGGER.warnf(e.getCause(), "reconciler: one or more parallel group deletes failed");
         }
         return toDelete.size();
+    }
+
+    private CompletableFuture<Void> dispatchGroupOp(
+            KeycloakSessionFactory sessionFactory,
+            String realmId, String componentId, String groupId) {
+        return ScimDispatcher.dispatchAsync(() ->
+            KeycloakModelUtils.runJobInTransaction(sessionFactory, workerSession -> {
+                var workerRealm = workerSession.realms().getRealm(realmId);
+                if (workerRealm == null) return;
+                workerSession.getContext().setRealm(workerRealm);
+                var component = workerRealm.getComponent(componentId);
+                if (component == null
+                    || !ScimStorageProviderFactory.ID.equals(component.getProviderId())) {
+                    return;
+                }
+                var workerClient = new ScimClient(component, workerSession);
+                try {
+                    workerClient.delete(GroupAdapter::new, groupId);
+                } finally {
+                    workerClient.close();
+                }
+            }));
     }
 }

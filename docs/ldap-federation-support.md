@@ -494,8 +494,62 @@ interval.
   the removal is not propagated to SCIM. This is a deferred
   reconciler-style follow-up (analogous to the user-deletion gap
   tracked in scenario 4 above).
-- **Group rename and delete for federated groups.** Name changes and
-  deletions of groups that originate in LDAP are not yet propagated.
+
+## Group reconciliation (member-presence)
+
+The reconciler's group phase deletes the SCIM resource for any mapped
+federated group that currently has zero members (or whose local
+`GroupModel` is gone).
+
+### Member-presence rule
+
+When `reconciler-enabled=true`, the reconciler evaluates each
+`Group`-type mapping after the user phase:
+
+- **Local model gone** → SCIM DELETE (orphan backstop; handles groups
+  silently removed via admin events or future Keycloak fixes).
+- **Present + zero members** → SCIM DELETE. When an LDAP group is
+  renamed or deleted, Keycloak keeps the local `GroupModel` but drains
+  it to zero members on the next full sync. Zero members is the
+  reliable, race-free signal that the group is no longer backed by
+  LDAP.
+- **Present + one or more members** → KEEP. A live LDAP group always
+  has its member edges materialized in Keycloak between syncs, so a
+  stable group is never wrongly deleted.
+
+No group-attribute write and no timing dependency: the reconciler
+reads member presence at classification time.
+
+### Rename = delete-old + create-new
+
+On a rename, Keycloak materializes the new group (with a new
+`GroupModel` id) and orphans the old one; the new group provisions to
+SCIM fresh (new SCIM id) through the membership import path. After the
+next full sync drains the old group's members to zero, the reconciler
+deletes its SCIM resource. For the window between that sync and the
+next reconcile pass, SCIM transiently holds both the old and new group.
+The duplicate is bounded by the reconcile interval.
+
+### No group-specific config
+
+Group reconciliation rides the existing `reconciler-enabled` flag —
+there is no separate enable flag or threshold for groups. The
+`reconciler-stale-threshold-seconds` config and its
+`> fullSyncPeriod` validation apply only to the user phase (which uses
+timestamp staleness); the group phase does not use them.
+
+### Known consequence: empty groups
+
+A provisioned group that legitimately loses all its LDAP members (e.g.
+a team is offboarded but the LDAP group entry is kept) is
+indistinguishable from a renamed-away or deleted group under a
+member-count signal. It is deleted on the next reconcile and
+re-provisioned automatically when the group regains a member.
+
+### Verified by
+
+`ScimGroupReconcileIT`: delete-propagates, rename-as-recreate, and
+live-group-not-deleted scenarios.
 
 ## References
 

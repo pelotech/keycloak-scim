@@ -1,16 +1,15 @@
 package sh.libre.scim.reconcile;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.Mockito.when;
+
+import java.time.Duration;
+import java.time.Instant;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.keycloak.models.UserModel;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-
-import java.time.Duration;
-import java.time.Instant;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class StaleAttributeWitnessTest {
@@ -64,4 +63,5 @@ class StaleAttributeWitnessTest {
         var witness = new StaleAttributeWitness(ATTR, THRESHOLD, NOW);
         assertEquals(AbsenceWitness.Vote.ABSTAIN, witness.evaluate(user));
     }
+
 }

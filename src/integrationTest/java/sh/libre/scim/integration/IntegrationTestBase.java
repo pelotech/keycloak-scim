@@ -483,6 +483,19 @@ public abstract class IntegrationTestBase {
         });
     }
 
+    /**
+     * Looks up a top-level group by name via the admin API, returning its
+     * representation or {@code null} if no such group exists. Used by reconciler
+     * ITs to observe whether a federated group is materialized (or removed)
+     * after a full LDAP sync.
+     */
+    protected GroupRepresentation findGroupByName(RealmResource realm, String name) {
+        return realm.groups().groups().stream()
+            .filter(g -> name.equals(g.getName()))
+            .findFirst()
+            .orElse(null);
+    }
+
     protected String createGroup(RealmResource realm, String name) {
         var rep = new GroupRepresentation();
         rep.setName(name);
