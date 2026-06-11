@@ -3,9 +3,10 @@ package sh.libre.scim.core;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -55,17 +56,55 @@ public class ScimDispatcher implements AutoCloseable {
      * connection limit or the local Apache HttpClient pool size.
      */
     private static final int POOL_SIZE = Integer.getInteger("scim.dispatch.threads", 8);
-    private static final ExecutorService ASYNC_EXECUTOR = Executors.newFixedThreadPool(
-        POOL_SIZE,
-        new ThreadFactory() {
-            private final AtomicInteger counter = new AtomicInteger();
-            @Override
-            public Thread newThread(Runnable r) {
-                var t = new Thread(r, "scim-dispatch-" + counter.incrementAndGet());
-                t.setDaemon(true);
-                return t;
-            }
-        });
+
+    /**
+     * Bounded buffer between producers and the worker pool. Caps the in-flight
+     * backlog — and therefore the dispatch memory footprint — at ~capacity
+     * tasks regardless of the sync size N. When full, {@link BlockingPolicy}
+     * blocks the producer (back-pressure) instead of growing the queue.
+     * Default 256 ≈ 32 deep per worker at the default pool size: deep enough
+     * not to starve a worker on a fast sink, shallow enough to keep the memory
+     * bound tight. Tunable via {@code scim.dispatch.queueCapacity}.
+     */
+    private static final int QUEUE_CAPACITY = Integer.getInteger("scim.dispatch.queueCapacity", 256);
+
+    /**
+     * How long a producer may stay blocked before each back-pressure WARN.
+     * Default 10s is long enough to stay quiet through a momentarily slow sink,
+     * yet short enough to surface a wedged sink within the first interval.
+     * Tunable via {@code scim.dispatch.blockWarnMs}.
+     */
+    private static final long BLOCK_WARN_MS = Long.getLong("scim.dispatch.blockWarnMs", 10_000L);
+
+    private static final ThreadFactory THREAD_FACTORY = new ThreadFactory() {
+        private final AtomicInteger counter = new AtomicInteger();
+        @Override
+        public Thread newThread(Runnable r) {
+            var t = new Thread(r, "scim-dispatch-" + counter.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        }
+    };
+
+    private static final BlockingPolicy BACKPRESSURE_POLICY =
+        new BlockingPolicy(QUEUE_CAPACITY, BLOCK_WARN_MS);
+
+    private static final ThreadPoolExecutor ASYNC_EXECUTOR = new ThreadPoolExecutor(
+        POOL_SIZE, POOL_SIZE,
+        0L, TimeUnit.MILLISECONDS,
+        new ArrayBlockingQueue<>(QUEUE_CAPACITY),
+        THREAD_FACTORY,
+        BACKPRESSURE_POLICY);
+
+    /**
+     * Count of back-pressure WARN events emitted by the dispatch pool, for
+     * operational visibility (a rising count means a slow/wedged SCIM sink is
+     * throttling syncs). Not wired to a metrics endpoint — the per-interval
+     * WARN log is the primary operator signal.
+     */
+    public static long backpressureWarnings() {
+        return BACKPRESSURE_POLICY.blockedWarnings();
+    }
 
     /**
      * Submit a task to the shared SCIM worker pool. Same pool that
