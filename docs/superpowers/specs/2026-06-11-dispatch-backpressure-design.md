@@ -88,6 +88,12 @@ static final class BlockingPolicy implements RejectedExecutionHandler {
                 throw new RejectedExecutionException("interrupted applying SCIM back-pressure", e);
             }
             if (!queued) {
+                if (executor.isShutdown()) {
+                    // Shutdown raced in after we passed the initial guard and
+                    // while we were parked in offer(). Workers have stopped
+                    // polling, so the queue will never drain — stop spinning.
+                    throw new RejectedExecutionException("SCIM dispatch pool shut down while blocked");
+                }
                 long blockedMs = (System.nanoTime() - blockedStartNanos) / 1_000_000L;
                 BLOCKED_WARNINGS.incrementAndGet();
                 LOGGER.warnf("SCIM dispatch queue full (capacity=%d); producer blocked %d ms "
@@ -115,10 +121,20 @@ inherit back-pressure with **no changes at the call sites**.
 | `scim.dispatch.queueCapacity` | 256 | bounded buffer; memory cap ≈ capacity × task-closure |
 | `scim.dispatch.blockWarnMs` | 10000 | warn (and bump counter) each time the producer stays blocked this long |
 
-`256` keeps 8 workers fed on a healthy/fast sink — the queue rarely fills, so
-there is no throughput penalty in the common case — while bounding memory
-tightly. A slow sink fills the buffer and back-pressures, which is the intent.
-All three are env-overridable like the existing `scim.dispatch.threads`.
+`256` is ≈32 queued tasks per worker at the default pool size of 8 — deep enough
+that a healthy/fast sink never starves a worker between producer scheduling
+quanta (so there is no throughput penalty in the common case), shallow enough
+that the bounded backlog is a small, fixed memory cost regardless of N. A
+smaller buffer (e.g. 64) risks transient worker starvation on bursty producers;
+a much larger one weakens the memory bound for no fast-sink benefit. A slow sink
+fills the buffer and back-pressures, which is the intent. All three properties
+are env-overridable like the existing `scim.dispatch.threads`.
+
+`BlockingPolicy.blockedWarnings()` is exposed as a static accessor for the unit
+test and for operational visibility; this design does not wire it into a metrics
+endpoint (the plugin has no metrics surface beyond `ScimClientMetrics`, and the
+per-interval WARN log is the primary operator signal). Exposing it as a metric is
+deferred — noted, not built.
 
 ### Behavior under sink conditions
 
@@ -137,6 +153,14 @@ Blocking happens in the post-commit `afterCompletion` callback, where the
 caller's transaction is **already committed** (no DB locks held). It only paces
 the import loop.
 
+The reconciler is the other producer: it submits deletes via `dispatchAsync` and
+then blocks on `CompletableFuture.allOf(...).join()` (`ReconcilerRunner.java:127-148`,
+`222-231`). Under back-pressure it blocks identically — the submitting (reconcile)
+thread parks in the rejection handler — so a reconcile pass behind a wedged sink
+hangs for the back-pressure duration, by design. This is the same safe trade as
+the import producer, not a deadlock (the reconcile thread is not a pool worker;
+see "Why no deadlock").
+
 ### Why never drop (rejected alternative)
 
 We considered dropping an op after a bounded block timeout (so the sync always
@@ -153,7 +177,11 @@ dropped op. **This is unsafe for creates:**
   finds none, throws `NoResultException`, logs "scim mapping not found"
   (`ScimClient.java:294-296`), and **gives up**. The user is then permanently
   missing from the SCIM sink until someone resets the mapping table and forces
-  an all-creates sync.
+  an all-creates sync. (`replace()` does have a 404/400 re-create branch at
+  `ScimClient.java:269-286`, but it is gated *behind* the mapping lookup — it
+  handles "mapping exists locally but the remote resource is gone." A dropped
+  create never wrote a mapping, so `getSingleResult()` throws first and that
+  branch is never reached.)
 
 So a drop-on-timeout policy would **silently and permanently** drop every user
 whose create timed out during a slow first-time sync — the opposite of the
