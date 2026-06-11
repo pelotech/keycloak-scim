@@ -268,7 +268,7 @@ git commit -m "feat(dispatch): add BlockingPolicy back-pressure rejection handle
 ### Task 2: Wire the bounded executor into `ScimDispatcher`
 
 **Files:**
-- Modify: `src/main/java/sh/libre/scim/core/ScimDispatcher.java` (imports `:3-17`, executor block `:45-68`)
+- Modify: `src/main/java/sh/libre/scim/core/ScimDispatcher.java` (imports `:3-17`, executor block `:46-68`)
 
 - [ ] **Step 1: Update imports**
 
