@@ -302,3 +302,39 @@ on error; with a queue, we want at-least-once delivery and
 back-pressure handling. Some of the design considerations from the
 LDAP-deletion reconciler (idempotency, threshold-based correctness)
 carry over.
+
+## Memory & worst-case under load (dispatch queue)
+
+Throughput is not the only axis: predictable memory and bounded
+worst-case matter at least as much. The async dispatch worker pool is
+`Executors.newFixedThreadPool(8)` — an **unbounded `LinkedBlockingQueue`**.
+Keycloak imports federation users one-per-transaction and enlists a SCIM
+op at each commit; it races far ahead of the 8 SCIM workers, so the queue
+absorbs the whole sync with **no back-pressure**. Measured by
+`DispatchMemoryWorstCaseIT` (KC container memory sampled via cgroup):
+
+| Scenario | Peak KC mem | Notes |
+| --- | ---: | --- |
+| fast sink, 1k users | 742 MiB | |
+| fast sink, 10k users | 1143 MiB | climbs 619→1143 as backlog builds |
+| **no plugin**, 10k users | 1038 MiB | Keycloak-only baseline |
+| slow sink (200ms), 10k users | 1219 MiB | elevated for the full 264s drain |
+
+**The decisive finding (slow 200ms sink, 10k):** the sync trigger
+**returned in 4.9 s with only 176 of 10,000 SCIM POSTs done — 9,824 ops
+still queued.** Keycloak finished importing all 10k users while ~98% of
+the SCIM work sat in the unbounded queue; it then drained over 264 s at
+~38/sec (the 8-worker / 200ms ceiling). The import is **not** throttled
+by the downstream — there is **zero back-pressure**.
+
+Implications:
+- **Memory is not bounded.** The queue holds the full sync's backlog; the
+  plugin delta over Keycloak-alone is ~105 MiB (fast) to ~181 MiB (slow)
+  at 10k, and **scales with N** — at 100k the queue would hold ~98k task
+  closures. A slow/unavailable SCIM provider turns a sync into a heap
+  spike proportional to the user count.
+- **`/Bulk` does not address this** — it reduces request *count*, not queue
+  depth, and *adds* a buffer. The high-value fix for predictable memory +
+  worst-case is to **bound the dispatch queue and apply back-pressure**
+  (block the import producer when the queue is full), so a slow sink slows
+  the sync instead of ballooning the heap.
