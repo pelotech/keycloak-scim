@@ -25,8 +25,14 @@ touches both.
   `members[value eq "..."]`. `group-patchOp=false` deployments fall back
   to the existing full `replace`. Verified by `GroupMembershipPatchTest`
   (wire shape) and `ScimGroupPropagationIT` (end-to-end add/remove).
-  Note: this covers membership *changes*; a full group `replace` (name
-  edits, sync-refresh) still sends the whole list via `toPatchBuilder`.
+  A group **update** (rename / sync-refresh) on `group-patchOp=true` now
+  also PATCHes only the group's own attributes (`displayName`,
+  `externalId`) — `toPatchBuilder` no longer re-asserts the member list
+  (which meant a per-member external-id lookup plus a whole-list re-send
+  on every rename); membership is maintained by the delta PATCHes.
+  Verified by `GroupMembershipPatchTest.groupUpdatePatchCarriesOnlyAttributesNotMembers`.
+  (The `group-patchOp=false` full PUT necessarily still sends the whole
+  resource — it cannot be a partial update.)
 - **LDAP-federated group membership.** _Done._ Federated users'
   current group memberships now propagate to SCIM via
   `ScimLdapStorageMapper.onImportUserFromLDAP` →

@@ -171,44 +171,22 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
 
     @Override
     public PatchBuilder<Group> toPatchBuilder(ScimRequestBuilder scimRequestBuilder, String url) {
-        List<Member> groupMembers = new ArrayList<>();
-        PatchBuilder<Group> patchBuilder;
-        patchBuilder = scimRequestBuilder.patch(url, Group.class);
-        if (members.size() > 0) {
-            for (String member : members) {
-                var userMapping = this.query("findById", member, "User").getSingleResult();
-                groupMembers.add(Member.builder().value(userMapping.getExternalId()).build());
-            }
-            patchBuilder.addOperation()
-                .path("members")
-                .op(PatchOp.REPLACE)
-                .valueNodes(groupMembers)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
-                .build();
-        } else {
-            patchBuilder.addOperation()
-                .path("members")
-                .op(PatchOp.REMOVE)
-                .value(null)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("displayName")
-                .value(displayName)
-                .next()
-                .op(PatchOp.REPLACE)
-                .path("externalId")
-                .value(id)
-                .build();
-
-            }
-        LOGGER.info(patchBuilder.getResource());
+        // A group UPDATE (rename / sync-refresh) carries only the group's own
+        // attributes — never the member list. Membership is maintained
+        // independently by single-member GROUP_MEMBERSHIP delta PATCHes and the
+        // federated-import diff, so re-asserting the whole member list here (a
+        // per-member external-id lookup plus a full-list re-send on every rename)
+        // is both wasteful and unnecessary.
+        PatchBuilder<Group> patchBuilder = scimRequestBuilder.patch(url, Group.class);
+        patchBuilder.addOperation()
+            .path("displayName")
+            .op(PatchOp.REPLACE)
+            .value(displayName)
+            .next()
+            .op(PatchOp.REPLACE)
+            .path("externalId")
+            .value(id)
+            .build();
         return patchBuilder;
     }
 
