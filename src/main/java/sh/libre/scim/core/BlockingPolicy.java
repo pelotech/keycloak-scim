@@ -34,7 +34,22 @@ final class BlockingPolicy implements RejectedExecutionHandler {
     private final long warnMs;
     private final AtomicLong blockedWarnings = new AtomicLong();
 
+    /**
+     * @param capacity the bounded-queue depth, echoed in the WARN log; must match
+     *                 the {@link java.util.concurrent.ArrayBlockingQueue} capacity
+     *                 given to the executor this policy is registered with.
+     * @param warnMs   back-pressure warning interval in milliseconds — a WARN is
+     *                 logged and {@link #blockedWarnings()} incremented each time a
+     *                 blocked producer waits this long. Must be positive; a
+     *                 non-positive value would turn {@code offer} into a busy-spin.
+     */
     BlockingPolicy(int capacity, long warnMs) {
+        if (capacity <= 0) {
+            throw new IllegalArgumentException("capacity must be positive: " + capacity);
+        }
+        if (warnMs <= 0) {
+            throw new IllegalArgumentException("warnMs must be positive: " + warnMs);
+        }
         this.capacity = capacity;
         this.warnMs = warnMs;
     }
@@ -61,7 +76,7 @@ final class BlockingPolicy implements RejectedExecutionHandler {
                 }
                 long blockedMs = (System.nanoTime() - blockedStartNanos) / 1_000_000L;
                 blockedWarnings.incrementAndGet();
-                LOGGER.warnf("SCIM dispatch queue full (capacity=%d); producer blocked %d ms "
+                LOGGER.warnf("SCIM dispatch queue full (capacity=%d); producer blocked for %d ms so far "
                     + "waiting for a worker slot — downstream SCIM sink may be slow or unavailable.",
                     capacity, blockedMs);
             }

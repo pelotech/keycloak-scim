@@ -100,9 +100,14 @@ class BlockingPolicyTest {
         var submitter = new Thread(() -> executor.execute(() -> {}));
         submitter.start();
 
-        // Blocked ~250ms with a 50ms warn interval => at least one warning.
-        // (Best-effort timing: 5x margin makes a total miss very unlikely.)
-        Thread.sleep(250);
+        // Poll (don't fixed-sleep) for the first warning: the submitter blocks in
+        // the policy with a 50ms warn interval, so a warning must appear well
+        // within 2s. Waiting on the condition instead of a fixed sleep removes the
+        // "submitter not yet scheduled" flake on a starved CI runner.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (policy.blockedWarnings() < 1 && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
         assertTrue(policy.blockedWarnings() >= 1,
             "expected at least one back-pressure warning, got " + policy.blockedWarnings());
 
