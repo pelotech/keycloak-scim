@@ -507,6 +507,15 @@ configured for group propagation alone cannot resolve member ids and
 will skip group-membership propagation silently. A single component
 covering both scopes is the supported configuration.
 
+It must also have **`group-patchOp=true`** (the default). The federated
+membership add/remove path relies on the single-member delta PATCH; with
+`group-patchOp=false`, membership would instead go through a full-group
+`replace` (PUT the whole member list), which enumerates the federated
+group's members and re-imports them — an unbounded re-import loop. To
+avoid that, federated group-membership propagation is **skipped entirely
+when `group-patchOp=false`** (the `SCOPE_GROUP` worker no-ops). Use the
+default `group-patchOp=true` for federated group membership.
+
 ### Lazy-import convergence
 
 On a one-shot lazy import (a single user login triggers federation

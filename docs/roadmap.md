@@ -159,13 +159,20 @@ a concrete IdP that requires it.
   federated-storage propagated-group set, so a no-change re-import sends
   zero PATCHes (`ScimLdapStorageMapperTest.noMembershipChangeEmitsNoScimCalls`,
   `ScimLdapGroupMembershipIT.unchangedResyncSendsNoRedundantMemberPatches`).
-  **Residual:** when `group-patchOp=false`,
-  `ensureGroupMembership` defers to `patchGroupMembership`'s full
-  `replace` fallback, which still calls `GroupAdapter.apply(GroupModel)`
-  → `getGroupMembersStream`, so the loop can still occur on that
-  non-default path. Unmeasured (the re-measurement covered
-  `group-patchOp=true` only); fix the same way — provision/replace
-  without enumerating members — if it proves to loop.
+  **`group-patchOp=false` residual — handled.** Confirmed by inspection
+  that on that non-default path both add and remove fall back to a full
+  `replace` (`GroupAdapter.apply(GroupModel)` → `getGroupMembersStream`),
+  which re-imports the federated group's members — the same loop. Because
+  a full member-list PUT *inherently* needs the member list (the
+  member-less fix used for `group-patchOp=true` does not apply, and
+  deriving the list without `getGroupMembersStream` is O(mapped users) per
+  group), federated group-membership propagation is **gated on
+  `group-patchOp=true`**: the `SCOPE_GROUP` worker no-ops when
+  `ScimClient.isGroupMembershipDeltaEnabled()` is false, so the loop
+  cannot occur. The (rare) cost is that on `group-patchOp=false` a
+  federated user's group memberships are not propagated — documented in
+  [`docs/ldap-federation-support.md`](ldap-federation-support.md). Verified
+  by `ScimLdapStorageMapperTest.skipsEntirelyWhenGroupPatchOpDisabled`.
 - **Concurrent group provisioning double-POST.** _Fixed (cluster-safe)._
   When several members of a not-yet-provisioned group were imported
   concurrently, each worker (its own transaction) queried the mapping,

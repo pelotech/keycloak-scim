@@ -35,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -177,6 +178,14 @@ class ScimLdapStorageMapperTest {
         return g;
     }
 
+    /** A mock client for the default delta path (group-patchOp=true). */
+    private ScimClient deltaClient() {
+        var client = mock(ScimClient.class);
+        when(client.getComponentId()).thenReturn("comp-1");
+        when(client.isGroupMembershipDeltaEnabled()).thenReturn(true);
+        return client;
+    }
+
     /** Federated-storage attributes map holding the propagated-group set (empty if no ids). */
     private MultivaluedHashMap<String, String> storedGroups(String... ids) {
         var m = new MultivaluedHashMap<String, String>();
@@ -190,8 +199,7 @@ class ScimLdapStorageMapperTest {
     void removesGroupsTheUserHasLeft() {
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));
         when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
@@ -210,8 +218,7 @@ class ScimLdapStorageMapperTest {
     void keepsFailedRemovalInStoredSet() {
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));
         when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
@@ -230,8 +237,7 @@ class ScimLdapStorageMapperTest {
         // ZERO SCIM PATCHes (Follow-up A: no redundant per-sync re-assertion).
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         var groupB = group("B");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
@@ -247,8 +253,7 @@ class ScimLdapStorageMapperTest {
     void removesAttributeWhenNoGroupsRemain() {
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         when(user.getGroupsStream()).thenReturn(Stream.empty());
         when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A"));
         when(client.patchGroupMembership(any(), eq("A"), eq("u1"), eq(false))).thenReturn(true);
@@ -265,8 +270,7 @@ class ScimLdapStorageMapperTest {
         // One import, two removals: B applies (drops from stored), C fails (stays).
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));               // current = {A}
         when(fed.getAttributes(any(), eq("u1")))
@@ -289,8 +293,7 @@ class ScimLdapStorageMapperTest {
         // nothing to remove, and the current set is recorded.
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));            // current = {A}
         when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups());  // stored = {} (empty)
@@ -309,8 +312,7 @@ class ScimLdapStorageMapperTest {
         // current = {A,B}, stored = {A}: A is already propagated, only B is added.
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         var groupB = group("B");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
@@ -331,8 +333,7 @@ class ScimLdapStorageMapperTest {
         // B stays propagated. next = {B} only, so A is re-attempted next import.
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
-        var client = mock(ScimClient.class);
-        when(client.getComponentId()).thenReturn("comp-1");
+        var client = deltaClient();
         var groupA = group("A");
         var groupB = group("B");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
@@ -344,5 +345,22 @@ class ScimLdapStorageMapperTest {
         verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
         verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 1 && l.contains("B")));
+    }
+
+    @Test
+    void skipsEntirelyWhenGroupPatchOpDisabled() {
+        // group-patchOp=false: add/remove would fall back to a full-group
+        // `replace` that re-imports the federated group's members (loop). The
+        // worker must do nothing at all — not even re-fetch the user.
+        var consumer = captureGroupConsumer("u1");
+        var ws = mock(KeycloakSession.class);
+        var client = mock(ScimClient.class);
+        when(client.isGroupMembershipDeltaEnabled()).thenReturn(false);
+
+        consumer.accept(client, ws);
+
+        verify(client, never()).patchGroupMembership(any(), any(), any(), anyBoolean());
+        verify(client, never()).ensureGroupMembership(any(), any(), any());
+        verify(ws, never()).users();
     }
 }

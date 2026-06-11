@@ -74,6 +74,15 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
         // getGroupsStream() reads the user's OWN groups; it does NOT enumerate any
         // group's members, so it cannot retrigger the federated re-import loop.
         dispatcher.runAsync(ScimDispatcher.SCOPE_GROUP, (client, workerSession) -> {
+            // Only the single-member delta PATCH path is loop-safe. With
+            // group-patchOp=false, both add and remove fall back to a full-group
+            // `replace` that enumerates the federated group's members and
+            // re-imports them (an unbounded re-import loop). So federated
+            // group-membership propagation requires group-patchOp=true (the
+            // default); on the non-default path we skip it (see docs).
+            if (!client.isGroupMembershipDeltaEnabled()) {
+                return;
+            }
             var workerRealm = workerSession.getContext().getRealm();
             var u = workerSession.users().getUserById(workerRealm, userId);
             if (u == null) return;

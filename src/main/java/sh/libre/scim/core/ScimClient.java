@@ -86,6 +86,18 @@ public class ScimClient {
         return model.getId();
     }
 
+    /**
+     * Whether this component sends single-member delta PATCHes for group
+     * membership ({@code group-patchOp=true}, the default). When false,
+     * membership changes go through a full-group {@code replace} (PUT the whole
+     * member list), which enumerates a federated group's members and re-imports
+     * them — an unbounded re-import loop. The federated-import membership path
+     * therefore only runs when this is true (see ScimLdapStorageMapper).
+     */
+    public boolean isGroupMembershipDeltaEnabled() {
+        return this.model.get(GROUP_PATCH_OP_KEY, false);
+    }
+
     protected ScimClientConfig genScimClientConfig() {
         var builder = ScimClientConfig.builder()
         .httpHeaders(auth.headers())
