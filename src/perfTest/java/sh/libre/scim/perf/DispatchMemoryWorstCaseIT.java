@@ -20,13 +20,13 @@ import static org.awaitility.Awaitility.await;
  * Characterizes the CURRENT plugin's container-memory footprint and worst-case
  * behavior under a federation-import flood — not throughput.
  *
- * <p>The async SCIM dispatch worker pool is
- * {@code Executors.newFixedThreadPool(8)}, which is backed by an UNBOUNDED
- * {@code LinkedBlockingQueue}. Keycloak's federation import enlists one SCIM op
- * per user (post-commit) far faster than 8 workers can drain them, so the
- * in-flight backlog — and Keycloak's container memory — scale with the sync
- * size N, with NO back-pressure. A slow downstream SCIM sink makes the backlog
- * persist (or grow) rather than throttling the import.
+ * <p>The async SCIM dispatch worker pool is a bounded {@code ThreadPoolExecutor}
+ * over an {@code ArrayBlockingQueue} (default capacity 256). When the queue is
+ * full, {@code BlockingPolicy} blocks the producer (back-pressure) instead of
+ * growing the queue, so the in-flight backlog — and Keycloak's container memory
+ * — is bounded at ~capacity regardless of the sync size N. A slow downstream
+ * SCIM sink paces the import to the sink's drain rate rather than allowing the
+ * queue to grow unboundedly.
  *
  * <p>Each scenario samples the Keycloak CONTAINER's resident memory via cgroup
  * accounting throughout the run and records peak + a memory curve. Scenarios:
@@ -35,9 +35,8 @@ import static org.awaitility.Awaitility.await;
  *   <li>mem-vs-N, fast sink, 10k (does peak scale with N?)</li>
  *   <li>no-plugin baseline, 10k (isolates Keycloak's own import memory; the
  *       delta = plugin/queue cost)</li>
- *   <li>slow sink worst-case, 10k @ 200ms (does memory stay elevated through a
- *       long drain, and does the import finish before the queue drains =
- *       no back-pressure?)</li>
+ *   <li>slow sink worst-case, 10k @ 200ms (is the backlog bounded and the
+ *       import paced to the sink = back-pressure engaged?)</li>
  * </ol>
  *
  * <p>Run with {@code ./gradlew performanceTest --tests
@@ -194,6 +193,20 @@ class DispatchMemoryWorstCaseIT extends PerfTestBase {
         notes.put("postsAtImportReturn", String.valueOf(postsAtImportReturnHolder[0]));
         long backlogAtImportReturn = users - postsAtImportReturnHolder[0];
         notes.put("backlogAtImportReturn", String.valueOf(backlogAtImportReturn));
+
+        // --- Back-pressure assertions (the point of this scenario) ---
+        // 1) The bounded queue + blocking producer cap the in-flight backlog at
+        //    ~queueCapacity (256 default) + the 8 workers, regardless of N.
+        //    Before back-pressure this was ~9,824.
+        org.junit.jupiter.api.Assertions.assertTrue(backlogAtImportReturn <= 512,
+            "expected bounded backlog (<=512) under back-pressure, got " + backlogAtImportReturn);
+        // 2) Because the producer is paced to the slow sink, the import (sync
+        //    trigger) cannot return until the queue has drained most of the
+        //    10k. Its return time therefore reflects the slow drain (~240s),
+        //    not the ~4.9s it took with the unbounded queue.
+        org.junit.jupiter.api.Assertions.assertTrue(importMillisHolder[0] >= 100_000L,
+            "expected the import back-pressured by the slow sink (>=100s), got "
+                + importMillisHolder[0] + "ms");
 
         System.out.println("[perf] slow-sink-10k-200ms: " + users + " users @ "
             + delayMs + "ms sink; peakMemMiB=" + sampler.maxMiB()
