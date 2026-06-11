@@ -169,10 +169,17 @@ a concrete IdP that requires it.
   group), federated group-membership propagation is **gated on
   `group-patchOp=true`**: the `SCOPE_GROUP` worker no-ops when
   `ScimClient.isGroupMembershipDeltaEnabled()` is false, so the loop
-  cannot occur. The (rare) cost is that on `group-patchOp=false` a
-  federated user's group memberships are not propagated — documented in
+  cannot occur. The admin `GROUP_MEMBERSHIP`-event path shares the same
+  `replace` fallback, so `patchGroupMembership` also skips it for a
+  **federated** group on `group-patchOp=false` (detected via
+  `StorageId.isLocalStorage(group.getId())`; local groups still `replace`
+  as before, since their members are already local and don't re-import).
+  The (rare) cost is that on `group-patchOp=false` a federated group's
+  memberships are not propagated — documented in
   [`docs/ldap-federation-support.md`](ldap-federation-support.md). Verified
-  by `ScimLdapStorageMapperTest.skipsEntirelyWhenGroupPatchOpDisabled`.
+  by `ScimLdapStorageMapperTest.skipsEntirelyWhenGroupPatchOpDisabled` and
+  `EnsureGroupMembershipTest.groupPatchOpOff_federatedGroup_skipsReplace`
+  (local groups still replace per `groupPatchOpOff_localGroup_stillReplaces`).
 - **Concurrent group provisioning double-POST.** _Fixed (cluster-safe)._
   When several members of a not-yet-provisioned group were imported
   concurrently, each worker (its own transaction) queried the mapping,

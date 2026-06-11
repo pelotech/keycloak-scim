@@ -85,4 +85,34 @@ class EnsureGroupMembershipTest {
         verify(client, never()).provisionGroupForMembership(any(), any());
         verify(client, never()).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
     }
+
+    @Test
+    void groupPatchOpOff_federatedGroup_skipsReplace() {
+        // group-patchOp=false routes membership through a full `replace`, which
+        // enumerates members and can re-import a federated group's members
+        // (re-import loop). For a federated (non-local-storage) group it must
+        // skip the replace entirely.
+        var group = mock(GroupModel.class);
+        when(group.getId()).thenReturn("f:ldap-component:cn=engineers,ou=groups");
+        var client = spy(newClient(false, group));
+        doNothing().when(client).replace(any(), any());
+
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+
+        assertTrue(applied);
+        verify(client, never()).replace(any(), any());
+    }
+
+    @Test
+    void groupPatchOpOff_localGroup_stillReplaces() {
+        // A local group's members are already local, so `replace` is safe — keep it.
+        var group = mock(GroupModel.class);
+        when(group.getId()).thenReturn("grp-1");
+        var client = spy(newClient(false, group));
+        doNothing().when(client).replace(any(), any());
+
+        client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+
+        verify(client).replace(any(), any());
+    }
 }

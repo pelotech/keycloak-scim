@@ -20,6 +20,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
+import org.keycloak.storage.StorageId;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import io.github.resilience4j.core.IntervalFunction;
@@ -423,6 +424,21 @@ public class ScimClient {
         if (!this.model.get(GROUP_PATCH_OP_KEY, false)) {
             var group = session.groups().getGroupById(
                     session.getContext().getRealm(), groupId);
+            // group-patchOp=false propagates a membership change via a full-group
+            // `replace` (PUT the whole member list). For a FEDERATED (non-local)
+            // group, building that list enumerates the group's members and can
+            // re-import any not-yet-imported member (re-import loop). Local groups
+            // enumerate already-local members and are safe. So skip the replace
+            // for a federated group — membership for federated groups requires
+            // group-patchOp=true (see docs/ldap-federation-support.md).
+            if (group == null || !StorageId.isLocalStorage(group.getId())) {
+                if (group != null) {
+                    LOGGER.warnf("Skipping membership change for federated group %s: "
+                            + "group-patchOp=false cannot propagate it without a re-import "
+                            + "loop; requires group-patchOp=true", groupId);
+                }
+                return true;
+            }
             this.replace(factory, group);
             return true;
         }
