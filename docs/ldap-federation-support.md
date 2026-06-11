@@ -467,18 +467,24 @@ to at import time, the call sequence is:
    (RFC 7644) is sent for the user. This is the same delta-PATCH
    mechanism used by the `GROUP_MEMBERSHIP` event-listener path.
 
-Additions are re-asserted on every import, so periodic and full syncs
-self-heal any drift. **Removals** are handled too (see below): the same
-import hook also propagates a user being dropped from an LDAP group.
+Additions are delta-driven (see below): only a group the user has newly
+joined produces an ADD PATCH, so a steady-state re-import sends nothing.
+**Removals** are handled by the same hook — a user dropped from an LDAP
+group.
 
-### Membership removal
+### Membership add/remove diff
 
-A user removed from an LDAP group fires no `GROUP_MEMBERSHIP` event, so
-removal rides the import hook rather than an event. On each import the
-`SCOPE_GROUP` worker compares the user's *current* groups against a
-per-component record of the groups it last propagated for that user, and
-sends a single-member **REMOVE** PATCH for each group the user has left.
-Only removals are diff-driven; additions remain a full re-assert. A
+LDAP-driven membership changes fire no `GROUP_MEMBERSHIP` event, so they
+ride the import hook rather than an event. On each import the `SCOPE_GROUP`
+worker compares the user's *current* groups against a per-component record
+of the groups it last propagated for that user, and reconciles both
+directions as a delta: a single-member **ADD** PATCH for each newly-joined
+group (`current − stored`) and a single-member **REMOVE** PATCH for each
+group the user has left (`stored − current`). Groups already propagated are
+skipped, so an unchanged user (re-imported on every full sync) produces
+**zero** PATCHes — no per-sync re-assertion. The record is **success-tracked**:
+a skipped/failed ADD is left unrecorded and a failed REMOVE is retained, so
+either is retried on the next import (the lazy-import-lag self-heal). A
 REMOVE that fails after retries is retained in the record and retried on
 the next import, so a departed user does not silently linger in the SCIM
 group. The now-memberless group is reaped by the group-reconciler
@@ -506,9 +512,9 @@ covering both scopes is the supported configuration.
 On a one-shot lazy import (a single user login triggers federation
 fetch), the group-membership task may run before the user's SCIM
 mapping has been persisted and skip. This is the expected behaviour:
-the next periodic sync re-asserts all memberships, so the state
-converges without operator intervention. The accepted lag is one sync
-interval.
+a skipped ADD is not recorded in the propagated-group set, so the next
+sync re-attempts it (success-tracking), and the state converges without
+operator intervention. The accepted lag is one sync interval.
 
 ## Group reconciliation (member-presence)
 

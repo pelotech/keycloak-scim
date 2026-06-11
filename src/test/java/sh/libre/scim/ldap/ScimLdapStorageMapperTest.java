@@ -200,7 +200,8 @@ class ScimLdapStorageMapperTest {
         consumer.accept(client, ws);
 
         verify(client).patchGroupMembership(any(), eq("B"), eq("u1"), eq(false));
-        verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
+        // A is already propagated (in stored) -> NOT re-added (delta).
+        verify(client, never()).ensureGroupMembership(any(), any(), any());
         verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 1 && l.contains("A")));
     }
@@ -223,7 +224,10 @@ class ScimLdapStorageMapperTest {
     }
 
     @Test
-    void noMembershipChangeEmitsNoRemoval() {
+    void noMembershipChangeEmitsNoScimCalls() {
+        // Steady state: every group already propagated. This is the common case —
+        // a full sync re-fires the import hook for unchanged users — and must send
+        // ZERO SCIM PATCHes (Follow-up A: no redundant per-sync re-assertion).
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
         var client = mock(ScimClient.class);
@@ -236,8 +240,7 @@ class ScimLdapStorageMapperTest {
         consumer.accept(client, ws);
 
         verify(client, never()).patchGroupMembership(any(), any(), eq("u1"), eq(false));
-        verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
-        verify(client).ensureGroupMembership(any(), eq("B"), eq("u1"));
+        verify(client, never()).ensureGroupMembership(any(), any(), any());
     }
 
     @Test
@@ -291,6 +294,7 @@ class ScimLdapStorageMapperTest {
         var groupA = group("A");
         when(user.getGroupsStream()).thenReturn(Stream.of(groupA));            // current = {A}
         when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups());  // stored = {} (empty)
+        when(client.ensureGroupMembership(any(), eq("A"), eq("u1"))).thenReturn(true);
 
         consumer.accept(client, ws);
 
@@ -298,5 +302,47 @@ class ScimLdapStorageMapperTest {
         verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
         verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
                 argThat(l -> l.size() == 1 && l.contains("A")));
+    }
+
+    @Test
+    void addsOnlyTheGroupsNotAlreadyPropagated() {
+        // current = {A,B}, stored = {A}: A is already propagated, only B is added.
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = mock(ScimClient.class);
+        when(client.getComponentId()).thenReturn("comp-1");
+        var groupA = group("A");
+        var groupB = group("B");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A"));
+        when(client.ensureGroupMembership(any(), eq("B"), eq("u1"))).thenReturn(true);
+
+        consumer.accept(client, ws);
+
+        verify(client).ensureGroupMembership(any(), eq("B"), eq("u1"));        // added
+        verify(client, never()).ensureGroupMembership(any(), eq("A"), eq("u1")); // already propagated
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 2 && l.contains("A") && l.contains("B")));
+    }
+
+    @Test
+    void failedAddIsNotRecordedSoItRetries() {
+        // current = {A,B}, stored = {B}: A is newly added but fails -> not recorded;
+        // B stays propagated. next = {B} only, so A is re-attempted next import.
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = mock(ScimClient.class);
+        when(client.getComponentId()).thenReturn("comp-1");
+        var groupA = group("A");
+        var groupB = group("B");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("B"));
+        when(client.ensureGroupMembership(any(), eq("A"), eq("u1"))).thenReturn(false);
+
+        consumer.accept(client, ws);
+
+        verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 1 && l.contains("B")));
     }
 }

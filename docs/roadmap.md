@@ -34,8 +34,9 @@ touches both.
   user belongs to, the mapper first ensures the SCIM group exists
   (idempotent create; skipped when `group-patchOp=false` because the
   `replace` fallback already covers it), then adds the member via a
-  single-member delta PATCH. Additions only; membership is
-  re-asserted on every import. Requires the SCIM provider component
+  single-member delta PATCH. Additions are delta-driven (see
+  "membership removal" below — only newly-added groups PATCH).
+  Requires the SCIM provider component
   to enable both `propagation-user=true` and `propagation-group=true`
   — membership resolution looks up the user's SCIM mapping under the
   same component id, so a group-only component cannot resolve
@@ -46,9 +47,13 @@ touches both.
   same import hook: on each import the `SCOPE_GROUP` worker diffs the
   user's current groups against a per-component record of what it last
   propagated and sends a single-member REMOVE PATCH for each group the
-  user has left; additions stay re-asserted (only removals are
-  diff-driven). A REMOVE that fails after retries is retained and
-  retried on the next import. The bookkeeping is stored via
+  user has left and a single-member ADD for each newly-joined group.
+  **Both directions are delta-driven and success-tracked**, so a
+  steady-state re-import (a full sync re-fires the hook for every
+  unchanged user) sends zero SCIM PATCHes — eliminating the prior
+  per-sync re-assertion (measured +1 ADD/member/sync). A failed/skipped
+  ADD or REMOVE is left unrecorded/retained and retried on the next
+  import (the lazy-import-lag self-heal). The bookkeeping is stored via
   `UserFederatedStorageProvider` (key `scim-propagated-groups-<componentId>`),
   **not** as a user attribute: the diff runs in the post-commit async
   worker on a re-fetched federated user, whose attributes are read-only
@@ -146,28 +151,51 @@ a concrete IdP that requires it.
   now calls it instead of the member-enumerating `create`/`apply`.
   Re-measured: 2 invocations / ~1 PATCH per 2-member sync, zero
   re-import recursion on `scim-dispatch` threads (on the default
-  `group-patchOp=true` path). **Residual:** when `group-patchOp=false`,
+  `group-patchOp=true` path). The separate *steady-state* per-sync
+  re-assertion that remained after the loop fix — additions re-asserting
+  one ADD per member per group on every sync (measured +1 ADD/member/sync,
+  since Keycloak re-fires `onImportUserFromLDAP` for unchanged users) — is
+  **also now eliminated**: additions are delta-driven against the
+  federated-storage propagated-group set, so a no-change re-import sends
+  zero PATCHes (`ScimLdapStorageMapperTest.noMembershipChangeEmitsNoScimCalls`,
+  `ScimLdapGroupMembershipIT.unchangedResyncSendsNoRedundantMemberPatches`).
+  **Residual:** when `group-patchOp=false`,
   `ensureGroupMembership` defers to `patchGroupMembership`'s full
   `replace` fallback, which still calls `GroupAdapter.apply(GroupModel)`
   → `getGroupMembersStream`, so the loop can still occur on that
   non-default path. Unmeasured (the re-measurement covered
   `group-patchOp=true` only); fix the same way — provision/replace
   without enumerating members — if it proves to loop.
-- **Concurrent group provisioning can double-POST.** The runaway
-  re-import storm that amplified this race is now gone (see entry
-  above), but the underlying **check-then-act race** in
-  `ScimClient.create`/`sendCreate` persists independently: when
-  several members of a not-yet-provisioned group are imported
-  concurrently, each worker queries the mapping, finds none, and
-  POSTs `/Groups` before either saves the mapping. Re-measurement
-  after the re-import fix still shows 2 POSTs for a 2-member group;
-  `ScimLdapGroupMembershipIT` asserts the bounded `1..2` count. A
-  conformant SCIM server `409`s the duplicate (logged, no mapping
-  saved), so it is bounded and mostly benign, but a non-idempotent
-  server could end up with a duplicate group. Follow-up: make
-  first-time group provisioning atomic (e.g. insert-mapping-first
-  with rollback on POST failure, a DB guard, or per-group
-  serialization).
+- **Concurrent group provisioning double-POST.** _Fixed (cluster-safe)._
+  When several members of a not-yet-provisioned group were imported
+  concurrently, each worker (its own transaction) queried the mapping,
+  found none, and POSTed `/Groups` before any saved — a check-then-act
+  race that, against a non-deduping server, creates duplicate SCIM groups
+  and a duplicate mapping (a PK collision that rolls back the worker, or a
+  `NonUniqueResultException` on a later add). Surfaced sharply once
+  delta-driven additions removed the per-sync re-assertion that had
+  *masked* the resulting non-convergence. **Fix:**
+  `ScimClient.provisionGroupForMembership` does a lock-free pre-check, then
+  (only when the mapping is absent) takes a **pessimistic DB lock** —
+  `SELECT ... FOR UPDATE` on a single seeded row in a dedicated
+  `SCIM_PROVISION_LOCK` table (`ScimProvisionLock`), via the worker's own
+  `EntityManager` (`LockModeType.PESSIMISTIC_WRITE`) — re-checks, then POSTs
+  and saves the mapping in that same transaction. The lock is held until
+  the transaction commits, so it serializes provisioners **across cluster
+  nodes** and the next worker to acquire it sees the winner's committed
+  mapping and skips — exactly one POST, one mapping, regardless of server
+  dedup behavior. A single lock row (rather than per-group/striped) means a
+  worker holds at most one provisioning lock, so there is no lock-ordering
+  deadlock; the cost is that concurrent *first-time* provisioning
+  serializes (bounded — only until each distinct group is provisioned once;
+  steady state and already-mapped groups never lock). A nested
+  transaction was tried first and rejected — Keycloak's Quarkus runtime
+  does not give a freshly-nested session a JPA `EntityManagerFactory` from
+  an async worker thread (NPE). Verified by
+  `ScimLdapGroupMembershipIT.concurrentFirstProvisioningPostsGroupExactlyOnce`
+  (exactly one `POST /Groups` under a non-deduping always-201 stub — which
+  holds only if the DB lock serialized the provisioners and the winner's
+  commit-on-release made the mapping visible to the loser).
 - **Perf-rig sibling container.** The Testcontainers + Keycloak +
   WireMock setup routes SCIM traffic through an SSH tunnel
   (`host.testcontainers.internal`), adding ~25–30 ms per request to

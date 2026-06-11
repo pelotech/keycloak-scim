@@ -39,17 +39,26 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    `getGroupMembersStream` (the loop hazard) plus a SCIM read per group;
    a per-import SCIM read-back was rejected as chatty.
 
-2. **Additions stay as-is (re-assert every import); only removals are
-   diff-driven.** Making *additions* delta-only would forfeit the
-   "re-assert on every import" robustness the membership feature relies
-   on — e.g. the lazy-import lag where an add *skips* because the user's
-   SCIM mapping isn't committed yet (the case `ScimLdapGroupMembershipIT`
-   resyncs around). A delta-only add would record such a skip as done
-   and never retry. So the `getGroupsStream().forEach(ensureGroupMembership)`
-   add path is unchanged; the stored set is used **only** to compute
-   removals. Reducing the additions chattiness is a separate, already
-   tracked roadmap item ("redundant per-sync re-assertions") and is out
-   of scope here.
+2. **Both additions and removals are diff-driven, with success-tracking.**
+   The stored set records the groups *successfully* propagated for the
+   user; each import sends a single-member ADD only for `current − stored`
+   and a single-member REMOVE only for `stored − current`. A steady-state
+   re-import (the common case — a full sync re-fires this hook for every
+   unchanged user) therefore sends **zero** SCIM PATCHes, eliminating the
+   per-sync re-assertion chattiness.
+
+   The robustness that an earlier revision preserved by re-asserting every
+   import — the lazy-import lag where an add *skips* because the user's
+   SCIM mapping isn't committed yet — is instead preserved by
+   **success-tracking**: `ensureGroupMembership` returns whether the add
+   actually propagated, and a skipped/failed add is *not* recorded in the
+   stored set, so the next import re-attempts it. This requires the ADD
+   path's "no SCIM mapping" outcome to mean *not-applied* (retry), the
+   mirror of the REMOVE path where "no mapping" means *nothing to remove*
+   (done) — see Architecture. (Initial revision re-asserted all additions
+   every import and scoped this reduction to a separate roadmap item; it
+   was folded in once the federated-storage bookkeeping made it cheap and
+   the measurement confirmed the re-assertion was a real recurring cost.)
 
 3. **Storage = a per-component multi-valued attribute in Keycloak's
    federated-user storage** (`UserFederatedStorageProvider`), keyed
@@ -89,25 +98,24 @@ via `getGroupMembersStream` re-imports them and re-fires the hook).
    worker, against federated storage — never the read-only user proxy.
 
 4. **The diff runs in the `SCOPE_GROUP` worker, against the committed
-   view; removals are tracked, additions are re-asserted.** The worker
-   already re-fetches the user (`getUserById`) to read committed group
-   state. There it computes `current` (the user's current group ids),
-   reads `stored` (the per-component attribute), and reconciles
-   asymmetrically:
-   - **Removals (diff-driven):** `removed = stored − current` →
+   view; both directions are tracked.** The worker already re-fetches the
+   user (`getUserById`) to read committed group state. There it computes
+   `current` (the user's current group ids), reads `stored` (the
+   per-component propagated set), and reconciles both directions as deltas:
+   - **Removals:** `removed = stored − current` →
      `patchGroupMembership(isAdd=false)` per group.
-   - **Additions (full re-assert, unchanged):** `ensureGroupMembership`
-     for **every** group in `current` (not a diff — see Decision 2).
+   - **Additions:** `added = current − stored` → `ensureGroupMembership`
+     per group (groups already in `stored` are skipped — no PATCH).
 
-   It then records what it believes SCIM now reflects. Because additions
-   re-assert the whole of `current` every import, a failed add self-heals
-   on the next import; removals do **not** re-assert, so a removal that
-   fails must be retried explicitly. The new stored set is therefore
-   `current ∪ {groups whose REMOVE did not apply}` — a failed removal
-   stays in `stored` so the next import re-detects and retries it; a
-   removal that applied (or had no SCIM mapping to remove) is dropped.
-   This requires the removal call to signal whether it was applied (see
-   Architecture). Two independent properties of the write: it is keyed per
+   It then records what it believes SCIM now reflects. The new stored set
+   is `(current ∩ stored) ∪ {adds that applied} ∪ {removes that did not
+   apply}` — i.e. already-propagated current groups, plus newly-added
+   successes, plus failed removals (which are still in SCIM, to retry). A
+   failed/skipped add is simply not added (so the next import re-attempts
+   it); a failed remove is retained (so the next import re-attempts it); a
+   removal that applied, or had no SCIM mapping to remove, is dropped. This
+   requires *both* calls to signal whether they applied (see Architecture).
+   Two independent properties of the write: it is keyed per
    component, which is what makes it **race-free** under the worker fan-out
    (Decision 3); and when the new set is empty the federated-storage key is
    **removed** (`removeAttribute`) rather than written as an empty list,
@@ -140,44 +148,48 @@ dispatcher.runAsync(SCOPE_GROUP, (client, workerSession) -> {
     var sl     = fed.getAttributes(realm, userId).get(attr);
     var stored = sl == null ? new HashSet<String>() : new HashSet<>(sl);
 
-    // removals (new): groups we propagated but the user has left.
+    // removals: groups we propagated but the user has left.
     // keep any that did NOT apply, so the next import retries them.
     var kept = new HashSet<String>();
     stored.stream().filter(g -> !current.contains(g)).forEach(g -> {
-        boolean applied = client.patchGroupMembership(GroupAdapter::new, g, userId, false);
-        if (!applied) kept.add(g);
+        if (!client.patchGroupMembership(GroupAdapter::new, g, userId, false)) kept.add(g);
     });
 
-    // additions (unchanged): full re-assert of current memberships
-    current.forEach(g -> client.ensureGroupMembership(GroupAdapter::new, g, userId));
+    // additions: only groups not already propagated (delta), success-tracked.
+    var addedOk = new HashSet<String>();
+    current.stream().filter(g -> !stored.contains(g)).forEach(g -> {
+        if (client.ensureGroupMembership(GroupAdapter::new, g, userId)) addedOk.add(g);
+    });
 
-    // record what SCIM now reflects = current ∪ failed-removals
-    var next = new HashSet<>(current); next.addAll(kept);
+    // record SCIM state = already-propagated current ∪ new successes ∪ failed removals
+    var next = new HashSet<>(addedOk);
+    current.stream().filter(stored::contains).forEach(next::add);
+    next.addAll(kept);
     if (next.isEmpty()) fed.removeAttribute(realm, userId, attr);
     else fed.setAttribute(realm, userId, attr, new ArrayList<>(next));
 });
 ```
 
 The exact factoring (helper method vs. inline; the `getComponentId`
-accessor) is an implementation detail for the plan. To signal
-applied-or-not, the method's signature changes from `void` to `boolean`:
+accessor) is an implementation detail for the plan. To signal applied-or-not,
+`patchGroupMembership` changes from `void` to `boolean`, and
+`ensureGroupMembership` likewise returns whether the add propagated.
 
-```
-boolean patchGroupMembership(factory, groupId, userId, boolean isAdd)
-```
+The boolean is now **direction-aware on the "no SCIM mapping"
+(`NoResultException`) case** — the mirror that makes delta additions safe:
+- **REMOVE** with no mapping → **true** (nothing to remove; drop the group
+  from `stored`, don't retry a phantom forever).
+- **ADD** with no mapping → **false** (the add did *not* propagate — e.g. the
+  user's SCIM mapping isn't committed yet, the lazy-import lag — so leave it
+  unrecorded and retry next import).
 
-The returned value is **only consulted on the REMOVE path** (`isAdd=false`),
-where it means: **true** when the PATCH succeeded **or** there is no SCIM
-mapping to remove (the existing `NoResultException` skip — nothing to do, so
-a never-propagated group in `stored` is correctly dropped, not retried
-forever); **false** only on a genuine failure (the `!response.isSuccess()`
-branch, after resilience4j's 429/5xx retries are exhausted). The ADD path
-(`isAdd=true`) and the `group-patchOp=false` `replace` fallback simply return
-`true`; their callers — the admin `GROUP_MEMBERSHIP` event listener and the
-`ensureGroupMembership` add path — ignore the return entirely, so their
-behavior is unchanged apart from the now-`boolean` (for them, meaningless)
-signature. The REMOVE filter path (`members[value eq "..."]`) itself is
-unchanged.
+Implemented as `return !isAdd;` in the `NoResultException` branch. Otherwise
+**true** on a successful PATCH (and on the `group-patchOp=false` `replace`
+fallback), **false** only on `!response.isSuccess()` after retries.
+`ensureGroupMembership` returns `false` when the local group is missing, else
+the add's result. The admin `GROUP_MEMBERSHIP` event listener still ignores
+the return, so its behavior is unchanged. The REMOVE filter path
+(`members[value eq "..."]`) itself is unchanged.
 
 ### What does not change
 
@@ -219,21 +231,22 @@ unchanged.
 
 ## Testing
 
-- **Unit:** the removal diff — given a stored set and a current set,
-  `stored − current` yields exactly the groups to REMOVE, and an
-  unchanged membership yields none. (Pure set-diff assertion on the
-  worker's logic, mirroring the existing membership unit tests.)
-- **Integration (`ScimLdapGroupMembershipIT` or a sibling):** a federated
-  user in an LDAP group syncs (member present in SCIM); remove the user
-  from the LDAP `groupOfNames`; sync again; assert a single-member
-  **REMOVE** PATCH fires for that user/group and the stored attribute no
-  longer lists the group.
-- **Guard — idempotence:** a sync with **no** membership change emits
-  **no** REMOVE PATCH (the stored set already equals current) — protects
-  against re-removing on every sync.
+- **Unit:** the diff — `stored − current` yields exactly the groups to
+  REMOVE, `current − stored` exactly the groups to ADD, and an unchanged
+  membership yields neither. (Set-diff assertions on the worker's logic.)
+- **Integration (`ScimLdapGroupMembershipIT`):** a federated user in an
+  LDAP group syncs (member present in SCIM); remove the user from the LDAP
+  `groupOfNames`; sync again; assert a single-member **REMOVE** PATCH
+  fires for that user/group.
+- **Guard — no per-sync re-assertion:** a sync with **no** membership
+  change emits **no** SCIM PATCH at all (neither ADD nor REMOVE — both
+  diffs are empty); the integration-level mirror asserts an unchanged
+  full-sync adds zero member PATCHes. This is the Follow-up A guard.
+- **Guard — add success-tracking:** a skipped/failed ADD is **not**
+  recorded, so the next import re-attempts it (the lazy-import-lag
+  self-heal); a successful ADD is recorded and not re-sent.
 - **Guard — failed-removal retry:** when the REMOVE returns `false`, the
-  group stays in the stored attribute and the next import re-emits the
-  REMOVE (unit-level, with a stubbed failing `patchGroupMembership`).
+  group stays in the stored set and the next import re-emits the REMOVE.
 - **Guard — loop safety:** the diff path must not enumerate a group's
   members. The central hazard is that someone "optimizes" the diff toward
   `getGroupMembersStream` and reintroduces the re-import loop. Assert the
@@ -243,7 +256,6 @@ unchanged.
 
 ## Non-goals
 
-- Reducing the additions re-assertion chattiness (separate roadmap item).
 - A reconciler-based membership pass (rejected — `getGroupMembersStream`
   loop hazard + per-group SCIM reads).
 - Deleting the now-empty group (handled by the member-presence reconciler,

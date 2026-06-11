@@ -27,6 +27,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ScimLdapGroupMembershipIT extends IntegrationTestBase {
 
+    /**
+     * Restore the seeded {@code engineers} membership ({@code alice} + {@code bob})
+     * before each test. The OpenLDAP container is shared across the class's test
+     * methods and is not reset between them, and {@code removingUserFromLdapGroupEmitsRemovePatch}
+     * drops alice from the group — without this, every test running after it would
+     * see alice missing from engineers and never converge.
+     */
+    @org.junit.jupiter.api.BeforeEach
+    void restoreSeededGroupMembers() throws Exception {
+        setLdapAttribute("cn=engineers,ou=groups,dc=test,dc=local", "member",
+            "uid=alice,ou=users,dc=test,dc=local",
+            "uid=bob,ou=users,dc=test,dc=local");
+    }
+
     @Test
     void federatedUserGroupMembershipIsProvisionedAndAdded() {
         stubScimUserCreateOk();
@@ -43,9 +57,9 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
     }
 
     @Test
-    void groupProvisionedOnceAcrossMultipleMembers() {
+    void concurrentFirstProvisioningPostsGroupExactlyOnce() {
         stubScimUserCreateOk();
-        stubScimGroupCreateOk();
+        stubScimGroupCreateOk(); // NON-deduping server: always 201 (the adversarial case)
         stubScimGroupPatchOk();
 
         var r = newRealmWithScimAndLdapGroups(cfg -> {
@@ -56,28 +70,25 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
 
         syncUntilMembershipsAdded(r);
 
-        // The group create short-circuits on its local mapping, so re-syncs do
-        // NOT re-POST it — across the resync loop above the count stays bounded
-        // by the member count, not one-per-sync.
-        //
-        // Known limitation (asserted as a bound, not strict equality): when
-        // multiple members of a not-yet-provisioned group are imported
-        // concurrently in the FIRST sync, ScimClient.create's short-circuit is
-        // check-then-act (query mapping -> POST -> save mapping) and is not
-        // atomic across the async dispatch workers, so they can race and each
-        // POST once before either saves — up to one redundant POST per
-        // concurrently-imported member (observed as 2 on Keycloak 26's sync
-        // timing; 1 on 25). A conformant SCIM server 409s the duplicate; making
-        // concurrent group provisioning atomic is a tracked follow-up
-        // (docs/roadmap.md). So we assert the group is provisioned and bounded
-        // by the member count (alice + bob = 2) — proving re-syncs don't
-        // re-POST — rather than strictly once.
+        // Direct verification of atomic first-provisioning AND its load-bearing
+        // mechanism — the nested, immediately-committed mapping write. alice and
+        // bob are imported concurrently and both first-provision engineers. The
+        // server stub returns 201 to EVERY POST (a non-deduping server), so SCIM
+        // imposes no dedup of its own: the only thing that can hold the count to
+        // exactly 1 is the in-process provisioning lock combined with the winner
+        // persisting its mapping in a NESTED transaction that COMMITS before the
+        // lock is released — so the second worker, in its own transaction, reads
+        // the committed mapping and skips its POST. If the persist were in the
+        // worker's outer (not-yet-committed) transaction, the second worker would
+        // miss it and POST again -> count 2 (or a duplicate-PK rollback). Exactly
+        // 1 proves the nested commit is visible to the other worker before unlock.
         int groupPosts = wireMock.countRequestsMatching(
             postRequestedFor(urlPathEqualTo("/Groups")).build()
         ).getCount();
-        assertTrue(groupPosts >= 1 && groupPosts <= 2,
-            "engineers group must be provisioned 1..2 times (>1 only via the concurrent "
-                + "first-provisioning race, never once-per-resync), got " + groupPosts);
+        assertTrue(groupPosts == 1,
+            "engineers must be provisioned with EXACTLY one POST /Groups under concurrent "
+                + "first-provisioning (atomic provisioning + nested-commit visibility), got "
+                + groupPosts);
     }
 
     @Test
@@ -124,6 +135,34 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
             "a single sync must add only bounded member PATCHes (loop regression -> thousands), got " + delta);
     }
 
+    @Test
+    void unchangedResyncSendsNoRedundantMemberPatches() throws Exception {
+        stubScimUserCreateOk();
+        stubScimGroupCreateOk();
+        stubScimGroupPatchOk();
+
+        var r = newRealmWithScimAndLdapGroups(cfg -> {
+            cfg.putSingle("propagation-user", "true");
+            cfg.putSingle("propagation-group", "true");
+            cfg.putSingle("group-patchOp", "true");
+        });
+
+        // Converge: both members propagated.
+        syncUntilMembershipsAdded(r);
+        int addsAfterConverge = memberAddPatchCount();
+
+        // A full sync with NO LDAP changes still re-fires the import hook for every
+        // unchanged user, but additions are delta-driven against the propagated-group
+        // set, so it must send ZERO new member PATCHes (Follow-up A: no redundant
+        // per-sync re-assertion).
+        r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+        sleepQuietly(10);
+
+        assertTrue(memberAddPatchCount() == addsAfterConverge,
+            "an unchanged full sync must add no member PATCHes; was " + addsAfterConverge
+                + ", now " + memberAddPatchCount());
+    }
+
     /**
      * Drives the federated import to a deterministic end state: both users
      * provisioned, the group provisioned, and both memberships added.
@@ -154,14 +193,18 @@ class ScimLdapGroupMembershipIT extends IntegrationTestBase {
 
         // Member-add propagation is async and eventually-consistent: a PATCH
         // skips if it runs before the user's mapping is committed (the
-        // documented lazy-import lag, "converges on the next sync"). A FIXED
-        // number of follow-up syncs is not reliable on a cold, resource-
-        // constrained CI runner where mapping commits and the async dispatch
-        // pool lag. So re-sync until both memberships are actually observed (or
-        // a generous deadline) — nudging convergence rather than assuming N
-        // syncs suffice. Idempotent: re-imports replace, the group create
-        // short-circuits on its mapping, member-adds the server already has are
-        // no-ops, so POST /Groups stays at 1.
+        // documented lazy-import lag, "converges on the next sync"). So re-sync
+        // until both memberships are actually observed (or a generous deadline) —
+        // nudging convergence rather than assuming N syncs suffice.
+        //
+        // Additions are delta-driven, so each member's ADD fires exactly ONCE
+        // (a skip records nothing and retries; a success is recorded and never
+        // re-sent). Reaching `>= 2` requires BOTH members to converge — there is
+        // no re-assertion padding the count — so re-sync until both land or a
+        // generous deadline. Re-import is idempotent: first-time group
+        // provisioning is atomic (exactly one POST /Groups even under concurrent
+        // members) and an already-propagated member is skipped, so no redundant
+        // PATCHes fire across the resync loop.
         long deadline = System.currentTimeMillis() + 120_000;
         while (memberAddPatchCount() < 2 && System.currentTimeMillis() < deadline) {
             r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");

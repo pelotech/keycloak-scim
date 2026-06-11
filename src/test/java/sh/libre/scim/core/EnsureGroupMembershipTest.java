@@ -12,6 +12,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.GroupModel;
@@ -53,8 +55,9 @@ class EnsureGroupMembershipTest {
         doNothing().when(client).provisionGroupForMembership(any(), eq(group));
         doReturn(true).when(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
 
-        client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
+        boolean applied = client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
+        assertTrue(applied); // propagated -> caller records it in the propagated-group set
         InOrder order = inOrder(client);
         order.verify(client).provisionGroupForMembership(any(), eq(group));
         order.verify(client).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
@@ -76,8 +79,9 @@ class EnsureGroupMembershipTest {
     void missingLocalGroup_isSkipped() {
         var client = spy(newClient(true, null));
 
-        client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
+        boolean applied = client.ensureGroupMembership(GroupAdapter::new, "grp-1", "user-1");
 
+        assertFalse(applied); // not propagated -> caller leaves it unrecorded and retries
         verify(client, never()).provisionGroupForMembership(any(), any());
         verify(client, never()).patchGroupMembership(any(), eq("grp-1"), eq("user-1"), eq(true));
     }
