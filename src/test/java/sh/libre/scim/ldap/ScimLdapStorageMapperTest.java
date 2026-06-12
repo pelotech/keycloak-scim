@@ -62,31 +62,13 @@ class ScimLdapStorageMapperTest {
     }
 
     @Test
-    @SuppressWarnings({"unchecked", "rawtypes"})
     void onImportRoutesCreateWhenIsCreateTrue() {
-        when(user.getId()).thenReturn("user-id-1");
         mapper.onImportUserFromLDAP(ldapObject, user, realm, true);
 
-        // Captures the BiConsumer<ScimClient, KeycloakSession> submitted to
-        // runAsync. Invokes it with mocks to verify it routes to client.create.
-        // The lambda re-fetches the user from its worker session by id —
-        // wire that lookup to return our same mock user.
-        ArgumentCaptor<BiConsumer> captor = ArgumentCaptor.forClass(BiConsumer.class);
-        verify(dispatcher).runAsync(eq(ScimDispatcher.SCOPE_USER), captor.capture());
-
-        var workerSession = mock(KeycloakSession.class);
-        var workerCtx = mock(KeycloakContext.class);
-        var workerRealm = mock(RealmModel.class);
-        var workerUsers = mock(UserProvider.class);
-        when(workerSession.getContext()).thenReturn(workerCtx);
-        when(workerCtx.getRealm()).thenReturn(workerRealm);
-        when(workerSession.users()).thenReturn(workerUsers);
-        when(workerUsers.getUserById(workerRealm, "user-id-1")).thenReturn(user);
-
-        var client = mock(ScimClient.class);
-        ((BiConsumer<ScimClient, KeycloakSession>) captor.getValue()).accept(client, workerSession);
-        verify(client).create(
-            ArgumentMatchers.<AdapterFactory<UserModel, User, UserAdapter>>any(), eq(user));
+        // The create path now calls dispatchUserCreate directly — no BiConsumer
+        // capture needed. dispatchUserCreate handles both bulk and per-op routing
+        // internally; the mapper's responsibility ends at handing off the user.
+        verify(dispatcher).dispatchUserCreate(user);
     }
 
     @Test

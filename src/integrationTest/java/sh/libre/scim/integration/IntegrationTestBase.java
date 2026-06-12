@@ -116,7 +116,12 @@ public abstract class IntegrationTestBase {
 
     @BeforeAll
     static void setUpInfra() {
-        wireMock = new WireMockServer(options().dynamicPort());
+        // Register the /Bulk response transformer globally at construction time.
+        // It is stateless and applies only to stubs that reference it by name
+        // ("scim-bulk"), so it does not affect other (per-op) stubs.
+        wireMock = new WireMockServer(options()
+            .dynamicPort()
+            .extensions(new ScimBulkResponseTransformer()));
         wireMock.start();
         Testcontainers.exposeHostPorts(wireMock.port());
         openldap.start();
@@ -383,6 +388,92 @@ public abstract class IntegrationTestBase {
                     }""".formatted(UUID.randomUUID()))));
     }
 
+    /**
+     * Stubs {@code POST /Bulk} to return HTTP 200 with a SCIM BulkResponse whose
+     * {@code Operations[]} echo each request op's {@code bulkId} (the KC-generated
+     * user id) with {@code status:201} and a fresh {@code id}/{@code location}.
+     *
+     * <p>The response body is generated dynamically from the request body by
+     * {@link ScimBulkResponseTransformer}, because the kcUserIds are not known to
+     * the test ahead of time. Crucially the per-op {@code "id"} field is what the
+     * SDK's {@code BulkResponseOperation.getResourceId()} reads (it maps to the
+     * RFC7643 {@code id} attribute, NOT {@code location}); the plugin only saves a
+     * mapping when that resource id is present, so the stub emits an explicit
+     * {@code "id"} per op.
+     */
+    protected void stubScimBulkOk() {
+        stubScimBulkOk(0);
+    }
+
+    /**
+     * Like {@link #stubScimBulkOk()} but the response carries a fixed per-request
+     * delay, modelling a slow downstream SCIM sink. The delay is applied once per
+     * {@code POST /Bulk} request — i.e. once per <em>batch</em> of up to K ops —
+     * so it models the round-trip latency amortized across the batch, NOT any
+     * per-op server processing cost. Used by the latency-sweep perf characterization.
+     */
+    protected void stubScimBulkOk(int delayMs) {
+        var response = aResponse()
+            .withStatus(200)
+            .withHeader("Content-Type", "application/scim+json")
+            .withTransformers(ScimBulkResponseTransformer.NAME);
+        if (delayMs > 0) {
+            response = response.withFixedDelay(delayMs);
+        }
+        wireMock.stubFor(post(urlPathEqualTo("/Bulk")).willReturn(response));
+    }
+
+    /** Current count of POST /Bulk requests WireMock has received. */
+    protected int bulkPostCount() {
+        return wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Bulk")).build()).getCount();
+    }
+
+    /** Current count of per-op POST /Users requests WireMock has received. */
+    protected int perUserPostCount() {
+        return wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
+    }
+
+    /** Polls until WireMock has seen at least {@code atLeast} POST /Bulk requests. */
+    protected void awaitBulkPostCount(int atLeast) {
+        await().atMost(60, SECONDS).untilAsserted(() -> {
+            int bulks = bulkPostCount();
+            assertTrue(bulks >= atLeast,
+                "expected at least " + atLeast + " POST /Bulk request(s), got " + bulks);
+        });
+    }
+
+    /**
+     * Blocks until the POST /Bulk count has stopped changing — i.e. the async
+     * bulk lane has drained and all mappings are persisted. Polls the count and
+     * returns once it has been stable across a short settle window. Used before
+     * re-syncing so first-sync mapping persistence does not race the re-import.
+     */
+    protected void awaitBulkPostCountStable() {
+        await().atMost(90, SECONDS).pollInterval(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .until(new java.util.concurrent.Callable<Boolean>() {
+                private int last = -1;
+                private int stableReads = 0;
+
+                @Override
+                public Boolean call() {
+                    int now = bulkPostCount();
+                    if (now == last) {
+                        stableReads++;
+                    } else {
+                        stableReads = 0;
+                        last = now;
+                    }
+                    // Require it to be non-zero and unchanged across a generous
+                    // window: the bulk lane drains asynchronously and can have a
+                    // mid-sync lull, so a short stability window can fire while a
+                    // straggler op is still queued. ~6s of no change is safe.
+                    return now > 0 && stableReads >= 12;
+                }
+            });
+    }
+
     protected void stubScimUserUpdateOk() {
         wireMock.stubFor(put(urlMatching("/Users/.*"))
             .willReturn(aResponse()
@@ -520,6 +611,43 @@ public abstract class IntegrationTestBase {
     }
 
     // ---------- LDAP manipulation ----------
+
+    /**
+     * Bulk-add N inetOrgPerson entries under {@code ou=users,dc=test,dc=local}.
+     * Returns the list of usernames created (uid={@code prefix}<i>i</i>).
+     */
+    protected List<String> seedLdapUsers(String prefix, int count) throws NamingException {
+        var ctx = new InitialDirContext(newLdapEnv());
+        var created = new ArrayList<String>(count);
+        try {
+            for (int i = 0; i < count; i++) {
+                String uid = prefix + i;
+                var attrs = new BasicAttributes();
+                var oc = new BasicAttribute("objectClass");
+                oc.add("inetOrgPerson");
+                oc.add("organizationalPerson");
+                oc.add("person");
+                oc.add("top");
+                attrs.put(oc);
+                attrs.put("cn", uid + " perf");
+                attrs.put("sn", "perf");
+                attrs.put("givenName", uid);
+                attrs.put("uid", uid);
+                attrs.put("mail", uid + "@perf.test");
+                attrs.put("userPassword", "perfpass");
+                ctx.createSubcontext("uid=" + uid + ",ou=users,dc=test,dc=local", attrs);
+                created.add(uid);
+            }
+        } finally {
+            ctx.close();
+        }
+        return created;
+    }
+
+    /** Convenience: build the LDAP DN for a uid under the seeded users OU. */
+    protected static String ldapUserDn(String uid) {
+        return "uid=" + uid + ",ou=users,dc=test,dc=local";
+    }
 
     protected Hashtable<String, String> newLdapEnv() {
         var env = new Hashtable<String, String>();

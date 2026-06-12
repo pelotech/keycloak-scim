@@ -31,34 +31,6 @@ abstract class PerfTestBase extends IntegrationTestBase {
         return seedLdapUsers("u", count);
     }
 
-    protected List<String> seedLdapUsers(String prefix, int count) throws NamingException {
-        var ctx = new InitialDirContext(newLdapEnv());
-        var created = new ArrayList<String>(count);
-        try {
-            for (int i = 0; i < count; i++) {
-                String uid = prefix + i;
-                var attrs = new BasicAttributes();
-                var oc = new BasicAttribute("objectClass");
-                oc.add("inetOrgPerson");
-                oc.add("organizationalPerson");
-                oc.add("person");
-                oc.add("top");
-                attrs.put(oc);
-                attrs.put("cn", uid + " perf");
-                attrs.put("sn", "perf");
-                attrs.put("givenName", uid);
-                attrs.put("uid", uid);
-                attrs.put("mail", uid + "@perf.test");
-                attrs.put("userPassword", "perfpass");
-                ctx.createSubcontext("uid=" + uid + ",ou=users,dc=test,dc=local", attrs);
-                created.add(uid);
-            }
-        } finally {
-            ctx.close();
-        }
-        return created;
-    }
-
     /**
      * Creates a groupOfNames entry under {@code ou=groups,dc=test,dc=local} with
      * the given member DNs. Assumes the {@code ou=groups} OU already exists in
@@ -82,11 +54,6 @@ abstract class PerfTestBase extends IntegrationTestBase {
         } finally {
             ctx.close();
         }
-    }
-
-    /** Convenience: build the LDAP DN for a uid under the seeded users OU. */
-    protected static String ldapUserDn(String uid) {
-        return "uid=" + uid + ",ou=users,dc=test,dc=local";
     }
 
     /** Hard-deletes seeded entries. Caller passes in DNs to remove. Errors are swallowed. */

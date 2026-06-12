@@ -239,6 +239,49 @@ The plugin will now fan out user/group changes from each path
 (admin REST, self-service, LDAP federation) to every configured
 SCIM provider component in the realm.
 
+## Performance: SCIM `/Bulk` batching (opt-in)
+
+By default the plugin issues one HTTP request per resource change,
+dispatched asynchronously over a **bounded, back-pressured** worker
+pool — so a large federation sync or a slow SCIM sink paces the
+producer instead of growing Keycloak's heap without bound. For
+**federation-sync user creates**, you can additionally coalesce many
+`POST /Users` into a single SCIM `/Bulk` request.
+
+**Turning it on/off — off by default.** Per SCIM provider component,
+set `bulk-enabled = true` (*Admin Console → your SCIM provider →
+config*, or via the component API). Tune the batch size with
+`-Dscim.dispatch.bulkBatchSize=<K>` on the Keycloak process (default
+`20`; set it **≤ your SCIM server's advertised `maxOperations`**).
+Only the LDAP-import **create** path is batched — replace, delete, and
+group-membership stay one-request-each. Requires a SCIM server that
+supports `/Bulk`.
+
+**Does it pay off? Measured, not assumed.** `BulkLatencySweepIT`
+(`./gradlew performanceTest --tests 'sh.libre.scim.perf.BulkLatencySweepIT'`)
+sweeps bulk {on, off} × sink round-trip {5, 50, 200 ms} over a
+2000-user sync, 5 runs per cell:
+
+| Sink round-trip | per-op sync | `/Bulk` sync | Result |
+| ---: | ---: | ---: | --- |
+| 200 ms | 53.4 s | 7.5 s | **~7× faster** |
+| 50 ms | 14.1 s | 5.8 s | **~2.4× faster** |
+| 5 ms | 2.6 s | 6.1 s | **slower** — batching overhead exceeds the round-trips it saves |
+
+The payoff scales with **network distance to your SCIM sink**: enable
+`/Bulk` for remote / high-latency targets; for local or very-low-latency
+sinks the per-op lane is already faster, which is why it stays off by
+default. Peak memory is **not** a differentiator between the two lanes
+(both add only single- to low-double-digit MiB per sync, dwarfed by
+Keycloak's own footprint).
+
+> These wins are a **lower bound**: the test harness (WireMock) models
+> the network round-trip only, not a real SCIM server's per-request
+> processing overhead, which `/Bulk` also amortizes. Full methodology,
+> the run-to-run variance, the memory analysis, and the bounded-queue
+> back-pressure design are in
+> [`docs/performance.md`](docs/performance.md).
+
 ## Documentation
 
 - [`docs/configuration.md`](docs/configuration.md) — every
@@ -248,7 +291,8 @@ SCIM provider component in the realm.
 - [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
   — design doc for LDAP federation propagation and the reconciler.
 - [`docs/performance.md`](docs/performance.md) — scale measurements,
-  bottleneck analysis, async dispatch design.
+  bottleneck analysis, async dispatch + bounded-queue back-pressure
+  design, and the SCIM `/Bulk` latency-sweep characterization.
 - [`docs/releasing.md`](docs/releasing.md) — release runbook
   (release-please flow, OCI image publication, RC dry-runs).
 

@@ -51,6 +51,7 @@ admin REST API (`POST /admin/realms/{realm}/components` with
 | --- | --- | --- | --- |
 | `propagation-user` | bool | `true` | When false, user create/update/delete events do not result in SCIM calls. Useful for groups-only deployments or for temporarily disabling user propagation during operator maintenance. |
 | `propagation-group` | bool | `true` | Same toggle for group create/update/delete and group-membership changes. |
+| `bulk-enabled` | bool | `false` | When true, federation-sync user **create** operations are coalesced into SCIM `/Bulk` requests instead of one `POST /Users` each. Requires the SCIM server to support `/Bulk`; set `scim.dispatch.bulkBatchSize` ≤ the server's advertised `maxOperations`. Only the LDAP-import create path is batched — replace/delete/membership stay per-op. Pays off most against slow/high-RTT sinks and can be slightly *slower* than per-op against a fast local sink (see `docs/performance.md`), hence default off. |
 
 Both toggles apply across all paths: admin-REST events,
 LDAP-federation imports (when the `scim-ldap-sync` mapper is attached),
@@ -249,7 +250,10 @@ Tunables read from `System.getProperty(...)` at runtime. Set via
 
 | Property | Default | Where used | Description |
 | --- | --- | --- | --- |
-| `scim.dispatch.threads` | `8` | `ScimDispatcher` | Size of the worker pool that processes async SCIM operations (LDAP-import propagation and reconciler-batch deletes). Pool is JVM-global. Higher values increase parallel throughput against the SCIM sink at the cost of more concurrent connections. Most SCIM servers tolerate 8–16; raise only if you have headroom on both sides. |
+| `scim.dispatch.threads` | `8` | `ScimDispatcher` | Size of the worker pool that processes async SCIM operations (LDAP-import propagation and reconciler-batch deletes). Pool is JVM-global. Also sizes the `/Bulk` lane's worker pool when `bulk-enabled` is on — so with bulk enabled the total dispatch thread budget is roughly double (one pool per lane). Higher values increase parallel throughput against the SCIM sink at the cost of more concurrent connections. Most SCIM servers tolerate 8–16; raise only if you have headroom on both sides. |
+| `scim.dispatch.queueCapacity` | `256` | `ScimDispatcher` / bulk lane | Bounded queue depth between producers and the worker pool (each lane has its own queue of this size). When full, the producer **blocks** (back-pressure) rather than buffering unboundedly — this is what bounds the dispatch memory footprint to ~capacity tasks regardless of sync size. Raising it loosens the memory bound for more burst headroom. |
+| `scim.dispatch.blockWarnMs` | `10000` | `ScimDispatcher` / bulk lane | How long a producer may stay blocked on a full queue before each back-pressure WARN log (and counter bump). A rising count signals a slow/wedged SCIM sink throttling syncs. |
+| `scim.dispatch.bulkBatchSize` | `20` | bulk lane | Max SCIM operations coalesced into one `/Bulk` request (K). Must be ≤ the SCIM server's advertised `maxOperations` — an oversize batch draws a whole-request `413`/`400` and that batch's creates are lost this round (the operator sets K conservatively; there is no auto-discovery). Only relevant when a component has `bulk-enabled=true`. |
 | `scim.tls.insecureHostnameVerification` | `false` | `ScimClient` | When `true`, disables TLS hostname verification on outbound SCIM requests — any cert presented by the SCIM endpoint will be accepted regardless of CN/SAN. Escape hatch for dev environments, internal CAs with CN drift, or explicitly-trusted self-signed setups. **Leave `false` in production**: with verification off, a MITM presenting a valid cert for any domain can impersonate the SCIM endpoint and harvest bearer tokens. |
 | `keycloak.image` | `quay.io/keycloak/keycloak:25.0.6` | integration tests | Override the Keycloak container image used by the test harness. Used by the CI matrix to verify both 25.x and 26.x. Production-irrelevant. |
 
@@ -261,8 +265,12 @@ Tunables read from `System.getProperty(...)` at runtime. Set via
   for this would invite per-deployment drift without a clear win.
 - **HTTP timeouts.** Connect / request / socket all 30 s. Hardcoded
   in `ScimClient.genScimClientConfig`.
-- **`/Bulk` endpoint usage.** The plugin issues one HTTP request per
-  resource. SCIM `/Bulk` batching is a deferred 1.x feature.
+- **`/Bulk` scope.** SCIM `/Bulk` batching is available for the
+  federation-sync user **create** path only (opt-in via the
+  `bulk-enabled` component flag; see above). Replace, delete, and
+  group-membership operations still issue one HTTP request each —
+  extending `/Bulk` to them is a deferred follow-up pending the
+  characterization data in `docs/performance.md`.
 - **Async dispatch on/off.** Always async on the LDAP-import path
   (since v0.x perf work). The synchronous `ScimDispatcher.run` is
   preserved for the reconciler endpoint's "return a count
