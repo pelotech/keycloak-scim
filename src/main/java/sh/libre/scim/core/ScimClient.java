@@ -702,6 +702,13 @@ public class ScimClient {
         }
 
         var bulk = response.getResource();
+        if (bulk == null) {
+            // Conformant servers return a body on a 2xx /Bulk; guard the degenerate
+            // empty/unparseable-body case so it doesn't NPE the whole batch.
+            LOGGER.warnf("SCIM /Bulk returned HTTP %d with no parseable body — %d create(s) lost this round",
+                response.getHttpStatus(), pending.size());
+            return new BulkResult(0, skipped, pending.size());
+        }
         int created = 0, failed = 0;
         for (var adapter : pending) {
             var maybe = bulk.getByBulkId(adapter.getId());
