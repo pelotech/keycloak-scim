@@ -14,7 +14,7 @@
 
 ## File Structure
 
-- **Create** `src/main/java/sh/libre/scim/core/BulkUserOp.java` — immutable op record `(realmId, componentId, kcUserId, scimUserJson)`. (Note: `realmId` added vs the spec sketch — the worker needs it to open its session/realm context.)
+- **Create** `src/main/java/sh/libre/scim/core/BulkUserOp.java` — immutable op record `(realmId, componentId, kcUserId)` — identifiers only; the worker re-fetches + builds the payload post-commit (gate-spike finding: email/name aren't populated on the import thread).
 - **Create** `src/main/java/sh/libre/scim/core/BackpressureSupport.java` — shared blocking-put helper; `BlockingPolicy` refactored to delegate.
 - **Create** `src/main/java/sh/libre/scim/core/ScimBulkLane.java` — bounded queue + consumer threads + drain-batch loop.
 - **Modify** `src/main/java/sh/libre/scim/core/ScimClient.java` — add `bulkCreateUsers(List<BulkUserOp>)` + a `BulkResult` record.
@@ -282,14 +282,15 @@ git commit -m "refactor(dispatch): extract shared BackpressureSupport.blockingPu
 package sh.libre.scim.core;
 
 /**
- * One queued, pre-serialized SCIM user-create operation, coalescable by
- * {@link ScimBulkLane}. The {@code scimUserJson} is built eagerly from the live
- * UserModel at import time, so the consumer never re-fetches. {@code realmId} +
- * {@code componentId} let the worker open its session and locate the SCIM
- * component; {@code kcUserId} is the bulkId correlation handle and the mapping
- * local id.
+ * One queued SCIM user-create operation, coalescable by {@link ScimBulkLane} —
+ * identifiers only, no payload. The bulk worker re-fetches the user by id and
+ * builds the SCIM JSON in its own post-commit session (the gate spike showed
+ * email/name are not yet populated on the import thread, so the payload cannot
+ * be built eagerly). {@code realmId} + {@code componentId} let the worker open
+ * its session and locate the SCIM component; {@code kcUserId} is the bulkId
+ * correlation handle and the mapping local id.
  */
-record BulkUserOp(String realmId, String componentId, String kcUserId, String scimUserJson) {}
+record BulkUserOp(String realmId, String componentId, String kcUserId) {}
 ```
 
 - [ ] **Step 2: Compile**
@@ -319,60 +320,29 @@ Mirror `GroupMembershipPatchTest` (real `ScimRequestBuilder` over a dummy base U
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.when;
 
-import jakarta.persistence.EntityManager;
-import jakarta.persistence.TypedQuery;
+import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
+import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import java.util.List;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.keycloak.component.ComponentModel;
-import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.KeycloakContext;
-import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RealmModel;
-import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
 
-@ExtendWith(MockitoExtension.class)
-@MockitoSettings(strictness = Strictness.LENIENT)
+/**
+ * Pins the wire shape of the bulk-create request via a real {@link ScimRequestBuilder}
+ * and {@code BulkBuilder.getResource()} — no HTTP, no Keycloak (mirrors
+ * GroupMembershipPatchTest). The re-fetch / apply / filter / mapping-save path
+ * needs a live session and is covered by the integration scenario (Task 8).
+ */
 class ScimClientBulkTest {
-
-    @Mock KeycloakSession session;
-    @Mock KeycloakContext context;
-    @Mock RealmModel realm;
-    @Mock ComponentModel model;
-    @Mock JpaConnectionProvider jpa;
-    @Mock EntityManager em;
-    @Mock TypedQuery<sh.libre.scim.jpa.ScimResource> query;
-
-    @BeforeEach
-    void setUp() {
-        when(session.getContext()).thenReturn(context);
-        when(context.getRealm()).thenReturn(realm);
-        when(realm.getId()).thenReturn("realm-1");
-        when(model.getId()).thenReturn("component-1");
-        when(model.get("endpoint")).thenReturn("https://scim.example/scim/v2");
-        when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
-        when(jpa.getEntityManager()).thenReturn(em);
-        // idempotency pre-filter: no existing mappings
-        when(em.createNamedQuery("findById", sh.libre.scim.jpa.ScimResource.class)).thenReturn(query);
-        when(query.setParameter(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any()))
-            .thenReturn(query);
-        when(query.getResultList()).thenReturn(List.of());
-    }
 
     @Test
     void buildsOneBulkRequestWithPostOpPerUser() {
-        var client = new ScimClient(model, session);
-        // Use the package-visible builder hook to capture the bulk request body
-        // WITHOUT sending HTTP (mirror GroupMembershipPatchTest's getResource()).
-        String body = client.buildBulkCreateBody(List.of(
-            new BulkUserOp("realm-1", "component-1", "kc-1", "{\"userName\":\"a\"}"),
-            new BulkUserOp("realm-1", "component-1", "kc-2", "{\"userName\":\"b\"}")));
+        var builder = new ScimRequestBuilder(
+            "https://scim.example/scim/v2", ScimClientConfig.builder().build());
+        // assembleBulkCreate takes (bulkId, json) pairs — the materialized
+        // payloads the worker builds after re-fetching each user.
+        String body = ScimClient.assembleBulkCreate(builder, List.of(
+            new String[]{"kc-1", "{\"userName\":\"a\"}"},
+            new String[]{"kc-2", "{\"userName\":\"b\"}"})).getResource();
         assertThat(body).contains("\"method\":\"POST\"");
         assertThat(body).contains("\"path\":\"/Users\"");
         assertThat(body).contains("\"bulkId\":\"kc-1\"");
@@ -381,14 +351,14 @@ class ScimClientBulkTest {
 }
 ```
 
-Note: this test drives a small package-visible `buildBulkCreateBody(List<BulkUserOp>)` seam (Step 3) that builds the `BulkBuilder` and returns `bulk.getResource()` — no HTTP. The full send/response path (mapping saves on 2xx) is covered end-to-end by the integration scenario (Task 8); unit-testing the live `BulkResponse` parse is left to the IT because constructing a realistic `ServerResponse<BulkResponse>` in a unit test is brittle.
+Note: `assembleBulkCreate(ScimRequestBuilder, List<String[]>)` is a package-private static seam (Step 3) building the `BulkBuilder` from `(bulkId, json)` pairs — no HTTP, no session. The full re-fetch→send→mapping-save path is covered end-to-end by the integration scenario (Task 8), because constructing a realistic `ServerResponse<BulkResponse>` plus a live `UserModel`/JPA in a unit test is brittle.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
 Run: `./gradlew test --tests 'sh.libre.scim.core.ScimClientBulkTest'`
-Expected: FAIL — `buildBulkCreateBody`/`bulkCreateUsers` don't exist.
+Expected: FAIL — `assembleBulkCreate`/`bulkCreateUsers` don't exist.
 
-- [ ] **Step 3: Implement `bulkCreateUsers` + the `buildBulkCreateBody` seam + `BulkResult`**
+- [ ] **Step 3: Implement `bulkCreateUsers` + the `assembleBulkCreate` seam + `BulkResult`**
 
 Add imports to `ScimClient.java`:
 ```java
@@ -406,84 +376,91 @@ public record BulkResult(int created, int skipped, int failed) {
 }
 ```
 
-Add the method + seam:
+Add the assembly seam (package-private STATIC so the unit test needs no session):
 ```java
-/** Builds (does not send) the bulk request body for the given ops — a test seam. */
-// package-private for tests
-String buildBulkCreateBody(List<BulkUserOp> ops) {
-    return assembleBulk(ops).getResource();
-}
-
-private BulkBuilder assembleBulk(List<BulkUserOp> ops) {
-    BulkBuilder bulk = scimRequestBuilder.bulk();
-    for (var op : ops) {
-        bulk = bulk.bulkRequestOperation("/" + "Users")
-            .bulkId(op.kcUserId())
+/** Builds the bulk-create request from (bulkId, json) pairs. Static + package-private = test seam. */
+static BulkBuilder assembleBulkCreate(ScimRequestBuilder builder, List<String[]> idJsonPairs) {
+    BulkBuilder bulk = builder.bulk();
+    for (var p : idJsonPairs) { // p[0] = bulkId (kcUserId), p[1] = SCIM user JSON
+        bulk = bulk.bulkRequestOperation("/Users")
+            .bulkId(p[0])
             .method(HttpMethod.POST)
-            .data(op.scimUserJson())
+            .data(p[1])
             .next();
     }
     return bulk;
 }
+```
+(Add `import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;` — already imported in ScimClient.)
 
+Add the method (worker re-fetch — builds payloads here, NOT eagerly; the spike showed email/name aren't populated on the import thread):
+```java
 /**
- * Batched user create via SCIM /Bulk. Pre-filters ops whose mapping already
- * exists (idempotent re-sync), POSTs the rest as one bulk request, then
- * persists a mapping for each operation the server accepted. Per-op failures
- * are logged, not fatal to the batch. {@code failOnErrors} is intentionally
- * unset (server attempts every op). Runs inside the lane's worker transaction.
+ * Batched user create via SCIM /Bulk. Re-fetches each user by id in THIS worker
+ * session (attributes populated post-commit), applies the adapter, skips
+ * scim-skip + already-mapped users, POSTs the rest as one bulk request, then
+ * persists a mapping for each operation the server accepted. Per-op failures are
+ * logged, not fatal to the batch. {@code failOnErrors} is intentionally unset
+ * (server attempts every op). Runs inside the lane's worker transaction.
  */
 public BulkResult bulkCreateUsers(List<BulkUserOp> ops) {
     if (ops.isEmpty()) return BulkResult.EMPTY;
+    var realm = session.getContext().getRealm();
 
-    // 1. idempotency pre-filter.
-    var toSend = new ArrayList<BulkUserOp>(ops.size());
+    // 0. Re-fetch + apply + filter. apply(UserModel) sets the adapter id to the
+    //    KC user id (the same id create()/saveMapping rely on), so adapter.getId()
+    //    is the bulkId + mapping local id below.
+    var pending = new ArrayList<UserAdapter>(ops.size());
     int skipped = 0;
     for (var op : ops) {
-        var existing = getEM().createNamedQuery("findById", sh.libre.scim.jpa.ScimResource.class)
-            .setParameter("type", "User")
-            .setParameter("realmId", getRealmId())
-            .setParameter("componentId", model.getId())
-            .setParameter("id", op.kcUserId())
-            .getResultList();
-        if (!existing.isEmpty()) { skipped++; } else { toSend.add(op); }
+        var user = session.users().getUserById(realm, op.kcUserId());
+        if (user == null) { skipped++; continue; }
+        var adapter = new UserAdapter(session, model.getId());
+        adapter.apply(user);
+        if (adapter.skip) { skipped++; continue; }
+        if (!adapter.query("findById", adapter.getId()).getResultList().isEmpty()) { skipped++; continue; } // already mapped
+        pending.add(adapter);
     }
-    if (toSend.isEmpty()) return new BulkResult(0, skipped, 0);
+    if (pending.isEmpty()) return new BulkResult(0, skipped, 0);
+
+    // Materialize (bulkId, json) pairs from the fully-applied adapters.
+    var pairs = new ArrayList<String[]>(pending.size());
+    for (var a : pending) {
+        pairs.add(new String[]{ a.getId(), a.toSCIM(false).toString() });
+    }
 
     // 2 + 3. send one bulk request through auth-refresh + retry.
     var retry = registry.retry("bulkCreate");
     ServerResponse<BulkResponse> response;
     try (var span = TRACING.startSpan("scim.bulkCreate", "User", scimApplicationBaseUrl)) {
         response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() ->
-            assembleBulk(toSend).sendRequest(false)));
+            assembleBulkCreate(scimRequestBuilder, pairs).sendRequest(false)));
         span.setHttpStatus(response.getHttpStatus());
     }
 
     // transport-level failure (404/501 no-bulk, 413 oversize, 5xx after retries…)
     if (!response.isSuccess()) {
         LOGGER.warnf("SCIM /Bulk request failed: HTTP %d %s — %d user create(s) lost this round",
-            response.getHttpStatus(), response.getResponseBody(), toSend.size());
-        return new BulkResult(0, skipped, toSend.size());
+            response.getHttpStatus(), response.getResponseBody(), pending.size());
+        return new BulkResult(0, skipped, pending.size());
     }
 
     // 4. per-op triage + mapping save (this transaction). Null/Optional-guarded.
     var bulk = response.getResource();
     int created = 0, failed = 0;
-    for (var op : toSend) {
-        var maybe = bulk.getByBulkId(op.kcUserId());
-        if (maybe.isEmpty()) { failed++; LOGGER.warnf("No bulk response op for user %s", op.kcUserId()); continue; }
+    for (var adapter : pending) {
+        var maybe = bulk.getByBulkId(adapter.getId());
+        if (maybe.isEmpty()) { failed++; LOGGER.warnf("No bulk response op for user %s", adapter.getId()); continue; }
         var rop = maybe.get();
         Integer status = rop.getStatus();
         var extId = rop.getResourceId();
         if (status != null && status >= 200 && status < 300 && extId.isPresent()) {
-            var adapter = new UserAdapter(session, model.getId());
-            adapter.setId(op.kcUserId());
             adapter.setExternalId(extId.get());
             adapter.saveMapping();
             created++;
         } else {
             failed++;
-            LOGGER.warnf("Bulk create failed for user %s: status=%s", op.kcUserId(), String.valueOf(status));
+            LOGGER.warnf("Bulk create failed for user %s: status=%s", adapter.getId(), String.valueOf(status));
         }
     }
     ScimClientMetrics.CREATE_COUNT.add(created);
@@ -491,7 +468,7 @@ public BulkResult bulkCreateUsers(List<BulkUserOp> ops) {
 }
 ```
 
-(Check `ScimClientMetrics.CREATE_COUNT` is a `LongAdder` exposing `add(long)`; it is used via `increment()` elsewhere, and `LongAdder` has `add`. If it's not a `LongAdder`, loop `increment()` `created` times.)
+(`ScimClientMetrics.CREATE_COUNT` is a `LongAdder` — `add(long)` is valid. The import list in Step 3 no longer needs `getEM`-based query imports beyond what `ScimClient` already has; `adapter.query(...)` reuses `Adapter`'s query helper.)
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -537,7 +514,7 @@ class ScimBulkLaneTest {
         // test ctor: batchSize=10, 1 worker, sink captures each (component-grouped) batch
         var lane = ScimBulkLane.forTest(10, 1, group -> { batches.add(group); group.forEach(o -> seen.countDown()); });
         for (int i = 0; i < 30; i++) {
-            lane.submit(new BulkUserOp("r", "comp-A", "u" + i, "{}"));
+            lane.submit(new BulkUserOp("r", "comp-A", "u" + i));
         }
         assertThat(seen.await(5, TimeUnit.SECONDS)).isTrue();
         lane.close();
@@ -552,10 +529,10 @@ class ScimBulkLaneTest {
         var batches = new ConcurrentLinkedQueue<List<BulkUserOp>>();
         var seen = new CountDownLatch(4);
         var lane = ScimBulkLane.forTest(10, 1, group -> { batches.add(group); group.forEach(o -> seen.countDown()); });
-        lane.submit(new BulkUserOp("r", "comp-A", "u1", "{}"));
-        lane.submit(new BulkUserOp("r", "comp-B", "u2", "{}"));
-        lane.submit(new BulkUserOp("r", "comp-A", "u3", "{}"));
-        lane.submit(new BulkUserOp("r", "comp-B", "u4", "{}"));
+        lane.submit(new BulkUserOp("r", "comp-A", "u1"));
+        lane.submit(new BulkUserOp("r", "comp-B", "u2"));
+        lane.submit(new BulkUserOp("r", "comp-A", "u3"));
+        lane.submit(new BulkUserOp("r", "comp-B", "u4"));
         assertThat(seen.await(5, TimeUnit.SECONDS)).isTrue();
         lane.close();
         // every emitted batch is single-component
@@ -792,17 +769,15 @@ public void dispatchUserCreate(UserModel user) {
         .toList();
     if (components.isEmpty()) return;
 
-    // Build bulk payloads eagerly (live UserModel); collect per-op component ids.
+    // Partition matching components into bulk vs per-op. No eager payload build —
+    // we only capture ids; the bulk worker re-fetches + builds post-commit (the
+    // spike showed email/name aren't populated on the import thread). scim-skip is
+    // applied in the worker (bulkCreateUsers) / by client.create, as today.
     var bulkOps = new ArrayList<BulkUserOp>();
     var perOpComponentIds = new ArrayList<String>();
     for (var component : components) {
         if (component.get("bulk-enabled", false)) {
-            var adapter = new UserAdapter(session, component.getId());
-            adapter.apply(user);
-            if (!adapter.skip) {
-                bulkOps.add(new BulkUserOp(realmId, component.getId(), userId,
-                    adapter.toSCIM(false).toString()));
-            }
+            bulkOps.add(new BulkUserOp(realmId, component.getId(), userId));
         } else {
             perOpComponentIds.add(component.getId());
         }
