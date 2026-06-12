@@ -3,10 +3,7 @@ package sh.libre.scim.core;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.jboss.logging.Logger;
 
 /**
  * A {@link RejectedExecutionHandler} that applies back-pressure: when the
@@ -27,8 +24,6 @@ import org.jboss.logging.Logger;
  * blocking forever during JVM teardown.
  */
 final class BlockingPolicy implements RejectedExecutionHandler {
-
-    private static final Logger LOGGER = Logger.getLogger(BlockingPolicy.class);
 
     private final int capacity;
     private final long warnMs;
@@ -59,27 +54,12 @@ final class BlockingPolicy implements RejectedExecutionHandler {
         if (executor.isShutdown()) {
             throw new RejectedExecutionException("SCIM dispatch pool is shut down");
         }
-        long blockedStartNanos = System.nanoTime();
-        boolean queued = false;
-        while (!queued) {
-            try {
-                queued = executor.getQueue().offer(r, warnMs, TimeUnit.MILLISECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RejectedExecutionException("interrupted while applying SCIM back-pressure", e);
-            }
-            if (!queued) {
-                if (executor.isShutdown()) {
-                    // Shutdown raced in while we were parked; workers have
-                    // stopped polling, so the queue will never drain.
-                    throw new RejectedExecutionException("SCIM dispatch pool shut down while blocked");
-                }
-                long blockedMs = (System.nanoTime() - blockedStartNanos) / 1_000_000L;
-                blockedWarnings.incrementAndGet();
-                LOGGER.warnf("SCIM dispatch queue full (capacity=%d); producer blocked for %d ms so far "
-                    + "waiting for a worker slot — downstream SCIM sink may be slow or unavailable.",
-                    capacity, blockedMs);
-            }
+        try {
+            BackpressureSupport.blockingPut(
+                executor.getQueue(), r, warnMs, capacity, blockedWarnings, executor::isShutdown);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RejectedExecutionException("interrupted while applying SCIM back-pressure", e);
         }
     }
 
