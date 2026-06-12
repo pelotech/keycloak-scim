@@ -113,6 +113,15 @@ public class ScimStorageProviderFactory
                 .defaultValue("true")
                 .add()
                 .property()
+                .name("bulk-enabled")
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .label("Batch user creates via SCIM /Bulk")
+                .helpText("When on, federation-sync user CREATE operations are coalesced into SCIM /Bulk requests. "
+                    + "Requires the SCIM server to support /Bulk; set scim.dispatch.bulkBatchSize <= the server's "
+                    + "maxOperations. Default off.")
+                .defaultValue("false")
+                .add()
+                .property()
                 .name("propagation-group")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable group propagation")
