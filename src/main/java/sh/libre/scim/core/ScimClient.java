@@ -5,13 +5,19 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.ProcessingException;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
+import de.captaingoldfish.scim.sdk.client.builder.BulkBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
+import de.captaingoldfish.scim.sdk.common.constants.enums.HttpMethod;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
 import de.captaingoldfish.scim.sdk.common.resources.Group;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
+import de.captaingoldfish.scim.sdk.common.response.BulkResponse;
 import de.captaingoldfish.scim.sdk.common.response.ListResponse;
 
 import org.jboss.logging.Logger;
@@ -631,6 +637,89 @@ public class ScimClient {
         if (this.model.get("sync-refresh", false)) {
             this.refreshResources(factory, syncRes);
         }
+    }
+
+    /** Aggregated result from a single {@link #bulkCreateUsers} call. */
+    public record BulkResult(int created, int skipped, int failed) {
+        static final BulkResult EMPTY = new BulkResult(0, 0, 0);
+    }
+
+    /** Builds the bulk-create request from (bulkId, json) pairs. Static + package-private = test seam. */
+    static BulkBuilder assembleBulkCreate(ScimRequestBuilder builder, List<String[]> idJsonPairs) {
+        BulkBuilder bulk = builder.bulk();
+        for (var p : idJsonPairs) { // p[0] = bulkId (kcUserId), p[1] = SCIM user JSON
+            bulk = bulk.bulkRequestOperation("/Users")
+                .bulkId(p[0])
+                .method(HttpMethod.POST)
+                .data(p[1])
+                .next();
+        }
+        return bulk;
+    }
+
+    /**
+     * Batched user create via SCIM /Bulk. Re-fetches each user by id in THIS worker
+     * session (attributes populated post-commit), applies the adapter, skips
+     * scim-skip + already-mapped users, POSTs the rest as one bulk request, then
+     * persists a mapping for each operation the server accepted. Per-op failures are
+     * logged, not fatal to the batch. {@code failOnErrors} is intentionally unset
+     * (server attempts every op). Runs inside the lane's worker transaction.
+     */
+    public BulkResult bulkCreateUsers(List<BulkUserOp> ops) {
+        if (ops.isEmpty()) return BulkResult.EMPTY;
+        var realm = session.getContext().getRealm();
+
+        var pending = new ArrayList<UserAdapter>(ops.size());
+        int skipped = 0;
+        for (var op : ops) {
+            var user = session.users().getUserById(realm, op.kcUserId());
+            if (user == null) { skipped++; continue; }
+            var adapter = new UserAdapter(session, model.getId());
+            adapter.apply(user);
+            if (adapter.skip) { skipped++; continue; }
+            if (!adapter.query("findById", adapter.getId()).getResultList().isEmpty()) { skipped++; continue; }
+            pending.add(adapter);
+        }
+        if (pending.isEmpty()) return new BulkResult(0, skipped, 0);
+
+        var pairs = new ArrayList<String[]>(pending.size());
+        for (var a : pending) {
+            pairs.add(new String[]{ a.getId(), a.toSCIM(false).toString() });
+        }
+
+        var retry = registry.retry("bulkCreate");
+        ServerResponse<BulkResponse> response;
+        try (var span = TRACING.startSpan("scim.bulkCreate", "User", scimApplicationBaseUrl)) {
+            response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() ->
+                assembleBulkCreate(scimRequestBuilder, pairs).sendRequest(false)));
+            span.setHttpStatus(response.getHttpStatus());
+        }
+
+        if (!response.isSuccess()) {
+            LOGGER.warnf("SCIM /Bulk request failed: HTTP %d %s — %d user create(s) lost this round",
+                response.getHttpStatus(), response.getResponseBody(), pending.size());
+            return new BulkResult(0, skipped, pending.size());
+        }
+
+        var bulk = response.getResource();
+        int created = 0, failed = 0;
+        for (var adapter : pending) {
+            var maybe = bulk.getByBulkId(adapter.getId());
+            if (maybe.isEmpty()) { failed++; LOGGER.warnf("No bulk response op for user %s", adapter.getId()); continue; }
+            var rop = maybe.get();
+            Integer status = rop.getStatus();
+            var extId = rop.getResourceId();
+            if (status != null && status >= 200 && status < 300 && extId.isPresent()) {
+                adapter.setExternalId(extId.get());
+                adapter.saveMapping();
+                created++;
+            } else {
+                failed++;
+                LOGGER.warnf("Bulk create failed for user %s: status=%s", adapter.getId(), String.valueOf(status));
+            }
+        }
+        ScimClientMetrics.CREATE_COUNT.add(created);
+        return new BulkResult(created, skipped, failed);
     }
 
     public void close() {
