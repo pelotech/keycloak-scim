@@ -136,7 +136,15 @@ class BulkEagerPayloadSpikeIT extends IntegrationTestBase {
 }
 ```
 
-If `seedLdapUserWithRole` / a role-bearing federated-user helper doesn't already exist, build it from the existing LDAP-seed + role-assignment helpers (check `newRealmWithScimAndLdapGroups` and any role ITs). If wiring a federated role proves heavy, fall back to asserting `userName` + `email` materialize and note in the report that role materialization was not exercised — but prefer the full assertion.
+No `seedLdapUserWithRole` helper exists today, and the existing role/group seeding
+is LDIF/group-based (`seed.ldif`, `seedLdapGroup`) with no programmatic
+realm-role-with-`scim=true` helper — so expect to take the documented fallback:
+assert `userName` + `email` materialize and note in the report that role
+materialization was not separately exercised. Attempt the role assertion first
+(it's the stronger proof of lazy-collection materialization), but the username +
+email assertion alone still validates the core risk (building `apply(UserModel)` +
+`toSCIM` on the import thread pre-commit). Either outcome passes the gate; only an
+*exception* or empty username/email fails it.
 
 - [ ] **Step 4: Run the spike IT**
 
@@ -853,7 +861,16 @@ if (isCreate) {
 
 - [ ] **Step 3: Update the mapper unit test**
 
-`ScimLdapStorageMapperTest.onImportRoutesCreateWhenIsCreateTrue` currently asserts `runAsync(SCOPE_USER, …)` routes to `client.create`. The create path now calls `dispatcher.dispatchUserCreate(user)` instead. Update that test to verify `dispatcher.dispatchUserCreate(user)` is invoked on `isCreate=true` (and the SCOPE_GROUP `runAsync` still fires). Keep the replace-path test (`isCreate=false`) asserting `runAsync(SCOPE_USER…) → client.replace`. Use the existing Mockito setup; mock `UserModel.getId()`.
+`ScimLdapStorageMapperTest.onImportRoutesCreateWhenIsCreateTrue` currently does
+`verify(dispatcher).runAsync(eq(SCOPE_USER), captor.capture())` and then drives the
+captured `BiConsumer` to `client.create`. After Task 7 the create path no longer
+calls `runAsync(SCOPE_USER, …)` at all — it calls `dispatcher.dispatchUserCreate(user)`,
+and the only remaining `runAsync` on import is `SCOPE_GROUP`. So **delete the entire
+BiConsumer-capture-and-invoke machinery for the create case** (it's invalid now, not
+tweakable) and replace it with a simple `verify(dispatcher).dispatchUserCreate(user)`
+on `isCreate=true` (plus, if desired, `verify(dispatcher).runAsync(eq(SCOPE_GROUP), any())`).
+Keep the replace-path test (`isCreate=false`) asserting `runAsync(SCOPE_USER…) →
+client.replace` unchanged. Use the existing Mockito setup; mock `UserModel.getId()`.
 
 - [ ] **Step 4: Run unit tests**
 
@@ -874,8 +891,21 @@ git commit -m "feat(bulk): route federation user creates through dispatchUserCre
 ### Task 8: `/Bulk` integration scenario
 
 **Files:**
-- Modify: `src/integrationTest/java/sh/libre/scim/integration/IntegrationTestBase.java` (add a `/Bulk` stub helper)
+- Modify: `src/integrationTest/java/sh/libre/scim/integration/IntegrationTestBase.java` (add a `/Bulk` stub helper; **pull up `seedLdapUsers`**)
 - Test: `src/integrationTest/java/sh/libre/scim/integration/ScimBulkUserCreateIT.java`
+
+- [ ] **Step 0: Pull bulk LDAP seeding up into `IntegrationTestBase`**
+
+`seedLdapUsers(String prefix, int count)` and `ldapUserDn(String)` currently live
+in `PerfTestBase` (the `perfTest` source set). The `integrationTest` source set
+**cannot** extend `PerfTestBase` (dependency direction is perfTest → integrationTest,
+not the reverse), so `ScimBulkUserCreateIT extends IntegrationTestBase` can't see
+them. Move `seedLdapUsers(String, int)` and `ldapUserDn(String)` **up** into
+`IntegrationTestBase` (they only use `newLdapEnv()`, already there). `PerfTestBase`
+keeps them via inheritance — after the move, run `./gradlew perfTestClasses` to
+confirm `DispatchMemoryWorstCaseIT` / `BulkUserImportPerfTest` still compile (they
+call `seedLdapUsers`/`ldapUserDn` and will resolve via inheritance). Do NOT
+duplicate the methods; move them.
 
 - [ ] **Step 1: Add a `/Bulk` WireMock stub helper to `IntegrationTestBase`**
 
@@ -894,8 +924,10 @@ class ScimBulkUserCreateIT extends IntegrationTestBase {
     @Test
     void bulkEnabledSyncEmitsBulkNotPerUserPosts() throws Exception {
         stubScimBulkOk();
-        var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.put("bulk-enabled", "true"));
-        var users = seedLdapUsers("bulk", 25); // > one batch boundary at K=20
+        // newRealmWithScimAndLdapAndConfig takes Consumer<MultivaluedHashMap<String,String>>;
+        // use putSingle (NOT put — put expects a List value and won't compile).
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.putSingle("bulk-enabled", "true"));
+        var users = seedLdapUsers("bulk", 25); // > one batch boundary at K=20 (seedLdapUsers pulled up in Step 0)
         r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
 
         // Assert /Bulk was used and NOT N individual /Users POSTs.
