@@ -402,11 +402,25 @@ public abstract class IntegrationTestBase {
      * {@code "id"} per op.
      */
     protected void stubScimBulkOk() {
-        wireMock.stubFor(post(urlPathEqualTo("/Bulk"))
-            .willReturn(aResponse()
-                .withStatus(200)
-                .withHeader("Content-Type", "application/scim+json")
-                .withTransformers(ScimBulkResponseTransformer.NAME)));
+        stubScimBulkOk(0);
+    }
+
+    /**
+     * Like {@link #stubScimBulkOk()} but the response carries a fixed per-request
+     * delay, modelling a slow downstream SCIM sink. The delay is applied once per
+     * {@code POST /Bulk} request — i.e. once per <em>batch</em> of up to K ops —
+     * so it models the round-trip latency amortized across the batch, NOT any
+     * per-op server processing cost. Used by the latency-sweep perf characterization.
+     */
+    protected void stubScimBulkOk(int delayMs) {
+        var response = aResponse()
+            .withStatus(200)
+            .withHeader("Content-Type", "application/scim+json")
+            .withTransformers(ScimBulkResponseTransformer.NAME);
+        if (delayMs > 0) {
+            response = response.withFixedDelay(delayMs);
+        }
+        wireMock.stubFor(post(urlPathEqualTo("/Bulk")).willReturn(response));
     }
 
     /** Current count of POST /Bulk requests WireMock has received. */

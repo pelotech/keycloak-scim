@@ -338,3 +338,68 @@ Implications:
   worst-case is to **bound the dispatch queue and apply back-pressure**
   (block the import producer when the queue is full), so a slow sink slows
   the sync instead of ballooning the heap.
+
+## SCIM /Bulk — latency-swept characterization
+
+Once the dispatch queue is bounded and back-pressured (above), the open
+question for `/Bulk` is no longer memory — it's **wall-time payoff**: does
+coalescing K user-creates into one `POST /Bulk` actually speed a sync, and
+where? `BulkLatencySweepIT` sweeps **bulk {on, off} × sink latency {fast 5ms,
+medium 50ms, slow 200ms}** at a fixed `N = -Dperf.userCount` (default 2000),
+timing the full sync + async drain and counting HTTP requests the sink saw.
+
+Measured (N = 2000, K = 20, 8 workers; Keycloak container RSS via cgroup):
+
+| Lane | Sink delay | HTTP requests | Request ratio (N / requests) | Wall (s) | Drain (/s) | Peak KC mem |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| bulk-on | 5 ms | 476 | 4.20 | 7.7 | 259 | 805 MiB |
+| bulk-on | 50 ms | 114 | 17.54 | 6.7 | 299 | 733 MiB |
+| bulk-on | 200 ms | 108 | 18.52 | 7.8 | 256 | 791 MiB |
+| bulk-off | 5 ms | 2002 | 1.00 | 2.9 | 687 | 792 MiB |
+| bulk-off | 50 ms | 2002 | 1.00 | 14.6 | 138 | 870 MiB |
+| bulk-off | 200 ms | 2001 | 1.00 | 54.5 | 37 | 894 MiB |
+
+The **request ratio** is the load-bearing column: it proves batching engaged
+and separates "fewer requests" from "shorter wall-time". Bulk-off is flat at
+1.00 (one `POST /Users` per user); bulk-on rises from 4.2 toward K (≈18) as the
+sink gets slower — at 5 ms the lane's time-based flush ships small partial
+batches before they fill to K=20, so the amortization is weak; at ≥50 ms each
+batch fills, so each `POST /Bulk` covers ~K ops.
+
+### Honesty caveat — what this measures (and does not)
+
+WireMock applies a per-**REQUEST** fixed delay only (the round-trip component)
+and models **NO** per-op server processing cost. So this IT measures bulk's
+**round-trip amortization only** — saving (K−1) round-trips per batch of K. It
+is a **lower bound** on real-world benefit: a real SCIM server also amortizes
+per-request parse/auth/dispatch/framework overhead WireMock can't represent.
+Read the table as "**at least** this much" payoff, **not** "exactly this much";
+it explicitly does **not** assert any server-side amortization.
+
+### K-sensitivity (analytic)
+
+`scim.dispatch.bulkBatchSize` (K) is read in the Keycloak **container** JVM, and
+the shared perf container starts once, so K can't be varied per-cell on it. The
+K effect is therefore reported **analytically**: bulk request count scales as
+**⌈N/K⌉**, so the measured request ratio at K=20 (≈18 once batches fill)
+demonstrates the mechanism — halving K doubles requests, doubling K halves them,
+all else equal. A dedicated container started with
+`JAVA_OPTS_APPEND=-Dscim.dispatch.bulkBatchSize=<k>` could measure other K
+values directly later.
+
+### Takeaway — where /Bulk pays off
+
+`/Bulk` pays off **most on high-RTT / slow sinks and least (in fact, it loses)
+on fast/local sinks.** At 200 ms, bulk drains 2000 users in **7.8 s vs 54.5 s**
+per-op — a **7× wall-time win** — and at 50 ms it's **6.7 s vs 14.6 s** (~2×).
+But at 5 ms, bulk is **slower** (7.7 s vs 2.9 s): when a round-trip is cheap,
+the batching lane's coalescing/timer-flush latency and partial-batch overhead
+cost more than the round-trips it saves, and the per-op lane's raw 8-worker
+concurrency wins. The crossover sits at a low single-digit-ms RTT, so the payoff
+is governed almost entirely by network distance to the SCIM sink. **Decision
+input for further /Bulk investment (replace / delete / membership):** prioritize
+it for deployments whose SCIM target is remote/high-latency; for local or
+very-low-latency sinks, the per-op lane is already faster and `/Bulk` should
+stay opt-in (it remains off by default). Because WireMock models round-trips
+only, these wins are a floor — a real server's per-request overhead pushes the
+crossover lower and widens the slow-sink advantage.
