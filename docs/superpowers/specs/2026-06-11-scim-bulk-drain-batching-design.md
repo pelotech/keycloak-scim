@@ -198,10 +198,13 @@ untouched `ASYNC_EXECUTOR`. Both bounded, both back-pressured.
   fixed here; noted as a known limitation.
 - **Whole-request failure:** a bulk POST that fails after retries loses that
   batch's ops (logged). Back-pressure unaffected (bounded queue).
-- **Server lacks `/Bulk`:** if a bulk POST returns `404`/`501`, log an error and
-  fall back to per-op creates for those ops via the existing path. No
-  `ServiceProviderConfig` auto-discovery (YAGNI) — `bulk-enabled` is an operator
-  opt-in asserting bulk support.
+- **Server lacks `/Bulk`:** if a bulk POST returns `404`/`501`, log an error.
+  **(Implementation note:** the shipped code consolidates *all* transport-level
+  failures — 404/501/413/5xx-after-retry — into the single whole-request-loss
+  path below rather than falling back to per-op creates; `bulk-enabled` is an
+  operator opt-in asserting bulk support, so the per-op fallback's value is
+  marginal and was dropped during planning.) No `ServiceProviderConfig`
+  auto-discovery (YAGNI).
 - **Batch exceeds server `maxOperations`:** with no auto-discovery, an oversize
   batch can draw a whole-request `413`/`400`, losing that batch's ops (per the
   whole-request-failure path). This is the most likely misconfiguration, so the
