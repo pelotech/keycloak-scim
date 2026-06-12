@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/pelotech/keycloak-scim/compare/v1.2.0...v1.3.0) (2026-06-12)
+
+
+### Features
+
+* **dispatch:** bounded-queue back-pressure + opt-in SCIM /Bulk user-create batching ([#35](https://github.com/pelotech/keycloak-scim/issues/35)) ([0ceb618](https://github.com/pelotech/keycloak-scim/commit/0ceb618f7e93f357a7d0cf4aa059d39d03dc174b))
+
 ## [1.2.0](https://github.com/pelotech/keycloak-scim/compare/v1.1.0...v1.2.0) (2026-06-12)
 
 
