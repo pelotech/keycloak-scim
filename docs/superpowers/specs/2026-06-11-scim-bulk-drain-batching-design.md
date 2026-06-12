@@ -57,32 +57,23 @@ SCIM SDK `1.25.1` (de.captaingoldfish) client supports bulk end-to-end:
 
 ### 1. `BulkUserOp` (record)
 
-Immutable: `(String componentId, String kcUserId, String scimUserJson)`. The
-typed, coalescable unit. `scimUserJson` is built **eagerly** at import time from
-the live `UserModel`:
+Immutable: `(String realmId, String componentId, String kcUserId)`. The typed,
+coalescable unit — **just identifiers, no payload.** The bulk worker re-fetches
+the user by id and builds the SCIM JSON in its own (post-commit) session. New
+file `src/main/java/sh/libre/scim/core/BulkUserOp.java`.
 
-```java
-var adapter = new UserAdapter(session, componentId);
-adapter.apply(user);                 // apply(M) returns void — not chainable
-if (adapter.skip) return;            // honor scim-skip, same as sendCreate
-String json = adapter.toSCIM(false).toString();  // SDK resource is a Jackson ScimObjectNode
-```
-
-so the consumer never re-fetches the user. New file
-`src/main/java/sh/libre/scim/core/BulkUserOp.java`.
-
-> **Risk / required spike (call out in the plan).** The existing dispatch
-> deliberately never reads the `UserModel` outside the worker — the mapper
-> captures only `user.getId()` and re-fetches in the worker session, because the
-> model is bound to the import-thread session. Building the payload eagerly
-> *inverts that invariant*: `UserAdapter.apply(UserModel)` walks lazy collections
-> (`getGroupsStream`, `getRoleMappingsStream`) and `toSCIM` reads
-> `realm.getComponent(...)`, all in the import thread before commit. This is most
-> likely fine (same session that just wrote the user), but it is the one genuine
-> correctness risk. The plan MUST include a spike that confirms
-> `apply(UserModel)` fully materializes against a freshly-imported,
-> not-yet-committed federated user (group/role mappings especially) before the
-> batched path is wired in. Do not treat it as given.
+> **Why worker-side build, not eager (spike finding).** An earlier draft built
+> the SCIM payload **eagerly** on the import thread (capturing JSON into the op).
+> A gate spike disproved that: building `UserAdapter.apply(user).toSCIM()` on the
+> import thread runs without error and materializes `userName`/`externalId`/
+> `active`/roles, **but email and name are absent** — Keycloak runs the
+> user-attribute mappers *after* `onImportUserFromLDAP` fires, within the same
+> import iteration, so the `UserModel` has no email at that instant. The existing
+> per-op path dodges this by re-fetching the user by id in the **post-commit
+> worker session** (attributes populated by then). The bulk lane therefore does
+> the same: `BulkUserOp` carries only ids; the worker re-fetches and builds. This
+> also removes the "read the model off-worker" invariant inversion entirely, and
+> shrinks the queue footprint (ids, not JSON).
 
 ### 2. `ScimBulkLane`
 
@@ -133,12 +124,15 @@ loop. New file `src/main/java/sh/libre/scim/core/ScimBulkLane.java`.
 The SCIM-protocol boundary, beside `create`/`replace`/`delete`. Runs inside the
 lane's worker session/transaction.
 
-1. **Idempotency pre-filter:** batch-query existing mappings (`findById`) for the
-   ops' `kcUserId`s; drop already-mapped ops (preserves today's skip-if-mapped
-   behavior so re-sync doesn't duplicate). (`scim-skip` users are already
-   excluded at eager-build time — see `BulkUserOp` — so they never reach here.)
-2. **Build** one `BulkRequest`: for each remaining op, a `POST` operation with
-   per-op path `/Users`, `bulkId = kcUserId`, and `data = scimUserJson`. The
+0. **Re-fetch + apply + filter (worker session):** for each op,
+   `session.users().getUserById(realm, kcUserId)`; skip if the user is gone.
+   Build `new UserAdapter(session, componentId)`, `apply(user)`; skip if
+   `adapter.skip` (`scim-skip`). Skip if a mapping already exists
+   (`findById` — idempotent re-sync). The surviving adapters carry the fully
+   materialized model (email/name included, since this runs post-commit).
+1. (folded into 0 — the idempotency check is part of the per-user filter above.)
+2. **Build** one `BulkRequest`: for each surviving user, a `POST` operation with
+   per-op path `/Users`, `bulkId = kcUserId`, and `data = adapter.toSCIM(false).toString()`. The
    `bulkId` is the correlation handle: Keycloak ids are UUIDs (ASCII,
    collision-safe), and the SDK auto-assigns a random `bulkId` if unset — setting
    it to `kcUserId` is what lets step 4 correlate the response. Leave
@@ -163,13 +157,16 @@ lane's worker session/transaction.
 
 ### 4. `ScimDispatcher.dispatchUserCreate(UserModel user)`
 
-Routing, encapsulating the bulk/per-op decision so the mapper stays thin.
+Routing, encapsulating the bulk/per-op decision so the mapper stays thin. No
+eager payload build — it only captures ids.
 
-- If the component's `bulk-enabled` flag is on: for each `propagation-user`
-  component, build the per-component SCIM payload eagerly, and on the caller's
-  `afterCompletion` **commit** (rollback → skip, matching the existing
-  deferral), `lane.submit(new BulkUserOp(componentId, user.getId(), json))`.
-- Else: fall through to today's `runAsync(SCOPE_USER, (c, s) -> c.create(...))`.
+- For each `propagation-user` component: if its `bulk-enabled` flag is on, on the
+  caller's `afterCompletion` **commit** (rollback → skip, matching the existing
+  deferral) `lane.submit(new BulkUserOp(realmId, componentId, user.getId()))`;
+  otherwise submit the existing per-op create worker (re-fetch by id →
+  `client.create`) for that component. (It does **not** reuse
+  `runAsync(SCOPE_USER, create)`, which would re-include bulk-enabled components
+  and double-create; it inlines the per-op create for non-bulk components only.)
 
 `ScimLdapStorageMapper.onImportUserFromLDAP(..., isCreate=true)` calls only
 `dispatchUserCreate(user)`.
@@ -179,12 +176,13 @@ Routing, encapsulating the bulk/per-op decision so the mapper stays thin.
 ```
 LDAP import user → mapper.onImportUserFromLDAP(isCreate=true)
   → dispatcher.dispatchUserCreate(user)
-      → per propagation-user component: build payload; enlist afterCompletion
-  → [caller tx commits] → lane.submit(BulkUserOp)         // blocking put = back-pressure
+      → per propagation-user component: enlist afterCompletion (ids only)
+  → [caller tx commits] → lane.submit(BulkUserOp{realmId,componentId,kcUserId})  // back-pressure
 ScimBulkLane consumer:
   op = take(); drainTo(batch, K-1); groupBy(componentId)
   → per group: runJobInTransaction { client.bulkCreateUsers(group) }
-       → drop already-mapped → BulkRequest(K × POST /Users) → send
+       → per id: re-fetch user, apply adapter, skip scim-skip/already-mapped
+       → BulkRequest(K × POST /Users, data = toSCIM) → send
        → per-op 2xx ⇒ save mapping; non-2xx ⇒ WARN
 ```
 
