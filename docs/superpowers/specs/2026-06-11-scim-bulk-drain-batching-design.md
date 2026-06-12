@@ -59,9 +59,30 @@ SCIM SDK `1.25.1` (de.captaingoldfish) client supports bulk end-to-end:
 
 Immutable: `(String componentId, String kcUserId, String scimUserJson)`. The
 typed, coalescable unit. `scimUserJson` is built **eagerly** at import time from
-the live `UserModel` (via `UserAdapter.apply(user).toSCIM(false)` serialized),
+the live `UserModel`:
+
+```java
+var adapter = new UserAdapter(session, componentId);
+adapter.apply(user);                 // apply(M) returns void — not chainable
+if (adapter.skip) return;            // honor scim-skip, same as sendCreate
+String json = adapter.toSCIM(false).toString();  // SDK resource is a Jackson ScimObjectNode
+```
+
 so the consumer never re-fetches the user. New file
 `src/main/java/sh/libre/scim/core/BulkUserOp.java`.
+
+> **Risk / required spike (call out in the plan).** The existing dispatch
+> deliberately never reads the `UserModel` outside the worker — the mapper
+> captures only `user.getId()` and re-fetches in the worker session, because the
+> model is bound to the import-thread session. Building the payload eagerly
+> *inverts that invariant*: `UserAdapter.apply(UserModel)` walks lazy collections
+> (`getGroupsStream`, `getRoleMappingsStream`) and `toSCIM` reads
+> `realm.getComponent(...)`, all in the import thread before commit. This is most
+> likely fine (same session that just wrote the user), but it is the one genuine
+> correctness risk. The plan MUST include a spike that confirms
+> `apply(UserModel)` fully materializes against a freshly-imported,
+> not-yet-committed federated user (group/role mappings especially) before the
+> batched path is wired in. Do not treat it as given.
 
 ### 2. `ScimBulkLane`
 
@@ -76,7 +97,7 @@ loop. New file `src/main/java/sh/libre/scim/core/ScimBulkLane.java`.
   don't duplicate it. (Refactor `BlockingPolicy` to call the shared helper.)
 - Consumer loop, per cycle:
   ```
-  op = queue.take();
+  op = queue.take();                 // InterruptedException = stop signal (see lifecycle)
   batch = new ArrayList<>(); batch.add(op);
   queue.drainTo(batch, batchSize - 1);
   for (group : batch grouped by componentId)
@@ -84,10 +105,28 @@ loop. New file `src/main/java/sh/libre/scim/core/ScimBulkLane.java`.
           .bulkCreateUsers(group));
   ```
   Grouping by `componentId` keeps each bulk request single-target (a drained
-  batch is almost always one component, but `drainTo` could mix them).
+  batch is almost always one component, since the queue is fed per component,
+  but `drainTo` could mix them, and each `ScimClient` is per-component — so the
+  split is required for correctness, not just tidiness).
 - Lifecycle: JVM-global static (like `ASYNC_EXECUTOR`), daemon threads named
   `scim-bulk-N`. Sizing reuses `scim.dispatch.threads` (thread count) and
   `scim.dispatch.queueCapacity` (queue depth); the lane has its own instances.
+  When bulk is enabled this means up to ~16 dispatch threads total (8 lane + 8
+  executor) — honest and acceptable, since a sync is create-dominated so the
+  executor sits mostly idle.
+- **Shutdown / interrupt story (the shared helper's missing guard).**
+  `BlockingPolicy` blocks via `executor.getQueue().offer(...)` and breaks out on
+  `executor.isShutdown()` — a guard that prevents an infinite block during JVM
+  teardown. The bulk lane owns a *bare* `ArrayBlockingQueue` with no executor, so
+  the extracted `BackpressureSupport.blockingPut(...)` helper has no
+  `isShutdown()` to consult. The lane therefore provides its own stop signal: a
+  `volatile boolean running` plus `Thread.interrupt()` on `close()`; the helper
+  treats `InterruptedException` from `offer`/`put` as "stop, propagate," and the
+  consumer loop's `take()` likewise exits on interrupt. The `BlockingPolicy`
+  refactor keeps its `executor.isShutdown()` guard (passing a shutdown predicate
+  into the helper, or keeping that check in `BlockingPolicy` and sharing only the
+  offer-and-warn body). `BlockingPolicy`'s constructor stays `(capacity, warnMs)`
+  and its `RejectedExecutionHandler` registration is unchanged.
 
 ### 3. `ScimClient.bulkCreateUsers(List<BulkUserOp> ops)`
 
@@ -96,16 +135,29 @@ lane's worker session/transaction.
 
 1. **Idempotency pre-filter:** batch-query existing mappings (`findById`) for the
    ops' `kcUserId`s; drop already-mapped ops (preserves today's skip-if-mapped
-   behavior so re-sync doesn't duplicate).
-2. **Build** one `BulkRequest`: for each remaining op, a `POST` operation at the
-   Users endpoint with `bulkId = kcUserId` and `data = scimUserJson`.
-3. **Send** through the existing `auth.sendWithAuthRefresh(() ->
-   retry.executeSupplier(...))` wrapper (so token refresh + 429/5xx/IO retry
-   apply to the whole bulk request).
-4. **Apply response:** for each op, `response.getByBulkId(kcUserId)`; status 2xx
-   → save the mapping (`kcUserId` → `getResourceId()` external id) via the
-   existing mapping path; non-2xx → WARN, no mapping. All surviving mappings are
-   persisted in the one worker transaction.
+   behavior so re-sync doesn't duplicate). (`scim-skip` users are already
+   excluded at eager-build time — see `BulkUserOp` — so they never reach here.)
+2. **Build** one `BulkRequest`: for each remaining op, a `POST` operation with
+   per-op path `/Users`, `bulkId = kcUserId`, and `data = scimUserJson`. The
+   `bulkId` is the correlation handle: Keycloak ids are UUIDs (ASCII,
+   collision-safe), and the SDK auto-assigns a random `bulkId` if unset — setting
+   it to `kcUserId` is what lets step 4 correlate the response. Leave
+   `failOnErrors` **unset** (server attempts every op; we triage per-op) — do not
+   add `failOnErrors(0)`, which would change semantics to fail-fast.
+3. **Send** via `scimRequestBuilder.bulk()` … `.sendRequest(false)` through the
+   existing `auth.sendWithAuthRefresh(() -> retry.executeSupplier(...))` wrapper
+   (token refresh + 429/5xx/IO retry apply to the whole bulk request). The
+   `sendRequest(boolean)` arg is `runSplittedRequestsParallel` — only meaningful
+   when SDK auto-splitting is wired (it is not, by design); `false` is benign.
+4. **Apply response:** for each op, `response.getByBulkId(kcUserId)` (an
+   `Optional`); when present with `getStatus()` 2xx and a present
+   `getResourceId()`, save the mapping (`kcUserId` → external id) via the
+   existing mapping path; otherwise WARN, no mapping. **Null/Optional-guard
+   throughout** — `getByBulkId`, `getResourceId`, `getBulkId` return `Optional`,
+   and `getStatus()` is a boxed `Integer` that may be null on a malformed
+   response. All surviving mappings persist in the one worker transaction.
+   (`ScimResource.EXTERNAL_ID` is a non-null PK column, so a failed op with no
+   `resourceId` could not be written anyway — reinforcing "non-2xx ⇒ no mapping.")
 5. Returns a small summary (counts of created / skipped / failed) for metrics
    and logging.
 
@@ -152,6 +204,11 @@ untouched `ASYNC_EXECUTOR`. Both bounded, both back-pressured.
   fall back to per-op creates for those ops via the existing path. No
   `ServiceProviderConfig` auto-discovery (YAGNI) — `bulk-enabled` is an operator
   opt-in asserting bulk support.
+- **Batch exceeds server `maxOperations`:** with no auto-discovery, an oversize
+  batch can draw a whole-request `413`/`400`, losing that batch's ops (per the
+  whole-request-failure path). This is the most likely misconfiguration, so the
+  operator must set `bulkBatchSize` ≤ the server's `maxOperations`; documented as
+  a tuning constraint, not auto-handled.
 
 ## Configuration
 
@@ -192,17 +249,31 @@ config properties (`ScimStorageProviderFactory`).
 
 New `BulkLatencySweepIT` in `src/perfTest`. Matrix: **bulk {on, off}** ×
 **sink latency {fast ~5 ms, medium ~50 ms, slow ~200 ms}**, fixed N. Per cell,
-capture: HTTP request count, sync wall-time, effective drain rate, and peak
-container memory (`ContainerMemorySampler`). Emit a comparison table via
-`PerfReport`.
+capture and report:
 
-**Honesty caveat (stated in the report):** WireMock applies a per-*request*
-fixed delay (the round-trip component) but models no per-*op* server processing
-cost. So the IT measures bulk's **round-trip amortization only** — saving
-(K−1) round-trips per batch. This is the **lower bound** of real-world benefit;
-a real SCIM server also amortizes per-request parse/auth/dispatch/framework
-overhead that WireMock cannot represent. The table reads as "at least this
-much," not "exactly this much."
+- **HTTP request count** AND the **request-count ratio** (≈N for off vs ≈N/K for
+  on) — this confirms batching actually engaged and separates "fewer requests"
+  from "shorter wall-time" (without it the table can't distinguish a real bulk
+  win from unrelated WireMock speedup).
+- sync wall-time, effective drain rate, peak container memory
+  (`ContainerMemorySampler`).
+- One **K-sensitivity** point (e.g. `bulkBatchSize` 20 vs a smaller value at the
+  slow latency): the entire payoff is "(K−1) round-trips saved," so the default
+  K=20 should be shown to matter rather than asserted.
+
+Emit the comparison table via `PerfReport`.
+
+**Honesty caveat (stated in the report).** This reframes — and is consistent
+with — the back-pressure spec's earlier caution that a WireMock `/Bulk` test
+would *overstate* benefit. That caution was specifically about wrongly claiming
+*server-side* amortization (the stub returns a batch as cheaply as a single op).
+This IT makes the narrower, defensible claim: WireMock applies a per-*request*
+fixed delay (the round-trip component) and models no per-*op* server processing
+cost, so the IT measures bulk's **round-trip amortization only** — saving
+(K−1) round-trips per batch. That is the **lower bound** of real-world benefit;
+a real SCIM server *also* amortizes per-request parse/auth/dispatch/framework
+overhead WireMock cannot represent. The table reads as "at least this much," not
+"exactly this much" — and explicitly does not assert server-side amortization.
 
 ## Known limitations (out of scope)
 
