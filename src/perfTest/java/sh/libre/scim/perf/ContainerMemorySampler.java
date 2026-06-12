@@ -91,6 +91,15 @@ final class ContainerMemorySampler {
 
     /** Returns memory-in-use bytes, or -1 if the read failed. */
     private long readMemoryBytes() {
+        return readMemoryBytesOnce(container);
+    }
+
+    /**
+     * One-shot read of a container's cgroup memory-in-use (bytes), or -1 if the
+     * read failed. Static so callers can sample a quiescent baseline without
+     * spinning up a background polling thread.
+     */
+    static long readMemoryBytesOnce(GenericContainer<?> container) {
         // cgroup v2 first, then v1 fallback. A single exec tries both so we
         // don't pay two round-trips per sample on a v1 host.
         try {
