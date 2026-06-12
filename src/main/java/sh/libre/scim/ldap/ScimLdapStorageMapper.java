@@ -53,10 +53,7 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
         // 10k-user syncs goes from ~22 users/sec to ~150-180 users/sec.
         String userId = user.getId();
         if (isCreate) {
-            dispatcher.runAsync(ScimDispatcher.SCOPE_USER, (client, workerSession) -> {
-                var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
-                if (u != null) client.create(UserAdapter::new, u);
-            });
+            dispatcher.dispatchUserCreate(user);
         } else {
             dispatcher.runAsync(ScimDispatcher.SCOPE_USER, (client, workerSession) -> {
                 var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);

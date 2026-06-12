@@ -1,5 +1,6 @@
 package sh.libre.scim.core;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -15,6 +16,7 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakTransaction;
+import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 import sh.libre.scim.storage.ScimStorageProviderFactory;
@@ -232,6 +234,85 @@ public class ScimDispatcher implements AutoCloseable {
             public void rollback() {
                 LOGGER.debugf("scim async skipped for %d component(s): caller transaction rolled back",
                     componentIds.size());
+                done = true;
+            }
+
+            @Override public void setRollbackOnly() {}
+            @Override public boolean getRollbackOnly() { return false; }
+            @Override public boolean isActive() { return !done; }
+        });
+    }
+
+    /**
+     * Route a federation-imported user CREATE. Per propagation-user component:
+     * bulk-enabled → submit an id-only op to the bulk lane on commit; otherwise →
+     * the existing per-op create worker. Mirrors runAsync's afterCompletion deferral
+     * (rollback → skip). Does NOT reuse runAsync (which would re-include bulk
+     * components and double-create). Payload is built in the worker, not eagerly
+     * (the import thread lacks the user's email/name until the attribute mappers run).
+     */
+    public void dispatchUserCreate(UserModel user) {
+        var realm = session.getContext().getRealm();
+        String realmId = realm.getId();
+        String userId = user.getId();
+
+        var components = realm.getComponentsStream()
+            .filter(m -> ScimStorageProviderFactory.ID.equals(m.getProviderId())
+                && m.get("enabled", true) && m.get("propagation-user", false))
+            .toList();
+        if (components.isEmpty()) return;
+
+        var bulkOps = new ArrayList<BulkUserOp>();
+        var perOpComponentIds = new ArrayList<String>();
+        for (var component : components) {
+            if (component.get("bulk-enabled", false)) {
+                bulkOps.add(new BulkUserOp(realmId, component.getId(), userId));
+            } else {
+                perOpComponentIds.add(component.getId());
+            }
+        }
+
+        KeycloakSessionFactory factory = session.getKeycloakSessionFactory();
+        var laneRef = bulkOps.isEmpty() ? null : ScimBulkLane.get(session);
+
+        session.getTransactionManager().enlistAfterCompletion(new KeycloakTransaction() {
+            private volatile boolean done = false;
+
+            @Override public void begin() {}
+
+            @Override
+            public void commit() {
+                for (var op : bulkOps) {
+                    laneRef.submit(op);
+                }
+                for (var componentId : perOpComponentIds) {
+                    ASYNC_EXECUTOR.submit(() -> {
+                        try {
+                            KeycloakModelUtils.runJobInTransaction(factory, ws -> {
+                                var wr = ws.realms().getRealm(realmId);
+                                if (wr == null) return;
+                                ws.getContext().setRealm(wr);
+                                var component = wr.getComponent(componentId);
+                                if (component == null
+                                    || !ScimStorageProviderFactory.ID.equals(component.getProviderId())) return;
+                                var u = ws.users().getUserById(wr, userId);
+                                if (u == null) return;
+                                var client = new ScimClient(component, ws);
+                                try { client.create(UserAdapter::new, u); } finally { client.close(); }
+                            });
+                        } catch (RuntimeException e) {
+                            LOGGER.errorf(e, "scim dispatchUserCreate failed for component %s", componentId);
+                        }
+                    });
+                }
+                done = true;
+            }
+
+            @Override
+            public void rollback() {
+                LOGGER.debugf("scim dispatchUserCreate skipped for %d bulk + %d per-op component(s): "
+                    + "caller transaction rolled back",
+                    bulkOps.size(), perOpComponentIds.size());
                 done = true;
             }
 
