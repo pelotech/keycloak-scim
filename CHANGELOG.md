@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.2.0](https://github.com/pelotech/keycloak-scim/compare/v1.1.0...v1.2.0) (2026-06-12)
+
+
+### Features
+
+* **group:** propagate LDAP-federated users' group memberships to SCIM ([#31](https://github.com/pelotech/keycloak-scim/issues/31)) ([6da5e49](https://github.com/pelotech/keycloak-scim/commit/6da5e494f26d7916ac3e99a5439402b9eb7268e4))
+* **group:** send delta PATCH for single membership changes ([#29](https://github.com/pelotech/keycloak-scim/issues/29)) ([1c977f4](https://github.com/pelotech/keycloak-scim/commit/1c977f4ab20632aa5cd468b1e0348edb9fbf3c33))
+* **reconcile:** delete orphaned federated-group SCIM resources via member-presence ([#32](https://github.com/pelotech/keycloak-scim/issues/32)) ([0a6b2a8](https://github.com/pelotech/keycloak-scim/commit/0a6b2a8c5d5aa13b60fc839409599b703536db00))
+
+
+### Bug fixes
+
+* **ldap:** eliminate federated re-import loop via member-less group provisioning ([#33](https://github.com/pelotech/keycloak-scim/issues/33)) ([bfb91b9](https://github.com/pelotech/keycloak-scim/commit/bfb91b985319d2e59d6a36f2dcda281871fd1cb5))
+
 ## [1.1.0](https://github.com/pelotech/keycloak-scim/compare/v1.0.2...v1.1.0) (2026-06-08)
 
 
