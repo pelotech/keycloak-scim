@@ -13,8 +13,13 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 import javax.naming.AuthenticationException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.keycloak.storage.federated.UserFederatedStorageProvider;
 
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
@@ -23,6 +28,8 @@ import sh.libre.scim.core.UserAdapter;
 public class ScimLdapStorageMapper implements LDAPStorageMapper {
 
     public static final String LAST_SEEN_ATTRIBUTE = "ldap-federation-last-seen";
+
+    public static final String PROPAGATED_GROUPS_ATTR_PREFIX = "scim-propagated-groups-";
 
     private static final Logger LOGGER = Logger.getLogger(ScimLdapStorageMapper.class);
 
@@ -57,17 +64,73 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
             });
         }
 
-        // Propagate the user's current group memberships. LDAP-driven
-        // membership changes never fire GROUP_MEMBERSHIP admin events, so this
-        // hook is the only signal. Additions only; idempotent, so re-asserting
-        // on every import is safe (see the design doc). Runs on SCOPE_GROUP,
-        // independent of the user dispatch above — interoperates only with
-        // components configured for both user and group propagation.
+        // Reconcile the user's group memberships. LDAP-driven changes fire no
+        // GROUP_MEMBERSHIP event, so this hook is the only signal.
+        //   - removals: groups we last propagated but the user has left -> REMOVE PATCH
+        //   - additions: groups the user is in that we have NOT propagated -> ADD PATCH
+        // Both are computed as a delta against the per-component propagated-group set
+        // in federated storage, so a steady-state re-import (the common case — every
+        // full sync re-fires this hook for unchanged users) sends zero SCIM PATCHes.
+        // getGroupsStream() reads the user's OWN groups; it does NOT enumerate any
+        // group's members, so it cannot retrigger the federated re-import loop.
         dispatcher.runAsync(ScimDispatcher.SCOPE_GROUP, (client, workerSession) -> {
-            var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
+            // Only the single-member delta PATCH path is loop-safe. With
+            // group-patchOp=false, both add and remove fall back to a full-group
+            // `replace` that enumerates the federated group's members and
+            // re-imports them (an unbounded re-import loop). So federated
+            // group-membership propagation requires group-patchOp=true (the
+            // default); on the non-default path we skip it (see docs).
+            if (!client.isGroupMembershipDeltaEnabled()) {
+                return;
+            }
+            var workerRealm = workerSession.getContext().getRealm();
+            var u = workerSession.users().getUserById(workerRealm, userId);
             if (u == null) return;
-            u.getGroupsStream().forEach(group ->
-                client.ensureGroupMembership(GroupAdapter::new, group.getId(), userId));
+
+            Set<String> current = u.getGroupsStream()
+                    .map(GroupModel::getId)
+                    .collect(Collectors.toSet());
+
+            // Bookkeeping lives in federated storage (a JPA-backed local store for
+            // federated users), NOT in the user's LDAP-backed attributes — the latter
+            // are read-only under editMode=READ_ONLY and throw on write from this
+            // post-commit worker. getGroupsStream() (materialized only on this
+            // re-fetched worker user) stays the source of `current`.
+            var fed = workerSession.getProvider(UserFederatedStorageProvider.class);
+            String attr = PROPAGATED_GROUPS_ATTR_PREFIX + client.getComponentId();
+            List<String> storedList = fed.getAttributes(workerRealm, userId).get(attr);
+            Set<String> stored = storedList == null
+                    ? new HashSet<>() : new HashSet<>(storedList);
+
+            // Removals — groups we propagated that the user has left. Keep any whose
+            // REMOVE did not apply, so the next import retries.
+            Set<String> kept = new HashSet<>();
+            stored.stream().filter(gid -> !current.contains(gid)).forEach(gid -> {
+                if (!client.patchGroupMembership(GroupAdapter::new, gid, userId, false)) {
+                    kept.add(gid);
+                }
+            });
+
+            // Additions — only groups not already propagated (delta), so steady-state
+            // re-imports send no redundant PATCHes. A failed/skipped add is NOT recorded
+            // here, so it retries on the next import (the lazy-import-lag self-heal).
+            Set<String> addedOk = new HashSet<>();
+            current.stream().filter(gid -> !stored.contains(gid)).forEach(gid -> {
+                if (client.ensureGroupMembership(GroupAdapter::new, gid, userId)) {
+                    addedOk.add(gid);
+                }
+            });
+
+            // Record what SCIM now reflects: already-propagated current groups, plus
+            // newly-added successes, plus failed removals (still in SCIM, to retry).
+            Set<String> next = new HashSet<>(addedOk);
+            current.stream().filter(stored::contains).forEach(next::add);
+            next.addAll(kept);
+            if (next.isEmpty()) {
+                fed.removeAttribute(workerRealm, userId, attr);
+            } else {
+                fed.setAttribute(workerRealm, userId, attr, new ArrayList<>(next));
+            }
         });
     }
 

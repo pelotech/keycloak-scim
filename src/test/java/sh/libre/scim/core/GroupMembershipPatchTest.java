@@ -78,4 +78,21 @@ class GroupMembershipPatchTest {
         // RFC 7644 filter path targets exactly this member.
         assertThat(body).contains("members[value eq \\\"user-ext-9\\\"]");
     }
+
+    @Test
+    void groupUpdatePatchCarriesOnlyAttributesNotMembers() {
+        adapter.setId("kc-group-1");
+        adapter.setDisplayName("Engineers");
+
+        var patch = adapter.toPatchBuilder(scimRequestBuilder, GROUP_URL);
+
+        String body = patch.getResource();
+        assertThat(body).contains("\"op\":\"replace\"");
+        assertThat(body).contains("\"path\":\"displayName\"");
+        assertThat(body).contains("Engineers");
+        assertThat(body).contains("\"path\":\"externalId\"");
+        // The point of #1: a group update (rename / refresh) must NOT re-send
+        // the member list — membership is maintained by the delta PATCHes.
+        assertThat(body).doesNotContain("\"members\"");
+    }
 }

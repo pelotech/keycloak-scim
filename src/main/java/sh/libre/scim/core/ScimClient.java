@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.ProcessingException;
 
@@ -19,11 +20,14 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
+import org.keycloak.storage.StorageId;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
+
+import sh.libre.scim.jpa.ScimProvisionLock;
 
 
 public class ScimClient {
@@ -76,6 +80,23 @@ public class ScimClient {
             .build();
 
         registry = RetryRegistry.of(retryConfig);
+    }
+
+    /** The SCIM provider component id — stable across syncs/restarts. */
+    public String getComponentId() {
+        return model.getId();
+    }
+
+    /**
+     * Whether this component sends single-member delta PATCHes for group
+     * membership ({@code group-patchOp=true}, the default). When false,
+     * membership changes go through a full-group {@code replace} (PUT the whole
+     * member list), which enumerates a federated group's members and re-imports
+     * them — an unbounded re-import loop. The federated-import membership path
+     * therefore only runs when this is true (see ScimLdapStorageMapper).
+     */
+    public boolean isGroupMembershipDeltaEnabled() {
+        return this.model.get(GROUP_PATCH_OP_KEY, false);
     }
 
     protected ScimClientConfig genScimClientConfig() {
@@ -160,6 +181,15 @@ public class ScimClient {
         if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
             return;
         }
+        handleCreateResponse(adapter, postResource(adapter));
+    }
+
+    // POSTs the resource to the SCIM target and returns the raw response. Shared
+    // by sendCreate() (which then persists the mapping in the caller's transaction)
+    // and provisionGroupForMembership() (which persists in a nested transaction
+    // under a lock). Does NOT touch the mapping table — persistence is the
+    // caller's concern.
+    private <S extends ResourceNode> ServerResponse<S> postResource(Adapter<?, S> adapter) {
         // Fixed retry name (was "create-" + adapter.getId()). With ScimClient
         // instances now cached across many calls in ScimDispatcher, per-id
         // names would let the RetryRegistry accumulate Retry instances
@@ -179,7 +209,7 @@ public class ScimClient {
                 }
             }));
             span.setHttpStatus(response.getHttpStatus());
-            handleCreateResponse(adapter, response);
+            return response;
         }
     }
 
@@ -194,7 +224,45 @@ public class ScimClient {
         adapter.applyForProvisioning(group);
         // (No APPLY_MODEL_NANOS metric here — applyForProvisioning is a couple of
         // setters, unlike the member-enumerating apply() that create() times.)
-        sendCreate(adapter);
+        if (adapter.skip) {
+            return;
+        }
+
+        // Lock-free fast path: the group is already provisioned (a committed
+        // mapping exists). The steady state and every already-mapped group take
+        // this branch and never touch the lock.
+        if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
+            return;
+        }
+
+        // Atomic first-time provisioning, cluster-safe. Several federated-member
+        // import workers can reach here for the SAME group concurrently (each in
+        // its own transaction); without coordination they all POST /Groups and all
+        // persist a mapping — a duplicate that collides in SCIM_RESOURCE (rolling a
+        // worker back) or, on a non-deduping server, creates two groups. Serialize
+        // on a pessimistic DB lock (SELECT ... FOR UPDATE on the single seeded
+        // SCIM_PROVISION_LOCK row), taken on THIS worker's EntityManager and held
+        // until its transaction commits: the lock works across cluster nodes, and
+        // because it releases only at commit, the next worker to acquire it sees
+        // the winner's committed mapping (re-check below) and skips its POST —
+        // exactly one POST, one mapping.
+        entityManager().find(ScimProvisionLock.class, ScimProvisionLock.GROUPS,
+                LockModeType.PESSIMISTIC_WRITE);
+        if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
+            return; // a concurrent worker provisioned + committed while we waited
+        }
+        ServerResponse<Group> response = postResource(adapter);
+        if (!response.isSuccess()) {
+            LOGGER.warnf("Failed to provision group %s: HTTP %d %s",
+                    adapter.getId(), response.getHttpStatus(), response.getResponseBody());
+            return;
+        }
+        adapter.apply(response.getResource()); // captures the server-assigned external id
+        adapter.saveMapping(); // in this worker's own transaction; commits with it, releasing the lock
+    }
+
+    private EntityManager entityManager() {
+        return session.getProvider(JpaConnectionProvider.class).getEntityManager();
     }
 
     /**
@@ -349,15 +417,30 @@ public class ScimClient {
      * unchanged for those deployments. A missing group or user mapping (e.g.
      * the user was never synced) is logged and skipped, mirroring {@link #delete}.
      */
-    public void patchGroupMembership(
+    public boolean patchGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
             String groupId, String userId, boolean isAdd) {
 
         if (!this.model.get(GROUP_PATCH_OP_KEY, false)) {
             var group = session.groups().getGroupById(
                     session.getContext().getRealm(), groupId);
+            // group-patchOp=false propagates a membership change via a full-group
+            // `replace` (PUT the whole member list). For a FEDERATED (non-local)
+            // group, building that list enumerates the group's members and can
+            // re-import any not-yet-imported member (re-import loop). Local groups
+            // enumerate already-local members and are safe. So skip the replace
+            // for a federated group — membership for federated groups requires
+            // group-patchOp=true (see docs/ldap-federation-support.md).
+            if (group == null || !StorageId.isLocalStorage(group.getId())) {
+                if (group != null) {
+                    LOGGER.warnf("Skipping membership change for federated group %s: "
+                            + "group-patchOp=false cannot propagate it without a re-import "
+                            + "loop; requires group-patchOp=true", groupId);
+                }
+                return true;
+            }
             this.replace(factory, group);
-            return;
+            return true;
         }
 
         var adapter = getAdapter(factory);
@@ -389,11 +472,18 @@ public class ScimClient {
                 if (!response.isSuccess()) {
                     LOGGER.warnf("Failed to PATCH membership for group %s / user %s: %d %s",
                             groupId, userId, response.getHttpStatus(), response.getResponseBody());
+                    return false;
                 }
+                return true;
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.infof("Skipping membership patch: no SCIM mapping for group %s or user %s",
                         groupId, userId);
+                // Direction-aware: a REMOVE with no mapping has nothing to remove
+                // (applied → true), but an ADD with no mapping did NOT propagate
+                // (e.g. the user's SCIM mapping isn't committed yet — the lazy-import
+                // lag), so report not-applied so the caller retries on a later import.
+                return !isAdd;
             }
         }
     }
@@ -401,16 +491,22 @@ public class ScimClient {
     /**
      * Ensures a federated user's membership in one group is reflected in SCIM:
      * the SCIM group exists, and the user is a member. Used by the LDAP-import
-     * path, which has no membership delta to work from and must re-assert current
-     * memberships on every import (additions only — removals are out of scope).
+     * path.
      *
-     * <p>Both underlying operations are idempotent, so re-asserting every import
-     * is cheap after the first time: {@link #provisionGroupForMembership}
-     * short-circuits once the group has a local mapping, and the member-add is a
-     * single-member delta PATCH the server already has. Provisioning is
-     * deliberately <em>member-less</em> — it must not enumerate the group's
-     * members, because on a federated group that re-imports every member and
-     * re-fires {@code onImportUserFromLDAP} (an unbounded re-import loop).
+     * <p>Returns whether the membership is now propagated: {@code true} when the
+     * member-add applied (or the group already had it), {@code false} when it
+     * could not be propagated this import — the local group is missing, or the
+     * add hit the lazy-import lag (the user's SCIM mapping isn't committed yet).
+     * The caller uses this to track the propagated-group set and to retry a
+     * {@code false} on a later import, rather than re-asserting every membership
+     * on every import.
+     *
+     * <p>{@link #provisionGroupForMembership} short-circuits once the group has a
+     * local mapping, and the member-add is a single-member delta PATCH.
+     * Provisioning is deliberately <em>member-less</em> — it must not enumerate
+     * the group's members, because on a federated group that re-imports every
+     * member and re-fires {@code onImportUserFromLDAP} (an unbounded re-import
+     * loop).
      *
      * <p>When {@code group-patchOp=false}, {@link #patchGroupMembership} falls
      * back to a full {@code replace} that itself provisions the group and the
@@ -420,18 +516,18 @@ public class ScimClient {
      * still occur on the non-default {@code group-patchOp=false} path — a known
      * residual (see docs/roadmap.md). A missing local group is logged and skipped.
      */
-    public void ensureGroupMembership(
+    public boolean ensureGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
             String groupId, String userId) {
         var group = session.groups().getGroupById(session.getContext().getRealm(), groupId);
         if (group == null) {
             LOGGER.infof("Skipping membership ensure: group %s not found locally", groupId);
-            return;
+            return false;
         }
         if (this.model.get(GROUP_PATCH_OP_KEY, false)) {
             provisionGroupForMembership(factory, group);
         }
-        this.patchGroupMembership(factory, groupId, userId, true);
+        return this.patchGroupMembership(factory, groupId, userId, true);
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(

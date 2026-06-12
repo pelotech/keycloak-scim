@@ -474,6 +474,16 @@ public abstract class IntegrationTestBase {
         ).getCount();
     }
 
+    /** Current count of single-member delta remove PATCHes (op=remove) to /Groups/*. */
+    protected int memberRemovePatchCount() {
+        return wireMock.countRequestsMatching(
+            patchRequestedFor(urlPathMatching("/Groups/.*"))
+                .withRequestBody(containing("\"op\":\"remove\""))
+                .withRequestBody(containing("members"))
+                .build()
+        ).getCount();
+    }
+
     /** Polls until WireMock has seen at least {@code atLeast} member-add PATCHes to /Groups/*. */
     protected void awaitMemberAddPatchCount(int atLeast) {
         await().atMost(30, SECONDS).untilAsserted(() -> {
@@ -538,6 +548,27 @@ public abstract class IntegrationTestBase {
                 DirContext.REPLACE_ATTRIBUTE,
                 new BasicAttribute(attr, value));
             ctx.modifyAttributes(dn, new ModificationItem[]{mod});
+        } finally {
+            ctx.close();
+        }
+    }
+
+    /**
+     * REPLACEs a multi-valued LDAP attribute with the given values. The OpenLDAP
+     * container is shared across all test methods in a class and is NOT reset
+     * between them, so a test that mutates shared LDAP state (e.g. a group's
+     * {@code member} list) must restore it — otherwise later tests see the
+     * mutation. Use this to reset a group's membership to its seeded set.
+     */
+    protected void setLdapAttribute(String dn, String attr, String... values) throws NamingException {
+        var ctx = new InitialDirContext(newLdapEnv());
+        try {
+            var ba = new BasicAttribute(attr);
+            for (String v : values) {
+                ba.add(v);
+            }
+            ctx.modifyAttributes(dn, new ModificationItem[]{
+                new ModificationItem(DirContext.REPLACE_ATTRIBUTE, ba)});
         } finally {
             ctx.close();
         }

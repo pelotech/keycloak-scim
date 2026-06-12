@@ -25,8 +25,14 @@ touches both.
   `members[value eq "..."]`. `group-patchOp=false` deployments fall back
   to the existing full `replace`. Verified by `GroupMembershipPatchTest`
   (wire shape) and `ScimGroupPropagationIT` (end-to-end add/remove).
-  Note: this covers membership *changes*; a full group `replace` (name
-  edits, sync-refresh) still sends the whole list via `toPatchBuilder`.
+  A group **update** (rename / sync-refresh) on `group-patchOp=true` now
+  also PATCHes only the group's own attributes (`displayName`,
+  `externalId`) — `toPatchBuilder` no longer re-asserts the member list
+  (which meant a per-member external-id lookup plus a whole-list re-send
+  on every rename); membership is maintained by the delta PATCHes.
+  Verified by `GroupMembershipPatchTest.groupUpdatePatchCarriesOnlyAttributesNotMembers`.
+  (The `group-patchOp=false` full PUT necessarily still sends the whole
+  resource — it cannot be a partial update.)
 - **LDAP-federated group membership.** _Done._ Federated users'
   current group memberships now propagate to SCIM via
   `ScimLdapStorageMapper.onImportUserFromLDAP` →
@@ -34,15 +40,35 @@ touches both.
   user belongs to, the mapper first ensures the SCIM group exists
   (idempotent create; skipped when `group-patchOp=false` because the
   `replace` fallback already covers it), then adds the member via a
-  single-member delta PATCH. Additions only; membership is
-  re-asserted on every import. Requires the SCIM provider component
+  single-member delta PATCH. Additions are delta-driven (see
+  "membership removal" below — only newly-added groups PATCH).
+  Requires the SCIM provider component
   to enable both `propagation-user=true` and `propagation-group=true`
   — membership resolution looks up the user's SCIM mapping under the
   same component id, so a group-only component cannot resolve
   members. Verified by `EnsureGroupMembershipTest` (unit) and
-  `ScimLdapGroupMembershipIT` (integration). Membership REMOVAL
-  (user dropped from an LDAP group) is not yet handled; it is a
-  deferred reconciler-style follow-up.
+  `ScimLdapGroupMembershipIT` (integration).
+- **LDAP-federated membership removal.** _Done._ A user dropped from
+  an LDAP group fires no `GROUP_MEMBERSHIP` event, so removal rides the
+  same import hook: on each import the `SCOPE_GROUP` worker diffs the
+  user's current groups against a per-component record of what it last
+  propagated and sends a single-member REMOVE PATCH for each group the
+  user has left and a single-member ADD for each newly-joined group.
+  **Both directions are delta-driven and success-tracked**, so a
+  steady-state re-import (a full sync re-fires the hook for every
+  unchanged user) sends zero SCIM PATCHes — eliminating the prior
+  per-sync re-assertion (measured +1 ADD/member/sync). A failed/skipped
+  ADD or REMOVE is left unrecorded/retained and retried on the next
+  import (the lazy-import-lag self-heal). The bookkeeping is stored via
+  `UserFederatedStorageProvider` (key `scim-propagated-groups-<componentId>`),
+  **not** as a user attribute: the diff runs in the post-commit async
+  worker on a re-fetched federated user, whose attributes are read-only
+  under `editMode=READ_ONLY` (the common config) — federated storage is
+  the JPA-backed local store Keycloak keeps for federated users and is
+  writable there. The now-empty group is reaped by the member-presence
+  reconciler. Verified by `ScimLdapStorageMapperTest` (diff / failed-
+  removal retry / idempotence units) and `ScimLdapGroupMembershipIT`
+  (end-to-end remove + loop-safety, run under `READ_ONLY` federation).
 - **Group rename and delete for federated groups.** _Done
   (delete-based)._ Federated group deletes and renames now propagate
   via a member-presence pass in the reconciler: a mapped group with
@@ -131,28 +157,65 @@ a concrete IdP that requires it.
   now calls it instead of the member-enumerating `create`/`apply`.
   Re-measured: 2 invocations / ~1 PATCH per 2-member sync, zero
   re-import recursion on `scim-dispatch` threads (on the default
-  `group-patchOp=true` path). **Residual:** when `group-patchOp=false`,
-  `ensureGroupMembership` defers to `patchGroupMembership`'s full
-  `replace` fallback, which still calls `GroupAdapter.apply(GroupModel)`
-  → `getGroupMembersStream`, so the loop can still occur on that
-  non-default path. Unmeasured (the re-measurement covered
-  `group-patchOp=true` only); fix the same way — provision/replace
-  without enumerating members — if it proves to loop.
-- **Concurrent group provisioning can double-POST.** The runaway
-  re-import storm that amplified this race is now gone (see entry
-  above), but the underlying **check-then-act race** in
-  `ScimClient.create`/`sendCreate` persists independently: when
-  several members of a not-yet-provisioned group are imported
-  concurrently, each worker queries the mapping, finds none, and
-  POSTs `/Groups` before either saves the mapping. Re-measurement
-  after the re-import fix still shows 2 POSTs for a 2-member group;
-  `ScimLdapGroupMembershipIT` asserts the bounded `1..2` count. A
-  conformant SCIM server `409`s the duplicate (logged, no mapping
-  saved), so it is bounded and mostly benign, but a non-idempotent
-  server could end up with a duplicate group. Follow-up: make
-  first-time group provisioning atomic (e.g. insert-mapping-first
-  with rollback on POST failure, a DB guard, or per-group
-  serialization).
+  `group-patchOp=true` path). The separate *steady-state* per-sync
+  re-assertion that remained after the loop fix — additions re-asserting
+  one ADD per member per group on every sync (measured +1 ADD/member/sync,
+  since Keycloak re-fires `onImportUserFromLDAP` for unchanged users) — is
+  **also now eliminated**: additions are delta-driven against the
+  federated-storage propagated-group set, so a no-change re-import sends
+  zero PATCHes (`ScimLdapStorageMapperTest.noMembershipChangeEmitsNoScimCalls`,
+  `ScimLdapGroupMembershipIT.unchangedResyncSendsNoRedundantMemberPatches`).
+  **`group-patchOp=false` residual — handled.** Confirmed by inspection
+  that on that non-default path both add and remove fall back to a full
+  `replace` (`GroupAdapter.apply(GroupModel)` → `getGroupMembersStream`),
+  which re-imports the federated group's members — the same loop. Because
+  a full member-list PUT *inherently* needs the member list (the
+  member-less fix used for `group-patchOp=true` does not apply, and
+  deriving the list without `getGroupMembersStream` is O(mapped users) per
+  group), federated group-membership propagation is **gated on
+  `group-patchOp=true`**: the `SCOPE_GROUP` worker no-ops when
+  `ScimClient.isGroupMembershipDeltaEnabled()` is false, so the loop
+  cannot occur. The admin `GROUP_MEMBERSHIP`-event path shares the same
+  `replace` fallback, so `patchGroupMembership` also skips it for a
+  **federated** group on `group-patchOp=false` (detected via
+  `StorageId.isLocalStorage(group.getId())`; local groups still `replace`
+  as before, since their members are already local and don't re-import).
+  The (rare) cost is that on `group-patchOp=false` a federated group's
+  memberships are not propagated — documented in
+  [`docs/ldap-federation-support.md`](ldap-federation-support.md). Verified
+  by `ScimLdapStorageMapperTest.skipsEntirelyWhenGroupPatchOpDisabled` and
+  `EnsureGroupMembershipTest.groupPatchOpOff_federatedGroup_skipsReplace`
+  (local groups still replace per `groupPatchOpOff_localGroup_stillReplaces`).
+- **Concurrent group provisioning double-POST.** _Fixed (cluster-safe)._
+  When several members of a not-yet-provisioned group were imported
+  concurrently, each worker (its own transaction) queried the mapping,
+  found none, and POSTed `/Groups` before any saved — a check-then-act
+  race that, against a non-deduping server, creates duplicate SCIM groups
+  and a duplicate mapping (a PK collision that rolls back the worker, or a
+  `NonUniqueResultException` on a later add). Surfaced sharply once
+  delta-driven additions removed the per-sync re-assertion that had
+  *masked* the resulting non-convergence. **Fix:**
+  `ScimClient.provisionGroupForMembership` does a lock-free pre-check, then
+  (only when the mapping is absent) takes a **pessimistic DB lock** —
+  `SELECT ... FOR UPDATE` on a single seeded row in a dedicated
+  `SCIM_PROVISION_LOCK` table (`ScimProvisionLock`), via the worker's own
+  `EntityManager` (`LockModeType.PESSIMISTIC_WRITE`) — re-checks, then POSTs
+  and saves the mapping in that same transaction. The lock is held until
+  the transaction commits, so it serializes provisioners **across cluster
+  nodes** and the next worker to acquire it sees the winner's committed
+  mapping and skips — exactly one POST, one mapping, regardless of server
+  dedup behavior. A single lock row (rather than per-group/striped) means a
+  worker holds at most one provisioning lock, so there is no lock-ordering
+  deadlock; the cost is that concurrent *first-time* provisioning
+  serializes (bounded — only until each distinct group is provisioned once;
+  steady state and already-mapped groups never lock). A nested
+  transaction was tried first and rejected — Keycloak's Quarkus runtime
+  does not give a freshly-nested session a JPA `EntityManagerFactory` from
+  an async worker thread (NPE). Verified by
+  `ScimLdapGroupMembershipIT.concurrentFirstProvisioningPostsGroupExactlyOnce`
+  (exactly one `POST /Groups` under a non-deduping always-201 stub — which
+  holds only if the DB lock serialized the provisioners and the winner's
+  commit-on-release made the mapping visible to the loser).
 - **Perf-rig sibling container.** The Testcontainers + Keycloak +
   WireMock setup routes SCIM traffic through an SSH tunnel
   (`host.testcontainers.internal`), adding ~25–30 ms per request to

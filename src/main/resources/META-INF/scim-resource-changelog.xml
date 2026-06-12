@@ -25,4 +25,19 @@
         <addForeignKeyConstraint baseTableName="SCIM_RESOURCE" baseColumnNames="COMPONENT_ID" constraintName="FK_SCIM_RESOURCE_COMPONENT" referencedTableName="COMPONENT" referencedColumnNames="ID" onDelete="CASCADE" onUpdate="CASCADE" />
     </changeSet>
 
+    <changeSet author="keycloak-scim" id="scim-provision-lock-1.0">
+        <!-- Single-row lock table: serializes first-time group provisioning
+             cluster-wide via SELECT ... FOR UPDATE on the seeded row. See
+             ScimProvisionLock / ScimClient.provisionGroupForMembership. -->
+        <createTable tableName="SCIM_PROVISION_LOCK">
+            <column name="ID" type="VARCHAR(36)">
+                <constraints nullable="false" />
+            </column>
+        </createTable>
+        <addPrimaryKey constraintName="PK_SCIM_PROVISION_LOCK" tableName="SCIM_PROVISION_LOCK" columnNames="ID" />
+        <insert tableName="SCIM_PROVISION_LOCK">
+            <column name="ID" value="groups" />
+        </insert>
+    </changeSet>
+
 </databaseChangeLog>

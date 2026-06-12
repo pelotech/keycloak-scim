@@ -467,8 +467,36 @@ to at import time, the call sequence is:
    (RFC 7644) is sent for the user. This is the same delta-PATCH
    mechanism used by the `GROUP_MEMBERSHIP` event-listener path.
 
-This covers additions only. Membership is re-asserted on every import,
-so periodic and full syncs self-heal any drift.
+Additions are delta-driven (see below): only a group the user has newly
+joined produces an ADD PATCH, so a steady-state re-import sends nothing.
+**Removals** are handled by the same hook — a user dropped from an LDAP
+group.
+
+### Membership add/remove diff
+
+LDAP-driven membership changes fire no `GROUP_MEMBERSHIP` event, so they
+ride the import hook rather than an event. On each import the `SCOPE_GROUP`
+worker compares the user's *current* groups against a per-component record
+of the groups it last propagated for that user, and reconciles both
+directions as a delta: a single-member **ADD** PATCH for each newly-joined
+group (`current − stored`) and a single-member **REMOVE** PATCH for each
+group the user has left (`stored − current`). Groups already propagated are
+skipped, so an unchanged user (re-imported on every full sync) produces
+**zero** PATCHes — no per-sync re-assertion. The record is **success-tracked**:
+a skipped/failed ADD is left unrecorded and a failed REMOVE is retained, so
+either is retried on the next import (the lazy-import-lag self-heal). A
+REMOVE that fails after retries is retained in the record and retried on
+the next import, so a departed user does not silently linger in the SCIM
+group. The now-memberless group is reaped by the group-reconciler
+(member-presence).
+
+The per-user record is stored in Keycloak's **federated-user storage**
+(`UserFederatedStorageProvider`, key `scim-propagated-groups-<componentId>`),
+not as a user attribute. This matters under `editMode=READ_ONLY`
+federation (the common case): the diff runs in the post-commit async
+worker on a re-fetched federated user, whose LDAP-backed attributes are
+read-only there, whereas federated storage is the writable JPA-backed
+local store Keycloak keeps for federated users.
 
 ### Operator requirement
 
@@ -479,21 +507,23 @@ configured for group propagation alone cannot resolve member ids and
 will skip group-membership propagation silently. A single component
 covering both scopes is the supported configuration.
 
+It must also have **`group-patchOp=true`** (the default). The federated
+membership add/remove path relies on the single-member delta PATCH; with
+`group-patchOp=false`, membership would instead go through a full-group
+`replace` (PUT the whole member list), which enumerates the federated
+group's members and re-imports them — an unbounded re-import loop. To
+avoid that, federated group-membership propagation is **skipped entirely
+when `group-patchOp=false`** (the `SCOPE_GROUP` worker no-ops). Use the
+default `group-patchOp=true` for federated group membership.
+
 ### Lazy-import convergence
 
 On a one-shot lazy import (a single user login triggers federation
 fetch), the group-membership task may run before the user's SCIM
 mapping has been persisted and skip. This is the expected behaviour:
-the next periodic sync re-asserts all memberships, so the state
-converges without operator intervention. The accepted lag is one sync
-interval.
-
-### Not yet handled
-
-- **Membership removal.** When a user is dropped from an LDAP group,
-  the removal is not propagated to SCIM. This is a deferred
-  reconciler-style follow-up (analogous to the user-deletion gap
-  tracked in scenario 4 above).
+a skipped ADD is not recorded in the propagated-group set, so the next
+sync re-attempts it (success-tracking), and the state converges without
+operator intervention. The accepted lag is one sync interval.
 
 ## Group reconciliation (member-presence)
 
