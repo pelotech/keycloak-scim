@@ -134,7 +134,7 @@ class BulkLatencySweepIT extends PerfTestBase {
         seeded.addAll(seedLdapUsers(prefix, N));
 
         // Expected batches ≈ ⌈N/K⌉. Await that floor, then settle, so a final
-        // partial batch / timing flush isn't missed.
+        // partial batch (the last drainTo of fewer than K ops) isn't missed.
         int expectedBatchesFloor = N / K; // conservative floor (ignores partial)
         runCell("bulk-on", true, delayMs, r,
             () -> bulkPostCount() >= expectedBatchesFloor,
@@ -208,8 +208,8 @@ class BulkLatencySweepIT extends PerfTestBase {
 
     /**
      * Settle wait for the bulk lane: block until the {@code POST /Bulk} count has
-     * stopped changing, so a trailing partial batch (the last &lt;K ops flushed
-     * on a timer) is counted before we read {@code httpRequests}.
+     * stopped changing, so a trailing partial batch (the last {@code drainTo} of
+     * fewer than K ops) is counted before we read {@code httpRequests}.
      */
     private void awaitBulkStable() {
         await().atMost(60, java.util.concurrent.TimeUnit.SECONDS)

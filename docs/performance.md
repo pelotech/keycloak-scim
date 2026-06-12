@@ -362,9 +362,14 @@ Measured (N = 2000, K = 20, 8 workers; Keycloak container RSS via cgroup):
 The **request ratio** is the load-bearing column: it proves batching engaged
 and separates "fewer requests" from "shorter wall-time". Bulk-off is flat at
 1.00 (one `POST /Users` per user); bulk-on rises from 4.2 toward K (≈18) as the
-sink gets slower — at 5 ms the lane's time-based flush ships small partial
-batches before they fill to K=20, so the amortization is weak; at ≥50 ms each
-batch fills, so each `POST /Bulk` covers ~K ops.
+sink gets slower. The lane coalesces by draining whatever is already queued
+(`take()` one, then `drainTo` up to K−1 more) — there is no flush timer. At 5 ms
+the sink drains about as fast as the import enqueues, so a worker's `drainTo`
+usually finds the queue nearly empty and batches only a few ops (well under
+K=20), making amortization weak; at ≥50 ms ops accumulate in the queue between
+drains, so each `drainTo` grabs ~K and each `POST /Bulk` covers ~K ops. Batch
+fill is thus latency-driven — the amortization mechanism self-engages exactly on
+the slow sinks where it matters.
 
 ### Honesty caveat — what this measures (and does not)
 
@@ -393,9 +398,9 @@ values directly later.
 on fast/local sinks.** At 200 ms, bulk drains 2000 users in **7.8 s vs 54.5 s**
 per-op — a **7× wall-time win** — and at 50 ms it's **6.7 s vs 14.6 s** (~2×).
 But at 5 ms, bulk is **slower** (7.7 s vs 2.9 s): when a round-trip is cheap,
-the batching lane's coalescing/timer-flush latency and partial-batch overhead
-cost more than the round-trips it saves, and the per-op lane's raw 8-worker
-concurrency wins. The crossover sits at a low single-digit-ms RTT, so the payoff
+the batching lane's coalescing and small-partial-batch overhead (a fast sink
+keeps the queue near-empty, so `drainTo` rarely fills a batch) costs more than
+the round-trips it saves, and the per-op lane's raw 8-worker concurrency wins. The crossover sits at a low single-digit-ms RTT, so the payoff
 is governed almost entirely by network distance to the SCIM sink. **Decision
 input for further /Bulk investment (replace / delete / membership):** prioritize
 it for deployments whose SCIM target is remote/high-latency; for local or
