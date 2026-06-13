@@ -34,6 +34,8 @@ public class UserAdapter extends Adapter<UserModel, User> {
     private String email;
     private Boolean active;
     private String[] roles;
+    private ExtensionAttributeMappings extensionMappings;
+    private Map<ExtensionAttributeMapping, List<String>> extensionValues = Map.of();
 
     public UserAdapter(KeycloakSession session, String componentId) {
         super(session, componentId, "User", Logger.getLogger(UserAdapter.class));
@@ -139,6 +141,11 @@ public class UserAdapter extends Adapter<UserModel, User> {
         rolesSet.toArray(roles);
         setRoles(roles);
         this.skip = StringUtils.equals(user.getFirstAttribute("scim-skip"), "true");
+        var extModel = getModel();
+        this.extensionMappings = ExtensionAttributeMappings.fromConfig(
+            extModel == null ? List.of()
+                             : extModel.getConfig().getList("user-extension-mappings"));
+        this.extensionValues = this.extensionMappings.read(user);
     }
 
     @Override
@@ -187,6 +194,9 @@ public class UserAdapter extends Adapter<UserModel, User> {
             roles.add(role);
         }
         user.setRoles(roles);
+        if (extensionMappings != null && !extensionMappings.isEmpty()) {
+            extensionMappings.attach(extensionValues, user);
+        }
         return user;
     }
 
@@ -277,6 +287,16 @@ public class UserAdapter extends Adapter<UserModel, User> {
                       .op(PatchOp.REPLACE)
                       .value(displayName)
                     .build();
+
+        if (extensionMappings != null && !extensionMappings.isEmpty()) {
+            for (var pv : extensionMappings.patchValues(extensionValues)) {
+                patchBuilder.addOperation()
+                    .path(pv.path())
+                    .op(PatchOp.REPLACE)
+                    .valueNode(pv.value())
+                    .build();
+            }
+        }
 
         return patchBuilder;
     }

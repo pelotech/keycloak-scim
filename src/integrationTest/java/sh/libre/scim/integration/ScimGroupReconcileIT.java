@@ -77,22 +77,32 @@ class ScimGroupReconcileIT extends IntegrationTestBase {
      * is safe to mutate LDAP and re-sync.
      */
     private void provisionEngineers(TestRealm r) {
-        // Mirrors ScimLdapGroupMembershipIT#syncUntilMembershipsAdded: exactly two
-        // full syncs to a deterministic end state. We deliberately do NOT loop-sync
-        // (each re-import re-fires the per-member SCOPE_GROUP dispatch + LDAP
-        // resolves; over-syncing storms the LDAP connection pool — surfacing
-        // transient HTTP 400 / BindException). Generous awaits absorb cold-start
-        // lag instead of extra syncs.
-        triggerFullSync(r);
-
-        // Both users provisioned (their SCIM mappings are what the member PATCHes
-        // resolve against), and the group provisioned (POST /Groups).
-        await().atMost(60, SECONDS).until(() ->
-            wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Users")).build()).getCount() >= 2);
-        await().atMost(60, SECONDS).until(() ->
-            wireMock.countRequestsMatching(
-                postRequestedFor(urlPathEqualTo("/Groups")).build()).getCount() >= 1);
+        // First provisioning phase: drive a full sync until BOTH seeded users and
+        // the group have been POSTed to the sink. A single sync can under-deliver:
+        // Keycloak's LDAP import can hit a transient BindException mid-enumeration
+        // under cumulative ephemeral-port pressure and return having imported only
+        // partial data (the per-entry failure is swallowed, so syncUsers does not
+        // throw). A longer await cannot recover a short sync — only a re-sync can —
+        // so we re-sync until the side effects land rather than waiting on one
+        // import. The happy path syncs once and breaks immediately; extra syncs
+        // happen only on shortfall, bounded with a cooldown so we don't storm the
+        // LDAP pool. This mirrors the member-add loop below.
+        for (int attempt = 0; attempt < 4; attempt++) {
+            triggerFullSync(r);
+            try {
+                await().atMost(30, SECONDS).until(() ->
+                    wireMock.countRequestsMatching(
+                        postRequestedFor(urlPathEqualTo("/Users")).build()).getCount() >= 2
+                    && wireMock.countRequestsMatching(
+                        postRequestedFor(urlPathEqualTo("/Groups")).build()).getCount() >= 1);
+                break;
+            } catch (org.awaitility.core.ConditionTimeoutException e) {
+                if (attempt == 3) {
+                    throw e;
+                }
+                sleepQuietly(5);
+            }
+        }
 
         // Re-sync: user mappings now exist, so each imported user's membership
         // resolves to a single-member add PATCH (the group create short-circuits on
