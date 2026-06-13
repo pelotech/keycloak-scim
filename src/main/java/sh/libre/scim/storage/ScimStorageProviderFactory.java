@@ -20,6 +20,7 @@ import org.keycloak.storage.UserStorageProviderModel;
 import org.keycloak.storage.user.ImportSynchronization;
 import org.keycloak.storage.user.SynchronizationResult;
 
+import sh.libre.scim.core.ExtensionAttributeMappings;
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.OAuthClientCredentialsTokenSource;
 import sh.libre.scim.core.ScimDispatcher;
@@ -174,6 +175,15 @@ public class ScimStorageProviderFactory
                 .helpText("Comma-separated regex patterns for group names to sync (e.g. 'admins,team-.*'). Leave empty to sync all groups.")
                 .add()
                 .property()
+                .name("user-extension-mappings")
+                .type(ProviderConfigProperty.MULTIVALUED_STRING_TYPE)
+                .label("User extension attribute mappings")
+                .helpText("One mapping per row: '<keycloakAttr> = <scimSchemaUrn>:<attr> [; type=<t>] [; multi]'. "
+                    + "type is one of string (default), boolean, integer, decimal, dateTime, reference. "
+                    + "Add ';multi' for multivalued attributes. Example: "
+                    + "'dept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department'.")
+                .add()
+                .property()
                 .name(RECONCILER_ENABLED)
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable LDAP-deletion reconciler")
@@ -231,6 +241,14 @@ public class ScimStorageProviderFactory
             .filter(c -> "ldap".equals(c.getProviderId()))
             .toList();
         ReconcilerConfigValidator.validate(model, ldapFederations);
+
+        try {
+            ExtensionAttributeMappings.parse(
+                model.getConfig().getList("user-extension-mappings"));
+        } catch (IllegalArgumentException e) {
+            throw new ComponentValidationException(
+                "Invalid user-extension-mappings: " + e.getMessage(), e);
+        }
 
         String authMode = model.get("auth-mode");
         if ("CLIENT_CREDENTIALS".equals(authMode)) {
