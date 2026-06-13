@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/pelotech/keycloak-scim/compare/v1.3.0...v1.4.0) (2026-06-13)
+
+
+### Features
+
+* push SCIM extension attributes (Enterprise + custom schemas) ([#37](https://github.com/pelotech/keycloak-scim/issues/37)) ([018d2ba](https://github.com/pelotech/keycloak-scim/commit/018d2ba2bfc8449dc82f3078b2504119b30fb7e8))
+
 ## [1.3.0](https://github.com/pelotech/keycloak-scim/compare/v1.2.0...v1.3.0) (2026-06-12)
 
 
