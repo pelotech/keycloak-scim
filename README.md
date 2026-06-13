@@ -282,6 +282,46 @@ Keycloak's own footprint).
 > back-pressure design are in
 > [`docs/performance.md`](docs/performance.md).
 
+## SCIM extension attributes (opt-in)
+
+Map Keycloak user attributes to SCIM extension-schema attributes and
+push them outbound on every user create, update, refresh, and bulk
+sync — no code changes required.
+
+**Configuring mappings.** Per SCIM provider component, add one or more
+rows to `user-extension-mappings` (*Admin Console → your SCIM provider
+→ config*, or via the component API). Each row uses the grammar:
+
+```
+<keycloakAttr> = <scimSchemaUrn>:<attr> [; type=<t>] [; multi]
+```
+
+`type` coerces the raw string value before serialising — supported
+values: `string` (default), `boolean`, `integer`, `decimal`,
+`dateTime`, `reference`. Add `; multi` for multivalued attributes (emits
+a JSON array from all values of that Keycloak attribute). Both the IETF
+Enterprise User extension and arbitrary custom URN schemas are
+supported.
+
+**Example rows:**
+
+```
+# IETF Enterprise User extension
+kcDept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department
+
+# Custom schema — boolean
+kcActive = urn:example:custom:2.0:User:active ; type=boolean
+
+# Custom schema — multivalued string
+kcLabels = urn:example:custom:2.0:User:labels ; multi
+```
+
+A malformed row is rejected at component save time with a validation
+error. Leave the property empty (the default) to send no extension
+attributes. The full grammar, all type tokens, and Enterprise User
+field constraints are documented in
+[`docs/configuration.md`](docs/configuration.md#user-extension-attributes).
+
 ## Documentation
 
 - [`docs/configuration.md`](docs/configuration.md) — every

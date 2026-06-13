@@ -95,6 +95,72 @@ SCIM servers (notably Databricks) require PATCH for groups.
 | --- | --- | --- | --- |
 | `group-filter` | string | — | Comma-separated regex patterns. When set, only groups whose `name` matches at least one pattern are propagated. Subgroups of a matching group are included recursively. Example: `admins,team-.*` propagates `admins` plus any group whose name starts with `team-`. Leave empty (default) to propagate all groups. |
 
+### User extension attributes
+
+Maps Keycloak user attributes to SCIM extension-schema attributes and
+pushes them outbound on create, update, refresh, and `/Bulk` sync.
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `user-extension-mappings` | multivalued string | — | One mapping per row; each row has the grammar `<keycloakAttr> = <scimSchemaUrn>:<attr> [; type=<t>] [; multi]`. See below. |
+
+**Row grammar.**
+
+```
+<keycloakAttr> = <scimSchemaUrn>:<attr> [; type=<t>] [; multi]
+```
+
+- `<keycloakAttr>` — the name of the Keycloak user attribute to read.
+- `<scimSchemaUrn>:<attr>` — the target SCIM extension schema URN and
+  attribute name, separated by the last `:`.  Both the IETF Enterprise
+  User extension
+  (`urn:ietf:params:scim:schemas:extension:enterprise:2.0:User`) and
+  arbitrary custom URN schemas are supported.
+- `type=<t>` (optional) — coerces the string attribute value before
+  serialising.  Supported types: `string` (default), `boolean`,
+  `integer`, `decimal`, `dateTime`, `reference`.  Enterprise User
+  fields must be `string` (the default; no `type=` needed).
+- `multi` (optional) — reads all attribute values via
+  `UserModel.getAttributes()` and emits a JSON array.  Not allowed on
+  Enterprise User fields.
+
+Modifiers (`type=…`, `multi`) may appear in either order, separated by
+`;`.  Blank rows are ignored.  A malformed row is rejected at component
+save time with a `ComponentValidationException`; if a bad row somehow
+reaches runtime it is skipped (logged as WARN) and the whole mapping
+table is treated as empty.
+
+**Constraints specific to Enterprise User fields.**
+
+| Enterprise User field | Description |
+| --- | --- |
+| `employeeNumber` | Employee number (string) |
+| `costCenter` | Cost centre (string) |
+| `organization` | Organisation name (string) |
+| `division` | Division name (string) |
+| `department` | Department name (string) |
+
+No other Enterprise User fields are mapped through this knob (the SCIM
+SDK exposes these five; the rest of RFC 7643 §4.3 is not surfaced
+here).
+
+**Examples.**
+
+```
+# Enterprise User extension (field must be type=string; no 'multi')
+kcDept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department
+
+# Custom schema — boolean attribute
+kcActive = urn:example:custom:2.0:User:active ; type=boolean
+
+# Custom schema — multivalued string attribute
+kcLabels = urn:example:custom:2.0:User:labels ; multi
+```
+
+Values are pushed outbound on every user create, update, refresh, and
+bulk-create operation.  The property is absent from the component by
+default (no mappings).
+
 ### Reconciler
 
 The reconciler is an opt-in periodic task that propagates LDAP
