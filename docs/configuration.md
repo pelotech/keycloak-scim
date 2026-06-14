@@ -161,6 +161,18 @@ Values are pushed outbound on every user create, update, refresh, and
 bulk-create operation.  The property is absent from the component by
 default (no mappings).
 
+**Prerequisite — the source attribute must exist on the user.** A
+mapping only *forwards* a Keycloak user attribute; it does not create
+one.  On Keycloak 25+, the realm's declarative **User Profile** drops
+any attribute it doesn't recognise, so each `<keycloakAttr>` you map
+must be permitted — either declared in the realm User Profile, or the
+realm's **unmanaged attribute policy** set to allow it (e.g. `ENABLED`).
+Otherwise the left-hand attribute reads back empty and nothing is sent.
+Populate the values themselves via your LDAP/federation attribute
+mappers, the admin API, or user-profile inputs.  See
+[Headless / automated provisioning](#headless--automated-provisioning)
+for the realm-config form of both steps.
+
 ### Reconciler
 
 The reconciler is an opt-in periodic task that propagates LDAP
@@ -254,6 +266,119 @@ concrete need):
 - **No retry on token-endpoint 5xx.** A failed token fetch surfaces
   as an error on the calling SCIM operation. Symmetric with the
   existing no-retry policy for SCIM-server errors.
+
+## Headless / automated provisioning
+
+Everything above is configurable without the Admin Console. The SCIM
+provider is an ordinary **User Storage Provider component**
+(`providerType=org.keycloak.storage.UserStorageProvider`,
+`providerId=scim`); its config is a map of `key → list-of-strings`.
+
+> **The one gotcha:** `user-extension-mappings` (and any other
+> multivalued knob) is a **list** — put **one mapping row per array
+> element**. A single newline-joined string is read as one malformed
+> row. Malformed rows are rejected when the component is saved
+> (`ComponentValidationException` → **HTTP 400**), so a bad mapping
+> fails your pipeline fast rather than shipping silently.
+
+### Realm import JSON
+
+Under the realm's `components`, keyed by provider type:
+
+```json
+{
+  "realm": "myrealm",
+  "components": {
+    "org.keycloak.storage.UserStorageProvider": [
+      {
+        "name": "scim",
+        "providerId": "scim",
+        "config": {
+          "endpoint": ["https://identity.example.com/scim/v2"],
+          "auth-mode": ["BEARER"],
+          "auth-pass": ["${SCIM_TOKEN}"],
+          "propagation-user": ["true"],
+          "user-extension-mappings": [
+            "employeeId = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:employeeNumber",
+            "dept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+            "active = urn:example:custom:2.0:User:active ; type=boolean",
+            "roles = urn:example:custom:2.0:User:roles ; multi"
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+Import with `kc.sh start --import-realm` (file in
+`/opt/keycloak/data/import/`), `kc.sh import --file …`, or
+`POST /admin/realms/{realm}/partialImport`.
+
+### kcadm CLI
+
+Multivalued config takes a JSON array literal:
+
+```bash
+kcadm.sh create components -r myrealm \
+  -s name=scim -s providerId=scim \
+  -s providerType=org.keycloak.storage.UserStorageProvider \
+  -s 'config.endpoint=["https://identity.example.com/scim/v2"]' \
+  -s 'config.auth-mode=["BEARER"]' \
+  -s 'config.auth-pass=["'"$SCIM_TOKEN"'"]' \
+  -s 'config.user-extension-mappings=["dept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department","active = urn:example:custom:2.0:User:active ; type=boolean","roles = urn:example:custom:2.0:User:roles ; multi"]'
+```
+
+Change mappings on an existing provider: `kcadm.sh get components/<id>`,
+edit the array, then `kcadm.sh update components/<id> -s
+'config.user-extension-mappings=[…]'`.
+
+### Admin REST API
+
+```http
+POST /admin/realms/{realm}/components
+Content-Type: application/json
+
+{
+  "name": "scim",
+  "providerId": "scim",
+  "providerType": "org.keycloak.storage.UserStorageProvider",
+  "config": {
+    "endpoint": ["https://identity.example.com/scim/v2"],
+    "auth-mode": ["BEARER"],
+    "auth-pass": ["…token…"],
+    "user-extension-mappings": [
+      "dept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department",
+      "active = urn:example:custom:2.0:User:active ; type=boolean"
+    ]
+  }
+}
+```
+
+Update = `GET` the component, mutate `config.user-extension-mappings`,
+`PUT /admin/realms/{realm}/components/{id}`.
+
+### The other two pieces, headlessly
+
+- **Event listener** (admin-REST / self-service propagation): add
+  `scim` to the realm's `eventsListeners` — realm JSON
+  `"eventsListeners": ["jboss-logging", "scim"]`, or `kcadm.sh update
+  events/config -r myrealm -s 'eventsListeners=["jboss-logging","scim"]'`.
+- **scim-ldap-sync mapper** (LDAP-import propagation): add a
+  `ComponentRepresentation` with
+  `providerType=org.keycloak.storage.ldap.mappers.LDAPStorageMapper`,
+  `providerId=scim-ldap-sync`, and `parentId` = your LDAP provider's
+  component id (no config of its own).
+
+### Source-attribute prerequisite (Keycloak 25+)
+
+For extension-attribute mappings (and the `scim-skip` opt-out) the
+underlying Keycloak user attribute must be allowed by the realm User
+Profile, or it is silently dropped. Headlessly, either declare each
+attribute in the User Profile, or enable unmanaged attributes —
+`PUT /admin/realms/{realm}/users/profile` with an `UPConfig` body
+containing `"unmanagedAttributePolicy": "ENABLED"` (other values:
+`ADMIN_VIEW`, `ADMIN_EDIT`).
 
 ## scim-ldap-sync LDAP mapper
 

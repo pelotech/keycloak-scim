@@ -13,6 +13,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakSessionTask;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.models.utils.PostMigrationEvent;
 import org.keycloak.provider.ProviderConfigProperty;
 import org.keycloak.provider.ProviderConfigurationBuilder;
 import org.keycloak.storage.UserStorageProviderFactory;
@@ -331,14 +332,30 @@ public class ScimStorageProviderFactory
     public void postInit(KeycloakSessionFactory factory) {
         // Boot-time scan: schedule timers for components already configured
         // across all realms. The runtime entry points for newly-added or
-        // updated components are onCreate / onUpdate; postInit only handles
+        // updated components are onCreate / onUpdate; this scan only handles
         // the case where Keycloak restarts with components already in place.
         //
-        // Wrapped in try/catch because postInit on factories runs before the
-        // JPA layer is fully initialized in some startup orderings, and
-        // session.realms() will throw if it's called too early. A failed scan
-        // here is recoverable — onCreate / onUpdate / next-restart will pick
-        // things up — so we log and continue rather than abort startup.
+        // We defer the scan to PostMigrationEvent rather than running it inline
+        // in postInit: factory postInit can run before Keycloak's JPA layer is
+        // initialized in some startup orderings, where session.realms() fails
+        // with "emf is null". PostMigrationEvent fires once the DB/migration
+        // layer is ready — the safe point to touch realms/components.
+        factory.register(event -> {
+            if (event instanceof PostMigrationEvent) {
+                scheduleReconcilersForExistingComponents(factory);
+            }
+        });
+    }
+
+    /**
+     * Schedules reconciler timers for every SCIM component already present
+     * across all realms. Invoked once at startup, after {@link PostMigrationEvent}.
+     *
+     * <p>Still wrapped defensively: a failed scan is recoverable — onCreate /
+     * onUpdate / next-restart will pick things up — so we log and continue
+     * rather than abort startup.
+     */
+    private void scheduleReconcilersForExistingComponents(KeycloakSessionFactory factory) {
         try {
             KeycloakModelUtils.runJobInTransaction(factory, session ->
                 session.realms().getRealmsStream().forEach(realm ->
