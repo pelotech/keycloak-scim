@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/pelotech/keycloak-scim/compare/v1.4.0...v1.4.1) (2026-06-14)
+
+
+### Bug fixes
+
+* **reconcile:** defer boot-scan to PostMigrationEvent to avoid JPA 'emf is null' race ([#39](https://github.com/pelotech/keycloak-scim/issues/39)) ([55a4dfc](https://github.com/pelotech/keycloak-scim/commit/55a4dfc68d71e82fc199d96ed9dcbb78b671211a))
+
 ## [1.4.0](https://github.com/pelotech/keycloak-scim/compare/v1.3.0...v1.4.0) (2026-06-13)
 
 
