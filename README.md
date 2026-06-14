@@ -239,6 +239,12 @@ The plugin will now fan out user/group changes from each path
 (admin REST, self-service, LDAP federation) to every configured
 SCIM provider component in the realm.
 
+**Automating this (realm import JSON, `kcadm`, or the admin REST
+API)?** All three steps are scriptable — see
+[Headless / automated provisioning](docs/configuration.md#headless--automated-provisioning)
+for copy-paste examples, including the multivalued-mapping gotcha and
+the Keycloak 25+ user-profile prerequisite.
+
 ## Performance: SCIM `/Bulk` batching (opt-in)
 
 By default the plugin issues one HTTP request per resource change,
