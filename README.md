@@ -51,7 +51,7 @@ What's added relative to upstream:
 | --- | --- |
 | Keycloak | 25.x, 26.x |
 | Java (build + runtime) | 21 |
-| Kubernetes (for ImageVolume mounting) | 1.36+ |
+| Kubernetes (for ImageVolume mounting) | 1.33+ (image volumes beta, on by default) |
 | Architectures (OCI image) | linux/amd64, linux/arm64 |
 
 ## Quick start
@@ -73,8 +73,9 @@ onto Keycloak's providers directory.
 | `quay.io/keycloak/keycloak` (official) | `/opt/keycloak/providers/` |
 | `docker.io/bitnami/keycloak` (and downstream mirrors) | `/opt/bitnami/keycloak/providers/` |
 
-Mount the single JAR via `subPath` so any other providers already in
-the directory (e.g. distro-bundled SPIs) aren't shadowed:
+Mount the image's filesystem **onto the providers directory** (no
+`subPath`). The published image is `FROM scratch` containing exactly
+`/keycloak-scim.jar`, so the directory ends up holding just that one JAR:
 
 ```yaml
 apiVersion: v1
@@ -88,8 +89,7 @@ spec:
       args: ["start-dev"]
       volumeMounts:
         - name: scim-provider
-          mountPath: /opt/keycloak/providers/keycloak-scim.jar
-          subPath: keycloak-scim.jar
+          mountPath: /opt/keycloak/providers
           readOnly: true
   volumes:
     - name: scim-provider
@@ -99,14 +99,24 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
-> **This does not compose for multiple extensions.** An `image:` volume
-> maps one OCI image to one mount, but Keycloak loads all providers from
-> a single directory. To add keycloak-scim *alongside* other extensions,
-> use [Runtime compose (multiple extensions)](#runtime-compose-multiple-extensions)
+> **Do not try to mount just the JAR via `subPath`.** A Kubernetes
+> `image` volume supports only a **directory** `subPath`, never a single
+> file: `subPath: keycloak-scim.jar` fails the mount outright
+> (`ImageVolumeMountFailed: only directory subpath is supported`) and the
+> container never starts. Mounting the whole image at the providers
+> directory is the supported shape. (Validated on Kubernetes v1.35 /
+> containerd 2.2.)
+>
+> **This mount replaces the entire providers directory** with the image's
+> read-only contents, so anything else in that directory is shadowed —
+> and one `image:` volume maps one OCI image to one mount. That's fine
+> for the single-extension case (hence this section). To add keycloak-scim
+> *alongside* other extensions, use
+> [Runtime compose (multiple extensions)](#runtime-compose-multiple-extensions)
 > below.
 
 For Bitnami Keycloak, change `mountPath` to
-`/opt/bitnami/keycloak/providers/keycloak-scim.jar`.
+`/opt/bitnami/keycloak/providers`.
 
 The image is `FROM scratch` — payload only, no shell, no entrypoint.
 Multi-arch manifest (linux/amd64 + linux/arm64), signed with cosign
