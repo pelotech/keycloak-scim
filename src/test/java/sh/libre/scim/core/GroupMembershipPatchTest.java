@@ -66,6 +66,11 @@ class GroupMembershipPatchTest {
         assertThat(body).contains("user-ext-9");
         // A delta add carries exactly one member value — no full-list re-send.
         assertThat(body).doesNotContain("value eq");
+        // Regression guard: the SDK's .next() is a separator, not a terminator.
+        // A stray trailing .next() before .build() appends an empty operation
+        // that a strict SCIM target rejects as "Missing operation for patch
+        // operation". Pin the count to exactly one.
+        assertThat(countOps(body)).isEqualTo(1);
     }
 
     @Test
@@ -77,6 +82,17 @@ class GroupMembershipPatchTest {
         assertThat(body).contains("\"op\":\"remove\"");
         // RFC 7644 filter path targets exactly this member.
         assertThat(body).contains("members[value eq \\\"user-ext-9\\\"]");
+        assertThat(countOps(body)).isEqualTo(1);
+    }
+
+    private static int countOps(String body) {
+        int count = 0;
+        int idx = 0;
+        while ((idx = body.indexOf("\"op\":", idx)) != -1) {
+            count++;
+            idx += "\"op\":".length();
+        }
+        return count;
     }
 
     @Test

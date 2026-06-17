@@ -202,19 +202,23 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
             String userExternalId,
             boolean isAdd) {
         var patchBuilder = scimRequestBuilder.patch(url, Group.class);
+        // Captain-P-Goldfish SCIM SDK semantics: .next() ends the current
+        // operation and starts a NEW one — it's a separator, not a terminator.
+        // A trailing .next() before .build() appends an empty operation with
+        // no op/path/value, which a strict SCIM target rejects with
+        // 400 invalidSyntax "Missing operation for patch operation". We want
+        // exactly one operation per call, so terminate the chain on .build().
         if (isAdd) {
             patchBuilder.addOperation()
                 .path("members")
                 .op(PatchOp.ADD)
                 .valueNodes(List.of(Member.builder().value(userExternalId).build()))
-                .next()
                 .build();
         } else {
             // RFC 7644 §3.5.2.2: filter path targets exactly this member.
             patchBuilder.addOperation()
                 .path("members[value eq \"" + userExternalId + "\"]")
                 .op(PatchOp.REMOVE)
-                .next()
                 .build();
         }
         return patchBuilder;
