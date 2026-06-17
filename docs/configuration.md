@@ -51,6 +51,7 @@ admin REST API (`POST /admin/realms/{realm}/components` with
 | --- | --- | --- | --- |
 | `propagation-user` | bool | `true` | When false, user create/update/delete events do not result in SCIM calls. Useful for groups-only deployments or for temporarily disabling user propagation during operator maintenance. |
 | `propagation-group` | bool | `true` | Same toggle for group create/update/delete and group-membership changes. |
+| `require-email-verified` | bool | `true` | When true (default), the event listener only propagates user CREATE/UPDATE to this component once `user.isEmailVerified()`, and `EventType.VERIFY_EMAIL` becomes the deferred create trigger. When off, CREATE/UPDATE propagate immediately regardless of verification state, and `VERIFY_EMAIL` is a no-op (no duplicate create). DELETE is always unconditional. Per-component, so a multi-tenant setup can mix sinks with different requirements. |
 | `bulk-enabled` | bool | `false` | When true, federation-sync user **create** operations are coalesced into SCIM `/Bulk` requests instead of one `POST /Users` each. Requires the SCIM server to support `/Bulk`; set `scim.dispatch.bulkBatchSize` ≤ the server's advertised `maxOperations`. Only the LDAP-import create path is batched — replace/delete/membership stay per-op. Pays off most against slow/high-RTT sinks and can be slightly *slower* than per-op against a fast local sink (see `docs/performance.md`), hence default off. |
 
 Both toggles apply across all paths: admin-REST events,
@@ -405,13 +406,23 @@ Event Listeners*, or via realm config (`eventsListeners` includes
 catches admin-REST and self-service user/group/membership events and
 fans out to every configured SCIM provider component.
 
-The listener has one behavioral gate worth knowing: `EventType.VERIFY_EMAIL`
-fires SCIM POST only when the user's email is verified (i.e., the
-event listener treats unverified-email users as not-yet-real). Admin
-operations (CREATE/UPDATE/DELETE on USER) likewise check
-`isEmailVerified()` before propagating, EXCEPT for DELETE which
-unconditionally fires the SCIM DELETE (the user may be gone before
-we can check).
+The listener has one behavioral gate worth knowing, and it's *per
+SCIM provider component*: the `require-email-verified` config field
+(default `true`) controls whether unverified users are propagated.
+
+- `require-email-verified=true` (default) — admin CREATE/UPDATE on
+  USER only propagate to this component when `user.isEmailVerified()`.
+  `EventType.VERIFY_EMAIL` becomes the deferred create trigger for
+  this component once the user confirms their email.
+- `require-email-verified=false` — admin CREATE/UPDATE propagate
+  immediately regardless of email verification state. `VERIFY_EMAIL`
+  is a no-op for this component (otherwise it'd fire a duplicate
+  create).
+
+The gate is component-scoped, so a multi-tenant setup can mix sinks
+with different requirements — e.g. one sink that gates on
+verification, another that doesn't. DELETE is always unconditional
+across both modes (the user may be gone before we can check).
 
 ## /scim-reconcile/* REST endpoint
 

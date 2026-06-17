@@ -132,6 +132,40 @@ public class ScimDispatcher implements AutoCloseable {
                 .forEach(m -> runOne(m, f));
     }
 
+    /**
+     * User-scope dispatch that honors each component's {@code require-email-verified}
+     * setting. For components where that flag is true (default), the dispatch is
+     * skipped unless {@code user.isEmailVerified()}. Used for admin CREATE/UPDATE
+     * on USER, where some sinks want the email-verified gate and others don't.
+     */
+    public void runForUser(UserModel user, Consumer<ScimClient> f) {
+        boolean verified = user.isEmailVerified();
+        session.getContext().getRealm().getComponentsStream()
+                .filter(m -> ScimStorageProviderFactory.ID.equals(m.getProviderId())
+                        && m.get("enabled", true)
+                        && m.get("propagation-user", false)
+                        && (!m.get("require-email-verified", true) || verified))
+                .forEach(m -> runOne(m, f));
+    }
+
+    /**
+     * VERIFY_EMAIL trigger path: only fires components that *require* email
+     * verification, since those are the ones for which the CREATE was deferred.
+     * Components with {@code require-email-verified=false} already received the
+     * user at admin CREATE; firing them here would attempt a duplicate create.
+     */
+    public void runForUserOnEmailVerified(UserModel user, Consumer<ScimClient> f) {
+        if (!user.isEmailVerified()) {
+            return;
+        }
+        session.getContext().getRealm().getComponentsStream()
+                .filter(m -> ScimStorageProviderFactory.ID.equals(m.getProviderId())
+                        && m.get("enabled", true)
+                        && m.get("propagation-user", false)
+                        && m.get("require-email-verified", true))
+                .forEach(m -> runOne(m, f));
+    }
+
     public void runOne(ComponentModel m, Consumer<ScimClient> f) {
         LOGGER.debugf("%s %s %s %s", m.getId(), m.getName(), m.getProviderId(), m.getProviderType());
         var client = clients.computeIfAbsent(m.getId(), id -> new ScimClient(m, session));

@@ -115,6 +115,16 @@ public class ScimStorageProviderFactory
                 .defaultValue("true")
                 .add()
                 .property()
+                .name("require-email-verified")
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .label("Require verified email before propagating users")
+                .helpText("When on (default), the event listener only propagates user CREATE/UPDATE to this SCIM "
+                    + "provider once the user's email has been verified, and VERIFY_EMAIL becomes the create trigger. "
+                    + "When off, user CREATE/UPDATE propagate immediately regardless of email verification state, and "
+                    + "VERIFY_EMAIL no longer triggers a duplicate create. DELETE is always unconditional.")
+                .defaultValue("true")
+                .add()
+                .property()
                 .name("bulk-enabled")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Batch user creates via SCIM /Bulk")
