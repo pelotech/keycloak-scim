@@ -112,10 +112,10 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             var groupId = matcher.group(2);
             LOGGER.infof("%s %s from %s", event.getOperationType(), userId, groupId);
             boolean isAdd = event.getOperationType() == OperationType.CREATE;
-            dispatcher.run(ScimDispatcher.SCOPE_GROUP,
-                    client -> client.patchGroupMembership(GroupAdapter::new, groupId, userId, isAdd));
             var user = getUser(userId);
-            dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
+            dispatcher.runForGroupMembership(user,
+                    client -> client.patchGroupMembership(GroupAdapter::new, groupId, userId, isAdd));
+            dispatcher.runForUser(user, client -> client.replace(UserAdapter::new, user));
         }
         if (event.getResourceType() == ResourceType.REALM_ROLE_MAPPING) {
             var type = matcher.group(1);
@@ -123,11 +123,11 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             LOGGER.infof("%s %s %s roles", event.getOperationType(), type, id);
             if ("users".equals(type)) {
                 var user = getUser(id);
-                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
+                dispatcher.runForUser(user, client -> client.replace(UserAdapter::new, user));
             } else if ("groups".equals(type)) {
                 var group = getGroup(id);
                 session.users().getGroupMembersStream(session.getContext().getRealm(), group).forEach(user -> {
-                    dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
+                    dispatcher.runForUser(user, client -> client.replace(UserAdapter::new, user));
                 });
             }
         }

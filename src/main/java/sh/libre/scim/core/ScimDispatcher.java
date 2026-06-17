@@ -166,6 +166,23 @@ public class ScimDispatcher implements AutoCloseable {
                 .forEach(m -> runOne(m, f));
     }
 
+    /**
+     * Group-scope dispatch for operations that reference a specific user (e.g.
+     * group membership add/remove). Honors both {@code propagation-group} and
+     * the per-component {@code require-email-verified} gate against the given
+     * user, so a component that didn't receive the user create doesn't get a
+     * dangling member reference here either.
+     */
+    public void runForGroupMembership(UserModel user, Consumer<ScimClient> f) {
+        boolean verified = user.isEmailVerified();
+        session.getContext().getRealm().getComponentsStream()
+                .filter(m -> ScimStorageProviderFactory.ID.equals(m.getProviderId())
+                        && m.get("enabled", true)
+                        && m.get("propagation-group", false)
+                        && (!m.get("require-email-verified", true) || verified))
+                .forEach(m -> runOne(m, f));
+    }
+
     public void runOne(ComponentModel m, Consumer<ScimClient> f) {
         LOGGER.debugf("%s %s %s %s", m.getId(), m.getName(), m.getProviderId(), m.getProviderType());
         var client = clients.computeIfAbsent(m.getId(), id -> new ScimClient(m, session));
