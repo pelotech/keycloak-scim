@@ -19,6 +19,7 @@ import org.keycloak.models.KeycloakTransaction;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
+import sh.libre.scim.core.exceptions.ScimPropagationException;
 import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 public class ScimDispatcher implements AutoCloseable {
@@ -137,6 +138,20 @@ public class ScimDispatcher implements AutoCloseable {
         var client = clients.computeIfAbsent(m.getId(), id -> new ScimClient(m, session));
         try {
             f.accept(client);
+        } catch (ScimPropagationException e) {
+            String strategy = m.get("rollback-strategy", "never");
+            boolean rollback = switch (strategy) {
+                case "always" -> true;
+                case "critical-only" -> e.isTransient();
+                default -> false; // "never"
+            };
+            if (rollback) {
+                LOGGER.errorf(e, "SCIM critical-path failure on component %s (%s); rolling back transaction",
+                    m.getId(), m.getName());
+                session.getTransactionManager().setRollbackOnly();
+            } else {
+                LOGGER.warnf(e, "SCIM dispatch failed on component %s (%s)", m.getId(), m.getName());
+            }
         } catch (Exception e) {
             LOGGER.errorf(e, "SCIM dispatch failed on component %s (%s)", m.getId(), m.getName());
         }

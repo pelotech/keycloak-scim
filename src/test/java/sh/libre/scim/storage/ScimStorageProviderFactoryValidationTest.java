@@ -59,4 +59,48 @@ class ScimStorageProviderFactoryValidationTest {
         assertThatThrownBy(() -> validate(modelWith(List.of("x = " + CUSTOM + ":y ; type=complex"))))
             .isInstanceOf(ComponentValidationException.class);
     }
+
+    // --- rollback-strategy + bulk-enabled incompatibility ---
+
+    private ComponentModel modelWithRollbackAndBulk(String rollbackStrategy, boolean bulkEnabled) {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "NONE");
+        config.put("user-extension-mappings", List.of());
+        if (rollbackStrategy != null) {
+            config.putSingle("rollback-strategy", rollbackStrategy);
+        }
+        config.putSingle("bulk-enabled", String.valueOf(bulkEnabled));
+        model.setConfig(config);
+        model.setId("comp-rollback");
+        return model;
+    }
+
+    @Test
+    void rollbackAlways_withBulkEnabled_throwsComponentValidationException() {
+        assertThatThrownBy(() -> validate(modelWithRollbackAndBulk("always", true)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("rollback-strategy=always")
+            .hasMessageContaining("bulk-enabled");
+    }
+
+    @Test
+    void rollbackCriticalOnly_withBulkEnabled_throwsComponentValidationException() {
+        assertThatThrownBy(() -> validate(modelWithRollbackAndBulk("critical-only", true)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("rollback-strategy=critical-only")
+            .hasMessageContaining("bulk-enabled");
+    }
+
+    @Test
+    void rollbackNever_withBulkEnabled_passes() {
+        assertThatCode(() -> validate(modelWithRollbackAndBulk("never", true)))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rollbackAlways_withBulkDisabled_passes() {
+        assertThatCode(() -> validate(modelWithRollbackAndBulk("always", false)))
+            .doesNotThrowAnyException();
+    }
 }

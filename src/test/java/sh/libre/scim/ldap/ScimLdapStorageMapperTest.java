@@ -24,6 +24,7 @@ import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimClient;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -65,9 +66,7 @@ class ScimLdapStorageMapperTest {
     void onImportRoutesCreateWhenIsCreateTrue() {
         mapper.onImportUserFromLDAP(ldapObject, user, realm, true);
 
-        // The create path now calls dispatchUserCreate directly — no BiConsumer
-        // capture needed. dispatchUserCreate handles both bulk and per-op routing
-        // internally; the mapper's responsibility ends at handing off the user.
+        // dispatchUserCreate handles both bulk and per-op routing; the mapper hands off and returns.
         verify(dispatcher).dispatchUserCreate(user);
     }
 
@@ -214,9 +213,8 @@ class ScimLdapStorageMapperTest {
 
     @Test
     void noMembershipChangeEmitsNoScimCalls() {
-        // Steady state: every group already propagated. This is the common case —
-        // a full sync re-fires the import hook for unchanged users — and must send
-        // ZERO SCIM PATCHes (Follow-up A: no redundant per-sync re-assertion).
+        // Steady state: all groups already propagated. A full sync re-fires the import hook
+        // for unchanged users; zero SCIM PATCHes must be sent.
         var consumer = captureGroupConsumer("u1");
         var ws = workerSessionReturning("u1");
         var client = deltaClient();
@@ -330,10 +328,53 @@ class ScimLdapStorageMapperTest {
     }
 
     @Test
+    void thrownAddFailureIsNotRecordedAndLoopContinues() {
+        // current = {A,B}, stored = {}: A's ensureGroupMembership throws; B returns true.
+        // A is not recorded (retries next import), B is. The throw on A must not abort the loop.
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = deltaClient();
+        var groupA = group("A");
+        var groupB = group("B");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA, groupB));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups());
+        when(client.ensureGroupMembership(any(), eq("A"), eq("u1")))
+                .thenThrow(new InvalidResponseFromScimEndpointException(500, "boom"));
+        when(client.ensureGroupMembership(any(), eq("B"), eq("u1"))).thenReturn(true);
+
+        consumer.accept(client, ws);
+
+        verify(client).ensureGroupMembership(any(), eq("A"), eq("u1"));
+        verify(client).ensureGroupMembership(any(), eq("B"), eq("u1"));
+        // Only B recorded; A retries next import.
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 1 && l.contains("B")));
+    }
+
+    @Test
+    void thrownRemovalFailureKeepsGroupForRetry() {
+        // current = {A}, stored = {A,B}: B's patchGroupMembership throws — treated
+        // like a false return: B stays in the propagated set so the REMOVE retries next import.
+        var consumer = captureGroupConsumer("u1");
+        var ws = workerSessionReturning("u1");
+        var client = deltaClient();
+        var groupA = group("A");
+        when(user.getGroupsStream()).thenReturn(Stream.of(groupA));
+        when(fed.getAttributes(any(), eq("u1"))).thenReturn(storedGroups("A", "B"));
+        when(client.patchGroupMembership(any(), eq("B"), eq("u1"), eq(false)))
+                .thenThrow(new InvalidResponseFromScimEndpointException(500, "boom"));
+
+        consumer.accept(client, ws);
+
+        verify(client).patchGroupMembership(any(), eq("B"), eq("u1"), eq(false));
+        verify(fed).setAttribute(any(), eq("u1"), eq("scim-propagated-groups-comp-1"),
+                argThat(l -> l.size() == 2 && l.contains("A") && l.contains("B")));
+    }
+
+    @Test
     void skipsEntirelyWhenGroupPatchOpDisabled() {
-        // group-patchOp=false: add/remove would fall back to a full-group
-        // `replace` that re-imports the federated group's members (loop). The
-        // worker must do nothing at all — not even re-fetch the user.
+        // group-patchOp=false: delta add/remove would fall back to a full-group replace
+        // (loop risk). Skip entirely — do not even re-fetch the user.
         var consumer = captureGroupConsumer("u1");
         var ws = mock(KeycloakSession.class);
         var client = mock(ScimClient.class);
