@@ -1,10 +1,5 @@
 package sh.libre.scim.core;
 
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import jakarta.persistence.EntityManager;
@@ -15,7 +10,6 @@ import jakarta.ws.rs.NotFoundException;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.RoleMapperModel;
@@ -154,29 +148,4 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
         return realm.getComponent(componentId);
     }
 
-    protected Stream<GroupModel> getFilteredGroups() {
-        var model = getModel();
-        if (model == null) {
-            return Stream.empty();
-        }
-        String filter = model.get("group-filter");
-        if (filter == null || filter.trim().isEmpty()) {
-            return Stream.empty();
-        }
-        List<Pattern> patterns = new ArrayList<>();
-        for (var p : filter.split(",")) {
-            patterns.add(Pattern.compile(p.trim()));
-        }
-        Set<GroupModel> result = new HashSet<>();
-        session.groups().getGroupsStream(realm)
-            .filter(g -> patterns.stream().anyMatch(p -> p.matcher(g.getName()).matches()))
-            .forEach(g -> addGroupRecursively(result, g));
-        return result.stream();
-    }
-
-    private void addGroupRecursively(Set<GroupModel> groups, GroupModel group) {
-        if (groups.add(group)) {
-            group.getSubGroupsStream().forEach(sub -> addGroupRecursively(groups, sub));
-        }
-    }
 }

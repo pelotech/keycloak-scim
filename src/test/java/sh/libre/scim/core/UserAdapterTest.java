@@ -6,18 +6,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
-import org.keycloak.models.GroupModel;
-import org.keycloak.models.GroupProvider;
 import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.RoleModel;
+import org.keycloak.models.UserModel;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -37,7 +34,6 @@ class UserAdapterTest {
     @Mock ComponentModel component;
     @Mock JpaConnectionProvider jpaConnectionProvider;
     @Mock EntityManager entityManager;
-    @Mock GroupProvider groupProvider;
 
     private UserAdapter adapter;
 
@@ -130,72 +126,52 @@ class UserAdapterTest {
     }
 
     @Test
-    void getFilteredGroupsReturnsEmptyWhenNoFilterConfigured() {
+    void propagationRoleBlankDoesNotSkip() {
         when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
-        when(component.get("group-filter")).thenReturn(null);
+        when(component.get("propagation-role")).thenReturn("");
 
-        var result = adapter.getFilteredGroups().collect(Collectors.toList());
-        assertTrue(result.isEmpty());
+        assertFalse(adapter.skippedByPropagationRole(mock(UserModel.class)));
     }
 
     @Test
-    void getFilteredGroupsReturnsEmptyWhenFilterBlank() {
+    void propagationRoleUnsetDoesNotSkip() {
         when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
-        when(component.get("group-filter")).thenReturn("   ");
+        when(component.get("propagation-role")).thenReturn(null);
 
-        var result = adapter.getFilteredGroups().collect(Collectors.toList());
-        assertTrue(result.isEmpty());
+        assertFalse(adapter.skippedByPropagationRole(mock(UserModel.class)));
     }
 
     @Test
-    void getFilteredGroupsMatchesByRegex() {
+    void propagationRoleUserHasItDoesNotSkip() {
         when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
-        when(component.get("group-filter")).thenReturn("admins,team-.*");
-        when(session.groups()).thenReturn(groupProvider);
+        when(component.get("propagation-role")).thenReturn("scim-push");
+        var role = mock(RoleModel.class);
+        when(realm.getRole("scim-push")).thenReturn(role);
+        var user = mock(UserModel.class);
+        when(user.hasRole(role)).thenReturn(true);
 
-        var admins = mock(GroupModel.class);
-        when(admins.getName()).thenReturn("admins");
-        when(admins.getSubGroupsStream()).thenReturn(Stream.empty());
-
-        var teamAlpha = mock(GroupModel.class);
-        when(teamAlpha.getName()).thenReturn("team-alpha");
-        when(teamAlpha.getSubGroupsStream()).thenReturn(Stream.empty());
-
-        var other = mock(GroupModel.class);
-        when(other.getName()).thenReturn("other");
-
-        when(groupProvider.getGroupsStream(realm))
-            .thenReturn(Stream.of(admins, teamAlpha, other));
-
-        var result = adapter.getFilteredGroups().collect(Collectors.toSet());
-        assertEquals(2, result.size());
-        assertTrue(result.contains(admins));
-        assertTrue(result.contains(teamAlpha));
-        assertFalse(result.contains(other));
+        assertFalse(adapter.skippedByPropagationRole(user));
     }
 
     @Test
-    void getFilteredGroupsIncludesSubgroupsRecursively() {
+    void propagationRoleUserLacksItSkips() {
         when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
-        when(component.get("group-filter")).thenReturn("parent");
-        when(session.groups()).thenReturn(groupProvider);
+        when(component.get("propagation-role")).thenReturn("scim-push");
+        var role = mock(RoleModel.class);
+        when(realm.getRole("scim-push")).thenReturn(role);
+        var user = mock(UserModel.class);
+        when(user.hasRole(role)).thenReturn(false);
 
-        var leaf = mock(GroupModel.class);
-        when(leaf.getSubGroupsStream()).thenReturn(Stream.empty());
-
-        var child = mock(GroupModel.class);
-        when(child.getSubGroupsStream()).thenReturn(Stream.of(leaf));
-
-        var parent = mock(GroupModel.class);
-        when(parent.getName()).thenReturn("parent");
-        when(parent.getSubGroupsStream()).thenReturn(Stream.of(child));
-
-        when(groupProvider.getGroupsStream(realm)).thenReturn(Stream.of(parent));
-
-        var result = adapter.getFilteredGroups().collect(Collectors.toSet());
-        assertEquals(3, result.size());
-        assertTrue(result.contains(parent));
-        assertTrue(result.contains(child));
-        assertTrue(result.contains(leaf));
+        assertTrue(adapter.skippedByPropagationRole(user));
     }
+
+    @Test
+    void propagationRoleNotFoundFailsClosedAndSkips() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get("propagation-role")).thenReturn("typo-role");
+        when(realm.getRole("typo-role")).thenReturn(null);
+
+        assertTrue(adapter.skippedByPropagationRole(mock(UserModel.class)));
+    }
+
 }

@@ -7,6 +7,8 @@ import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
+import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -34,6 +36,101 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
         r.realm().users().search("alice", 0, 10);
 
         awaitUserPostFor("alice");
+    }
+
+    @Test
+    void unverifiedEmailUserPropagatesOnCreate() {
+        // Propagation does not depend on email verification: a user created
+        // with an unconfirmed email still triggers a SCIM POST.
+        stubScimUserCreateOk();
+        var r = newRealmWithScimAndLdap();
+        enableScimEventListener(r.realm());
+
+        var user = new org.keycloak.representations.idm.UserRepresentation();
+        user.setUsername("unverified");
+        user.setEmail("unverified@test.local");
+        user.setEmailVerified(false);
+        user.setEnabled(true);
+        try (var resp = r.realm().users().create(user)) {
+            if (resp.getStatus() >= 400) {
+                throw new IllegalStateException("create failed: " + resp.getStatus());
+            }
+        }
+
+        awaitUserPostFor("unverified");
+    }
+
+    @Test
+    void propagationRoleGatesUserPropagationOnSync() {
+        // With propagation-role set, only users holding that realm role propagate.
+        // Checked on the sync path: a role-holder is pushed, a non-holder is not.
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("propagation-role", "scim-push");
+            cfg.putSingle("sync-refresh", "true");
+        });
+        enableScimEventListener(r.realm());
+
+        var role = new org.keycloak.representations.idm.RoleRepresentation();
+        role.setName("scim-push");
+        r.realm().roles().create(role);
+        var roleRep = r.realm().roles().get("scim-push").toRepresentation();
+
+        String withId = createAdminUser(r.realm(), "has-role", "has-role@test.local");
+        createAdminUser(r.realm(), "no-role", "no-role@test.local");
+        r.realm().users().get(withId).roles().realmLevel().add(java.util.List.of(roleRep));
+
+        // The gate excludes both at create time (no role yet), so nothing has
+        // propagated. A sync re-evaluates and pushes only the role-holder.
+        var scimComponentId = r.realm().components()
+            .query(null, "org.keycloak.storage.UserStorageProvider")
+            .stream().filter(c -> "scim".equals(c.getProviderId()))
+            .findFirst().orElseThrow().getId();
+        r.realm().userStorage().syncUsers(scimComponentId, "triggerFullSync");
+
+        awaitUserPostFor("has-role");
+        sleepQuietly(2);
+        int noRolePosts = wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users"))
+                .withRequestBody(matchingJsonPath("$.userName", equalTo("no-role"))).build()).getCount();
+        assertEquals(0, noRolePosts,
+            "user without propagation-role must not be propagated, got " + noRolePosts + " POSTs");
+    }
+
+    @Test
+    void scimSkipAttributeOptsUserOutOfPropagation() {
+        // scim-skip=true is a per-user opt-out: the event still fires, but
+        // UserAdapter sets adapter.skip and ScimClient short-circuits. No POST
+        // should reach the sink for the opted-out user.
+        stubScimUserCreateOk();
+        var r = newRealmWithScimAndLdap();
+        enableScimEventListener(r.realm());
+        enableUnmanagedUserAttributes(r.realm());
+
+        createAdminUser(r.realm(), "ref-user", "ref-user@test.local");
+        awaitUserPostFor("ref-user");
+        int beforeOptOut = wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
+
+        var optedOut = new org.keycloak.representations.idm.UserRepresentation();
+        optedOut.setUsername("opted-out");
+        optedOut.setEmail("opted-out@test.local");
+        optedOut.setEmailVerified(true);
+        optedOut.setEnabled(true);
+        optedOut.setAttributes(java.util.Map.of("scim-skip", java.util.List.of("true")));
+        try (var resp = r.realm().users().create(optedOut)) {
+            if (resp.getStatus() >= 400) {
+                throw new IllegalStateException("create opted-out failed: " + resp.getStatus());
+            }
+        }
+
+        sleepQuietly(2);
+        int afterOptOut = wireMock.countRequestsMatching(
+            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
+        assertEquals(beforeOptOut, afterOptOut,
+            "scim-skip=true must prevent SCIM POST for the opted-out user "
+            + "(was " + beforeOptOut + " before, now " + afterOptOut + ")");
     }
 
     @Test
@@ -283,68 +380,6 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
             assertTrue(deletes >= 1,
                 "expected at least one SCIM DELETE after admin user delete, got " + deletes);
         });
-    }
-
-    @Test
-    void scimSkipAttributeOptsUserOutOfPropagation() {
-        // The 'scim-skip=true' user attribute is a per-user opt-out. The
-        // mapper still fires for these users (they pass through Keycloak's
-        // normal flows) but UserAdapter.apply sets adapter.skip=true and
-        // ScimClient.create / .replace / .delete short-circuit. Verify
-        // end-to-end that no SCIM POST hits the sink for an opted-out user.
-        stubScimUserCreateOk();
-        var r = newRealmWithScimAndLdap();
-        enableScimEventListener(r.realm());
-        // Required so admin REST accepts the scim-skip attribute on the
-        // opted-out user. Without this, Keycloak 25's declarative user
-        // profile silently drops unknown attributes.
-        enableUnmanagedUserAttributes(r.realm());
-
-        // Reference user (no opt-out): goes through normally.
-        createAdminUser(r.realm(), "ref-user", "ref-user@test.local");
-        awaitUserPostFor("ref-user");
-        int beforeOptOut = wireMock.countRequestsMatching(
-            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
-
-        // Opted-out user: create with the scim-skip attribute. Note: the
-        // CREATE event itself has the attribute available on the persisted
-        // user, so the propagation should short-circuit immediately.
-        // (The previous Keycloak behavior of search() not returning
-        // attributes is unrelated — UserAdapter reads from the live
-        // UserModel during event handling, not from a search result.)
-        var optedOut = new org.keycloak.representations.idm.UserRepresentation();
-        optedOut.setUsername("opted-out");
-        optedOut.setEmail("opted-out@test.local");
-        optedOut.setEmailVerified(true);
-        optedOut.setEnabled(true);
-        optedOut.setAttributes(java.util.Map.of("scim-skip", java.util.List.of("true")));
-        String optedOutId;
-        try (var resp = r.realm().users().create(optedOut)) {
-            if (resp.getStatus() >= 400) {
-                throw new IllegalStateException("create opted-out failed: " + resp.getStatus());
-            }
-            String path = resp.getLocation().getPath();
-            optedOutId = path.substring(path.lastIndexOf('/') + 1);
-        }
-
-        // Sanity check: the attribute is actually on the persisted user.
-        // toRepresentation() (unlike list-search) includes attributes.
-        var fetched = r.realm().users().get(optedOutId).toRepresentation();
-        var skipAttr = fetched.getAttributes() != null
-            ? fetched.getAttributes().get("scim-skip")
-            : null;
-        assertTrue(skipAttr != null && skipAttr.contains("true"),
-            "test fixture: scim-skip=true must be persisted on the opted-out user, got attrs="
-                + fetched.getAttributes());
-
-        // Give any potential propagation a chance to misbehave.
-        sleepQuietly(2);
-
-        int afterOptOut = wireMock.countRequestsMatching(
-            postRequestedFor(urlPathEqualTo("/Users")).build()).getCount();
-        assertEquals(beforeOptOut, afterOptOut,
-            "scim-skip=true must prevent SCIM POST for the opted-out user "
-            + "(was " + beforeOptOut + " before, now " + afterOptOut + ")");
     }
 
     @Test

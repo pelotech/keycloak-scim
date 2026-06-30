@@ -325,7 +325,6 @@ public abstract class IntegrationTestBase {
         var user = new UserRepresentation();
         user.setUsername(username);
         user.setEmail(email);
-        // ScimEventListenerProvider ignores events for users with unverified emails.
         user.setEmailVerified(true);
         user.setEnabled(true);
         try (Response resp = realm.users().create(user)) {
@@ -339,7 +338,7 @@ public abstract class IntegrationTestBase {
     }
 
     /**
-     * Allow arbitrary user attributes (e.g. {@code scim-skip}) to be set via
+     * Allow arbitrary user attributes (e.g. extension-mapped attributes) to be set via
      * admin REST. Keycloak 25's declarative user profile rejects unknown
      * attributes by default; setting unmanagedAttributePolicy=ENABLED is the
      * standard way operators turn that gate off when running plugins that
