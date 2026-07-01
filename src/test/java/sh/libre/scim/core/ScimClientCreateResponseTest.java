@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -13,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
+
+import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
 
 class ScimClientCreateResponseTest {
 
@@ -28,10 +31,9 @@ class ScimClientCreateResponseTest {
     }
 
     /**
-     * Regression: a rejected POST (e.g. SCIM server returns 400) has no parsed
-     * resource. The old code fell through to {@code adapter.apply(response.getResource())}
-     * — applying null and then persisting a phantom mapping for a resource the
-     * target never created. It must instead skip apply/saveMapping entirely.
+     * Regression: a rejected POST has no parsed resource. The old code fell through to
+     * {@code adapter.apply(null)} and persisted a phantom mapping. Now the classified
+     * taxonomy exception is thrown, so apply/saveMapping are never reached.
      */
     @Test
     @SuppressWarnings("unchecked")
@@ -47,9 +49,9 @@ class ScimClientCreateResponseTest {
         when(response.getResponseBody()).thenReturn("");
         when(response.getResource()).thenReturn(null);
 
-        boolean applied = client.handleCreateResponse(adapter, response);
+        assertThatThrownBy(() -> client.handleCreateResponse(adapter, response))
+            .isInstanceOf(InvalidResponseFromScimEndpointException.class);
 
-        assertThat(applied).isFalse();
         verify(adapter, never()).apply(any(User.class));
         verify(adapter, never()).saveMapping();
     }

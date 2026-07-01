@@ -33,6 +33,9 @@ import io.github.resilience4j.core.IntervalFunction;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
 
+import sh.libre.scim.core.exceptions.InconsistentScimMappingException;
+import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
+import sh.libre.scim.core.exceptions.ScimPropagationException;
 import sh.libre.scim.jpa.ScimProvisionLock;
 
 
@@ -145,6 +148,21 @@ public class ScimClient {
         return status == 429 || status >= 500;
     }
 
+    /**
+     * Classifies an exception that escaped a CRUD retry supplier once the retry
+     * budget was exhausted. An already-classified {@link ScimPropagationException}
+     * (e.g. the non-2xx {@link InvalidResponseFromScimEndpointException}) passes
+     * through; anything else is a transport failure (a {@link ProcessingException},
+     * the SDK's {@link IORuntimeException}, or a wrapped {@link ResponseException})
+     * and becomes a transient endpoint error. Package-private static as a test seam.
+     */
+    static ScimPropagationException classifyCrudFailure(String op, RuntimeException e) {
+        if (e instanceof ScimPropagationException classified) {
+            return classified;
+        }
+        return InvalidResponseFromScimEndpointException.transport(op, e);
+    }
+
     protected String genScimUrl(String scimEndpoint, String resourcePath) {
         return "%s/%s/%s".formatted(scimApplicationBaseUrl,
                 scimEndpoint,
@@ -204,16 +222,22 @@ public class ScimClient {
         var retry = registry.retry("create");
 
         try (var span = TRACING.startSpan("scim.create", adapter.getType(), scimApplicationBaseUrl)) {
-            ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-                try {
-                    return scimRequestBuilder
-                    .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
-                    .setResource(adapter.toSCIM(false))
-                    .sendRequest();
-                } catch (ResponseException e) {
-                    throw new RuntimeException(e);
-                }
-            }));
+            ServerResponse<S> response;
+            try {
+                response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                    try {
+                        return scimRequestBuilder
+                        .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
+                        .setResource(adapter.toSCIM(false))
+                        .sendRequest();
+                    } catch (ResponseException e) {
+                        throw new RuntimeException(e);
+                    }
+                }));
+            } catch (RuntimeException e) {
+                span.recordError(e);
+                throw classifyCrudFailure("create " + adapter.getId(), e);
+            }
             span.setHttpStatus(response.getHttpStatus());
             return response;
         }
@@ -275,19 +299,19 @@ public class ScimClient {
      * Persists the SCIM mapping from a create response, but only when the POST
      * succeeded. A rejected create (e.g. the target returns 400 for a user with
      * no email) carries no parsed resource: {@code response.getResource()} is
-     * null, so applying it NPEs and — worse — a mapping persisted here would be
-     * a phantom record for a resource the target never created. On failure we
-     * log and bail, leaving the user unmapped so a later sync can retry.
+     * null, so applying it NPEs, and a mapping persisted here would be a phantom
+     * record for a resource the target never created. So a rejected create throws
+     * instead, leaving the user unmapped for a later sync to retry.
      *
-     * @return true if the mapping was applied and saved, false if the response
-     *         was unsuccessful and skipped.
+     * @return true if the mapping was applied and saved.
+     * @throws InvalidResponseFromScimEndpointException if the POST was rejected.
      */
     // package-private for tests
     <S extends ResourceNode> boolean handleCreateResponse(Adapter<?, S> adapter, ServerResponse<S> response) {
         if (!response.isSuccess()) {
-            LOGGER.warnf("Failed to create SCIM resource %s: HTTP %d %s",
-                adapter.getId(), response.getHttpStatus(), response.getResponseBody());
-            return false;
+            throw new InvalidResponseFromScimEndpointException(
+                response.getHttpStatus(),
+                "create " + adapter.getId() + ": " + response.getResponseBody());
         }
 
         long t0 = System.nanoTime();
@@ -314,24 +338,30 @@ public class ScimClient {
                 adapter.apply(resource);
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
-                ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-                    try {
-                        LOGGER.info(adapter.getType());
-                        if ((adapter.getType() == "Group" && this.model.get(GROUP_PATCH_OP_KEY, false))
-                             || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
-                            return adapter.toPatchBuilder(scimRequestBuilder, url)
-                                          .sendRequest();
+                ServerResponse<S> response;
+                try {
+                    response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                        try {
+                            LOGGER.info(adapter.getType());
+                            if ((adapter.getType() == "Group" && this.model.get(GROUP_PATCH_OP_KEY, false))
+                                 || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
+                                return adapter.toPatchBuilder(scimRequestBuilder, url)
+                                              .sendRequest();
+                            }
+                            else {
+                                return scimRequestBuilder
+                                    .update(url, adapter.getResourceClass())
+                                    .setResource(adapter.toSCIM(false))
+                                    .sendRequest();
+                            }
+                        } catch (ResponseException e) {
+                            throw new RuntimeException(e);
                         }
-                        else {
-                            return scimRequestBuilder
-                                .update(url, adapter.getResourceClass())
-                                .setResource(adapter.toSCIM(false))
-                                .sendRequest();
-                        }
-                    } catch (ResponseException e) {
-                        throw new RuntimeException(e);
-                    }
-                }));
+                    }));
+                } catch (RuntimeException e) {
+                    span.recordError(e);
+                    throw classifyCrudFailure("replace " + adapter.getId(), e);
+                }
                 if (!response.isSuccess()) {
                     int statusCode = response.getHttpStatus();
                     if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get(GROUP_PATCH_OP_KEY, false)) {
@@ -360,14 +390,22 @@ public class ScimClient {
                         }
                     }
                     if (!response.isSuccess()) {
-                        LOGGER.warn(response.getResponseBody());
-                        LOGGER.warn(response.getHttpStatus());
+                        throw new InvalidResponseFromScimEndpointException(
+                            response.getHttpStatus(),
+                            "replace " + adapter.getId() + ": " + response.getResponseBody());
                     }
                 }
                 span.setHttpStatus(response.getHttpStatus());
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
+                throw new InconsistentScimMappingException(
+                    "no SCIM mapping for " + adapter.getType() + " " + adapter.getId() + " on replace", e);
+            } catch (ScimPropagationException e) {
+                // Already classified (e.g. the final-failure throw above) — must
+                // not be caught + downgraded by the generic Exception handler below.
+                span.recordError(e);
+                throw e;
             } catch (Exception e) {
                 span.recordError(e);
                 LOGGER.error(e);
@@ -387,20 +425,27 @@ public class ScimClient {
 
                 var retry = registry.retry("delete");
 
-                ServerResponse<S> response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
-                    try {
-                        return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
-                                                                    adapter.getResourceClass())
-                                                 .sendRequest();
-                    } catch (ResponseException e) {
-                        throw new RuntimeException(e);
-                    }
-                }));
+                ServerResponse<S> response;
+                try {
+                    response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                        try {
+                            return scimRequestBuilder.delete(genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId()),
+                                                                        adapter.getResourceClass())
+                                                     .sendRequest();
+                        } catch (ResponseException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }));
+                } catch (RuntimeException e) {
+                    span.recordError(e);
+                    throw classifyCrudFailure("delete " + id, e);
+                }
 
                 span.setHttpStatus(response.getHttpStatus());
                 if (!response.isSuccess()) {
-                    LOGGER.warn(response.getResponseBody());
-                    LOGGER.warn(response.getHttpStatus());
+                    throw new InvalidResponseFromScimEndpointException(
+                        response.getHttpStatus(),
+                        "delete " + id + ": " + response.getResponseBody());
                 }
 
                 getEM().remove(resource);
@@ -422,6 +467,13 @@ public class ScimClient {
      * PATCH), this falls back to a full {@code replace} so behaviour is
      * unchanged for those deployments. A missing group or user mapping (e.g.
      * the user was never synced) is logged and skipped, mirroring {@link #delete}.
+     *
+     * @return {@code true} if applied; {@code false} if it couldn't be applied this
+     *     import because the group or user mapping isn't committed yet (lazy-import
+     *     lag). {@code false} is the self-heal signal — the caller retries next
+     *     import — so hard failures throw rather than return it.
+     * @throws ScimPropagationException on a hard failure (non-2xx after retries, or
+     *     a transport-level failure, both transient).
      */
     public boolean patchGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
@@ -463,22 +515,33 @@ public class ScimClient {
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
 
                 var retry = registry.retry("patchMembership");
-                ServerResponse<Group> response = auth.sendWithAuthRefresh(
-                    () -> retry.executeSupplier(() -> {
-                        try {
-                            return adapter.toMembershipPatchBuilder(
-                                    scimRequestBuilder, url, userExternalId, isAdd)
-                                .sendRequest();
-                        } catch (ResponseException e) {
-                            throw new RuntimeException(e);
-                        }
-                    }));
+                ServerResponse<Group> response;
+                try {
+                    response = auth.sendWithAuthRefresh(
+                        () -> retry.executeSupplier(() -> {
+                            try {
+                                return adapter.toMembershipPatchBuilder(
+                                        scimRequestBuilder, url, userExternalId, isAdd)
+                                    .sendRequest();
+                            } catch (ResponseException e) {
+                                throw new RuntimeException(e);
+                            }
+                        }));
+                } catch (RuntimeException e) {
+                    // Scopes ONLY the send, so the non-2xx throw below (a sibling
+                    // statement) is not caught and re-classified here, and the
+                    // lazy-lag NoResultException from the earlier getSingleResult
+                    // calls falls through to the outer catch. Don't widen this.
+                    span.recordError(e);
+                    throw classifyCrudFailure("patch membership " + groupId + "/" + userId, e);
+                }
 
                 span.setHttpStatus(response.getHttpStatus());
                 if (!response.isSuccess()) {
-                    LOGGER.warnf("Failed to PATCH membership for group %s / user %s: %d %s",
-                            groupId, userId, response.getHttpStatus(), response.getResponseBody());
-                    return false;
+                    throw new InvalidResponseFromScimEndpointException(
+                        response.getHttpStatus(),
+                        "PATCH membership group " + groupId + " / user " + userId
+                            + ": " + response.getResponseBody());
                 }
                 return true;
             } catch (NoResultException e) {
@@ -521,6 +584,13 @@ public class ScimClient {
      * (via {@code GroupAdapter.apply(GroupModel)}), so the re-import loop can
      * still occur on the non-default {@code group-patchOp=false} path — a known
      * residual (see docs/roadmap.md). A missing local group is logged and skipped.
+     *
+     * @return {@code true} when the membership is now propagated; {@code false}
+     *     when it could not be propagated this import (the local group is missing,
+     *     or the add hit the lazy-import lag) — the caller should retry on a later
+     *     import.
+     * @throws ScimPropagationException on a hard failure propagated from
+     *     {@link #patchGroupMembership} (non-2xx after retries, or transport-level).
      */
     public boolean ensureGroupMembership(
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
@@ -540,29 +610,45 @@ public class ScimClient {
             AdapterFactory<M, S, A> factory,
             SynchronizationResult syncRes) {
         LOGGER.info("Refresh resources");
+        SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
-            getAdapter(factory).getResourceStream().forEach(resource -> {
+            // Use a plain for-loop (not forEach) so return can stop the whole run,
+            // not just skip a single lambda invocation.
+            for (var resource : getAdapter(factory).getResourceStream().toList()) {
                 var adapter = getAdapter(factory);
-                adapter.apply(resource);
-                LOGGER.infof("Reconciling local resource %s", adapter.getId());
-                if (!adapter.skipRefresh()) {
-                    var mapping = adapter.getMapping();
-                    if (mapping == null) {
-                        LOGGER.info("Creating it");
-                        this.create(factory, resource);
-                    } else {
-                        LOGGER.info("Replacing it");
-                        this.replace(factory, resource);
+                try {
+                    adapter.apply(resource);
+                    LOGGER.infof("Reconciling local resource %s", adapter.getId());
+                    if (!adapter.skipRefresh()) {
+                        var mapping = adapter.getMapping();
+                        if (mapping == null) {
+                            LOGGER.info("Creating it");
+                            this.create(factory, resource);
+                        } else {
+                            LOGGER.info("Replacing it");
+                            this.replace(factory, resource);
+                        }
+                        syncRes.increaseUpdated();
                     }
-                    syncRes.increaseUpdated();
+                } catch (ScimPropagationException e) {
+                    LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
+                        adapter.getId(), e.getClass().getSimpleName());
+                    syncRes.increaseFailed();
+                    if (policy.shouldStopRun(e)) {
+                        LOGGER.errorf("SCIM sync aborted after %s on resource %s",
+                            e.getClass().getSimpleName(), adapter.getId());
+                        return; // stop the whole run
+                    }
+                    // else continue
                 }
-            });
+            }
         }
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
             AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
         LOGGER.info("Import");
+        SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.import", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
             try {
                 var adapter = getAdapter(factory);
@@ -617,6 +703,18 @@ public class ScimClient {
                                     break;
                             }
                         }
+                    } catch (ScimPropagationException e) {
+                        // More-specific than the generic handler below; must come
+                        // first or the classified throw would be swallowed there.
+                        LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
+                            adapter.getId(), e.getClass().getSimpleName());
+                        syncRes.increaseFailed();
+                        if (policy.shouldStopRun(e)) {
+                            LOGGER.errorf("SCIM sync aborted after %s on resource %s",
+                                e.getClass().getSimpleName(), adapter.getId());
+                            return; // stop the whole run
+                        }
+                        // else continue
                     } catch (Exception e) {
                         LOGGER.error(e);
                         e.printStackTrace();

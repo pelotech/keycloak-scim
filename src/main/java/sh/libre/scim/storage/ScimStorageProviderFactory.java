@@ -124,6 +124,18 @@ public class ScimStorageProviderFactory
                 .defaultValue("false")
                 .add()
                 .property()
+                .name("rollback-strategy")
+                .type(ProviderConfigProperty.LIST_TYPE)
+                .label("On SCIM failure (interactive events)")
+                .helpText("never = log and keep the Keycloak change (default, async-safe). "
+                    + "always = roll back the Keycloak operation on any SCIM failure. "
+                    + "critical-only = roll back only on transient failures (endpoint down/5xx/429). "
+                    + "Applies to interactive console/account events only; never affects LDAP "
+                    + "federation imports or batch sync. Incompatible with bulk.")
+                .options("never", "always", "critical-only")
+                .defaultValue("never")
+                .add()
+                .property()
                 .name("propagation-group")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable group propagation")
@@ -146,6 +158,16 @@ public class ScimStorageProviderFactory
                 .name("sync-refresh")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable refresh during sync")
+                .add()
+                .property()
+                .name("sync-on-error")
+                .type(ProviderConfigProperty.LIST_TYPE)
+                .label("On batch-sync failure")
+                .helpText("auto = skip a record that fails for a permanent reason, stop the run "
+                    + "if the endpoint is unreachable (default). continue = always skip and keep going. "
+                    + "stop = abort the run on the first failure.")
+                .options("auto", "continue", "stop")
+                .defaultValue("auto")
                 .add()
                 .property()
                 .name("group-patchOp")
@@ -249,6 +271,13 @@ public class ScimStorageProviderFactory
         } catch (IllegalArgumentException e) {
             throw new ComponentValidationException(
                 "Invalid user-extension-mappings: " + e.getMessage(), e);
+        }
+
+        String rollback = model.get("rollback-strategy", "never");
+        if (!"never".equals(rollback) && model.get("bulk-enabled", false)) {
+            throw new ComponentValidationException(
+                "rollback-strategy=" + rollback + " is incompatible with bulk-enabled: "
+                + "bulk creates are deferred post-commit and cannot participate in rollback");
         }
 
         String authMode = model.get("auth-mode");

@@ -47,11 +47,7 @@ class ScimStorageProviderFactoryTest {
     // Task 13 — validation
     // ---------------------------------------------------------------------------
 
-    /**
-     * Builds a real ComponentModel pre-loaded with the given key/value pairs.
-     * reconciler-enabled is set to "false" so ReconcilerConfigValidator is a no-op,
-     * and the mock realm returns an empty stream to satisfy realm.getComponentsStream().
-     */
+    /** ComponentModel with the given auth-mode and extras; reconciler-enabled=false suppresses ReconcilerConfigValidator. */
     private static ComponentModel componentWithAuthMode(String authMode, Map<String, String> extra) {
         var m = new ComponentModel();
         m.put("auth-mode", authMode);
@@ -60,7 +56,7 @@ class ScimStorageProviderFactoryTest {
         return m;
     }
 
-    /** Returns a mock realm whose getComponentsStream() returns an empty stream. */
+    /** Mock realm returning an empty getComponentsStream(). */
     private static RealmModel mockRealm() {
         var realm = mock(RealmModel.class);
         when(realm.getComponentsStream()).thenReturn(Stream.empty());
@@ -158,12 +154,27 @@ class ScimStorageProviderFactoryTest {
         var factory = new ScimStorageProviderFactory();
         var model = componentWithAuthMode("BEARER", Map.of(
             "auth-pass", "t",
-            // Junk in oauth-* fields — should be ignored because auth-mode != CLIENT_CREDENTIALS
+            // oauth-* fields are ignored when auth-mode != CLIENT_CREDENTIALS
             "oauth-token-endpoint", "not-a-url",
             "oauth-client-id", ""));
         assertThatCode(() ->
                 factory.validateConfiguration(mock(KeycloakSession.class), mockRealm(), model))
             .doesNotThrowAnyException();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task 4.2 — sync-on-error config property
+    // ---------------------------------------------------------------------------
+
+    @Test
+    void syncOnErrorProperty_presentWithDefaultAuto() {
+        var factory = new ScimStorageProviderFactory();
+        var syncOnError = factory.getConfigProperties().stream()
+            .filter(p -> "sync-on-error".equals(p.getName()))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("sync-on-error property not found"));
+        assertThat(syncOnError.getDefaultValue()).isEqualTo("auto");
+        assertThat(syncOnError.getOptions()).contains("auto", "continue", "stop");
     }
 
     @Test

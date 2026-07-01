@@ -57,6 +57,52 @@ Both toggles apply across all paths: admin-REST events,
 LDAP-federation imports (when the `scim-ldap-sync` mapper is attached),
 and sync operations.
 
+### Failure handling on interactive events
+
+By default the plugin is fail-open: when a SCIM call fails, the Keycloak
+change still commits and the failure is logged. When the SCIM endpoint is
+authoritative (a Keycloak change shouldn't stand if it can't be mirrored),
+`rollback-strategy` lets an interactive event roll the Keycloak transaction
+back instead.
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `rollback-strategy` | enum | `never` | What to do when a SCIM call fails on an interactive console/account event. `never` (default): log and keep the Keycloak change. `always`: roll back the Keycloak operation on any SCIM failure. `critical-only`: roll back only on transient failures (endpoint unreachable, 5xx, 429); permanent failures (4xx, bad mapping, malformed data) are logged and kept. Options: `never`, `always`, `critical-only`. |
+
+This applies only to the synchronous, pre-commit event path: console,
+admin-REST, and account-console user create/update/delete handled by the
+`scim` event listener. It runs on the same transaction as the Keycloak
+operation, so marking that transaction rollback-only undoes the change. It
+does not apply to LDAP-federation imports (which propagate after the import
+commits, leaving nothing to roll back) or to batch sync (governed by
+`sync-on-error`, below); both stay fail-open regardless.
+
+A component with `rollback-strategy` other than `never` and
+`bulk-enabled=true` is rejected at save time: bulk creates are deferred past
+commit and can't take part in a rollback. Use a non-bulk component.
+
+Three things to know before enabling it:
+
+- **Multi-endpoint orphans.** Rollback assumes a single critical SCIM
+  endpoint. If a realm has several SCIM components and an event fans out to
+  more than one, the listener dispatches to each in turn. If one succeeds and
+  a later one fails and rolls back, the Keycloak operation is undone, but the
+  write already sent to the first endpoint can't be recalled and its local
+  mapping rolls back with the transaction. That leaves an orphan (a SCIM
+  resource with no Keycloak mapping) that isn't cleaned up. Point
+  `rollback-strategy` at a single-endpoint deployment.
+- **Admin REST still returns 201.** Keycloak builds the `201 Created`
+  response before commit, so a rolled-back admin user-create returns 201 with
+  a `Location` header while the user doesn't persist. Check whether the user
+  exists rather than trusting the status. Account/self-service flows do
+  surface an error; the 201 is specific to the Admin REST path.
+- **Latency on a down endpoint.** Rollback needs synchronous propagation, so
+  an interactive create/update against a slow or unreachable endpoint blocks
+  for the whole retry budget (~38s at the current hardcoded 10-attempt
+  backoff) before it rolls back and returns. The `never` default avoids this,
+  since propagation is async. A proxy in front of Keycloak may return a `504`
+  first.
+
 ### Sync behavior
 
 The plugin implements `ImportSynchronization`, so this component
@@ -71,6 +117,11 @@ controlled by the LDAP component.
 | `sync-import` | bool | `false` | When true, fetch users/groups from the remote SCIM server during sync and act on each per `sync-import-action`. |
 | `sync-import-action` | enum | `CREATE_LOCAL` | What to do when a remote SCIM user/group has no local Keycloak counterpart. Options: `NOTHING` (log only), `CREATE_LOCAL` (add to Keycloak), `DELETE_REMOTE` (remove from SCIM). Choose `DELETE_REMOTE` only for one-way Keycloak-as-source-of-truth deployments. |
 | `sync-refresh` | bool | `false` | When true, push local users/groups out to the SCIM server during sync (covering anything the event listener missed). Combine with `sync-import=false` for a pure outbound sync. |
+| `sync-on-error` | enum | `auto` | How a per-record failure in the sync loop is handled. `auto` (default): a permanent failure (bad mapping, malformed data, 4xx) skips that record and the run continues; a transient failure (endpoint unreachable, 5xx, 429) stops the run, since every remaining record would fail the same way. `continue`: always skip the failed record and keep going. `stop`: abort on the first failure of any kind. Options: `auto`, `continue`, `stop`. |
+
+`sync-on-error` governs both the import and refresh halves of a sync. It is
+independent of `rollback-strategy` (which covers interactive events only): a
+sync never rolls back already-applied records, it only skips or stops.
 
 ### PATCH vs PUT preferences
 

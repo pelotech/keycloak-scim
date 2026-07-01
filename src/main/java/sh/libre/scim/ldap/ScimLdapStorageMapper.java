@@ -24,6 +24,7 @@ import org.keycloak.storage.federated.UserFederatedStorageProvider;
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
 import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.core.exceptions.ScimPropagationException;
 
 public class ScimLdapStorageMapper implements LDAPStorageMapper {
 
@@ -57,7 +58,16 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
         } else {
             dispatcher.runAsync(ScimDispatcher.SCOPE_USER, (client, workerSession) -> {
                 var u = workerSession.users().getUserById(workerSession.getContext().getRealm(), userId);
-                if (u != null) client.replace(UserAdapter::new, u);
+                if (u != null) {
+                    try {
+                        client.replace(UserAdapter::new, u);
+                    } catch (ScimPropagationException e) {
+                        // Already async fail-open; classify the log by category
+                        // instead of letting it hit the generic worker catch.
+                        LOGGER.warnf(e, "SCIM LDAP import: user replace for %s failed (%s)",
+                                userId, e.getClass().getSimpleName());
+                    }
+                }
             });
         }
 
@@ -103,7 +113,16 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
             // REMOVE did not apply, so the next import retries.
             Set<String> kept = new HashSet<>();
             stored.stream().filter(gid -> !current.contains(gid)).forEach(gid -> {
-                if (!client.patchGroupMembership(GroupAdapter::new, gid, userId, false)) {
+                try {
+                    if (!client.patchGroupMembership(GroupAdapter::new, gid, userId, false)) {
+                        kept.add(gid);
+                    }
+                } catch (ScimPropagationException e) {
+                    // Same as a not-applied REMOVE: keep the group so it retries
+                    // next import, per member, without aborting the loop.
+                    LOGGER.warnf(e, "SCIM LDAP import: membership remove for group %s / user %s "
+                            + "failed (%s); will retry next import",
+                            gid, userId, e.getClass().getSimpleName());
                     kept.add(gid);
                 }
             });
@@ -113,8 +132,16 @@ public class ScimLdapStorageMapper implements LDAPStorageMapper {
             // here, so it retries on the next import (the lazy-import-lag self-heal).
             Set<String> addedOk = new HashSet<>();
             current.stream().filter(gid -> !stored.contains(gid)).forEach(gid -> {
-                if (client.ensureGroupMembership(GroupAdapter::new, gid, userId)) {
-                    addedOk.add(gid);
+                try {
+                    if (client.ensureGroupMembership(GroupAdapter::new, gid, userId)) {
+                        addedOk.add(gid);
+                    }
+                } catch (ScimPropagationException e) {
+                    // Same as a not-applied ADD: leave it unrecorded so it retries
+                    // next import, per member, without aborting the loop.
+                    LOGGER.warnf(e, "SCIM LDAP import: membership add for group %s / user %s "
+                            + "failed (%s); will retry next import",
+                            gid, userId, e.getClass().getSimpleName());
                 }
             });
 
