@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.0](https://github.com/pelotech/keycloak-scim/compare/v1.4.1...v1.5.0) (2026-07-01)
+
+
+### Features
+
+* gate user SCIM propagation by an optional propagation-role ([#45](https://github.com/pelotech/keycloak-scim/issues/45)) ([3765433](https://github.com/pelotech/keycloak-scim/commit/37654336ebf9dacf9938caaad8a8742113466403))
+* per-context SCIM failure handling (typed errors, optional rollback, batch skip/stop) ([#44](https://github.com/pelotech/keycloak-scim/issues/44)) ([e230947](https://github.com/pelotech/keycloak-scim/commit/e230947e45cd3fef55cbde607a68d01058818e0a))
+
+
+### Documentation
+
+* fix ImageVolume recipe — image-volume subPath is directory-only ([#41](https://github.com/pelotech/keycloak-scim/issues/41)) ([795740d](https://github.com/pelotech/keycloak-scim/commit/795740d5a32f1a47730f353150993dedbdfc9e35))
+
 ## [1.4.1](https://github.com/pelotech/keycloak-scim/compare/v1.4.0...v1.4.1) (2026-06-14)
 
 
