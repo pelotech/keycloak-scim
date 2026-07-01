@@ -6,8 +6,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
@@ -23,6 +21,7 @@ import de.captaingoldfish.scim.sdk.common.resources.complex.Meta;
 import org.apache.commons.lang3.StringUtils;
 import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 
 public class UserAdapter extends Adapter<UserModel, User> {
@@ -140,12 +139,36 @@ public class UserAdapter extends Adapter<UserModel, User> {
         var roles = new String[rolesSet.size()];
         rolesSet.toArray(roles);
         setRoles(roles);
-        this.skip = StringUtils.equals(user.getFirstAttribute("scim-skip"), "true");
+        boolean scimSkip = StringUtils.equals(user.getFirstAttribute("scim-skip"), "true");
+        this.skip = scimSkip || skippedByPropagationRole(user);
         var extModel = getModel();
         this.extensionMappings = ExtensionAttributeMappings.fromConfig(
             extModel == null ? List.of()
                              : extModel.getConfig().getList("user-extension-mappings"));
         this.extensionValues = this.extensionMappings.read(user);
+    }
+
+    /**
+     * Whether the propagation-role gate excludes this user. When the component's
+     * {@code propagation-role} is set, only users holding that realm role
+     * propagate; blank propagates everyone. A configured-but-missing role excludes
+     * the user (fail-closed), so a typo can't silently leak ineligible users.
+     */
+    // package-private for tests
+    boolean skippedByPropagationRole(UserModel user) {
+        var model = getModel();
+        String propagationRole = model == null ? null : model.get("propagation-role");
+        if (propagationRole == null || propagationRole.isBlank()) {
+            return false;
+        }
+        String roleName = propagationRole.trim();
+        RoleModel role = realm.getRole(roleName);
+        if (role == null) {
+            LOGGER.warnf("propagation-role '%s' not found in realm %s; not propagating user %s",
+                roleName, realmId, user.getUsername());
+            return true;
+        }
+        return !user.hasRole(role);
     }
 
     @Override
@@ -251,15 +274,7 @@ public class UserAdapter extends Adapter<UserModel, User> {
 
     @Override
     public Stream<UserModel> getResourceStream() {
-        var filteredGroups = getFilteredGroups().collect(Collectors.toSet());
-        if (filteredGroups.isEmpty()) {
-            return session.users().searchForUserStream(realm, Map.of(UserModel.ENABLED, "true"));
-        }
-        Set<UserModel> users = new HashSet<>();
-        for (var group : filteredGroups) {
-            session.users().getGroupMembersStream(realm, group).forEach(users::add);
-        }
-        return users.stream().filter(UserModel::isEnabled);
+        return session.users().searchForUserStream(realm, Map.of(UserModel.ENABLED, "true"));
     }
 
     @Override

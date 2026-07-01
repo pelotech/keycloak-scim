@@ -192,10 +192,14 @@ public class ScimStorageProviderFactory
                 .defaultValue("username")
                 .add()
                 .property()
-                .name("group-filter")
+                .name("propagation-role")
                 .type(ProviderConfigProperty.STRING_TYPE)
-                .label("Group filter patterns")
-                .helpText("Comma-separated regex patterns for group names to sync (e.g. 'admins,team-.*'). Leave empty to sync all groups.")
+                .label("Propagation role")
+                .helpText("Optional realm role name. When set, only users who have this role are "
+                    + "propagated to SCIM, on both events and sync. Leave empty to propagate all "
+                    + "users. If the named role does not exist in the realm, no users are "
+                    + "propagated (fail-closed). To exclude an individual user or group, use the "
+                    + "scim-skip attribute.")
                 .add()
                 .property()
                 .name("user-extension-mappings")

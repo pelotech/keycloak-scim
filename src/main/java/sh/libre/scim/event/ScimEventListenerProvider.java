@@ -45,9 +45,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
     public void onEvent(Event event) {
         if (event.getType() == EventType.VERIFY_EMAIL) {
             var user = getUser(event.getUserId());
-            if (user.isEmailVerified()){
-                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter::new, user));
-            }
+            dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter::new, user));
         }
         if (event.getType() == EventType.UPDATE_EMAIL || event.getType() == EventType.UPDATE_PROFILE) {
             var user = getUser(event.getUserId());
@@ -73,18 +71,14 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             LOGGER.infof("%s %s", userId, event.getOperationType());
             if (event.getOperationType() == OperationType.CREATE) {
                 var user = getUser(userId);
-                if (user.isEmailVerified()) {
-                    dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter::new, user));
-                    user.getGroupsStream().forEach(group -> {
-                        dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter::new, group));
-                    });
-                }
+                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.create(UserAdapter::new, user));
+                user.getGroupsStream().forEach(group -> {
+                    dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter::new, group));
+                });
             }
             if (event.getOperationType() == OperationType.UPDATE) {
                 var user = getUser(userId);
-                if (user.isEmailVerified()) {
-                    dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
-                }
+                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
             }
             if (event.getOperationType() == OperationType.DELETE) {
                 // Events fire pre-commit, but the resource already flushed the

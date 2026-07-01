@@ -144,7 +144,7 @@ SCIM servers (notably Databricks) require PATCH for groups.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `group-filter` | string | — | Comma-separated regex patterns. When set, only groups whose `name` matches at least one pattern are propagated. Subgroups of a matching group are included recursively. Example: `admins,team-.*` propagates `admins` plus any group whose name starts with `team-`. Leave empty (default) to propagate all groups. |
+| `propagation-role` | string | — | Realm role name. When set, only users who have this role are propagated — applied the same way on both events and sync. Leave empty (default) to propagate all users. If the named role doesn't exist in the realm, no users are propagated (fail-closed), with a warning logged. Gates users only; to exclude an individual user or group regardless, use the `scim-skip` attribute. |
 
 ### User extension attributes
 
@@ -456,13 +456,14 @@ Event Listeners*, or via realm config (`eventsListeners` includes
 catches admin-REST and self-service user/group/membership events and
 fans out to every configured SCIM provider component.
 
-The listener has one behavioral gate worth knowing: `EventType.VERIFY_EMAIL`
-fires SCIM POST only when the user's email is verified (i.e., the
-event listener treats unverified-email users as not-yet-real). Admin
-operations (CREATE/UPDATE/DELETE on USER) likewise check
-`isEmailVerified()` before propagating, EXCEPT for DELETE which
-unconditionally fires the SCIM DELETE (the user may be gone before
-we can check).
+User propagation does not depend on email verification: a user
+create/update propagates to SCIM whether or not the email is
+confirmed. (Earlier versions gated the event path on
+`isEmailVerified()`, which made event propagation inconsistent with
+sync and could miss users whose verification state wasn't yet visible
+when the event fired.) To restrict *which* users propagate, use the
+`propagation-role` component setting — it applies the same way on both
+the event and sync paths.
 
 ## /scim-reconcile/* REST endpoint
 
@@ -482,7 +483,7 @@ bearer token with realm-admin permissions.
 
 | Attribute | Set by | Read by | Purpose |
 | --- | --- | --- | --- |
-| `scim-skip` | operator (manual) | `UserAdapter.apply`, `GroupAdapter.apply` | Set to `"true"` on a user (or group) to opt them out of SCIM propagation. The mapper still fires for them, but propagation short-circuits. Useful for service accounts, internal admin users, etc. |
+| `scim-skip` | operator (manual) | `UserAdapter.apply`, `GroupAdapter.apply` | Set to `"true"` on a user (or group) to opt them out of SCIM propagation. The mapper still fires for them, but propagation short-circuits. Useful for service accounts, internal admin users, or excluding an individual member of a `propagation-role`-eligible group. |
 | `ldap-federation-last-seen` | `ScimLdapStorageMapper.onImportUserFromLDAP` | `StaleAttributeWitness` (the reconciler) | ISO-8601 timestamp of the last time Keycloak's LDAP federation observed this user. The reconciler treats users whose attribute is older than `reconciler-stale-threshold-seconds` as absent and propagates SCIM DELETE. |
 
 ## JVM system properties

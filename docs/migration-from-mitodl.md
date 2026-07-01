@@ -54,7 +54,6 @@ choose to use them.
 | `user-patchOp` | false | Identical to upstream (PUT for user updates). |
 | `group-patchOp` | false | Identical to upstream (PUT for group updates, with automatic 405→PATCH fallback). |
 | `username-source` | `username` | Identical to upstream (uses Keycloak username for SCIM userName). |
-| `group-filter` | empty | Identical to upstream (no filter; all groups propagated). |
 | `reconciler-enabled` | false | No reconciler activity. |
 | `reconciler-interval-seconds` | 86400 | Ignored when reconciler is disabled. |
 | `reconciler-stale-threshold-seconds` | 172800 | Ignored when reconciler is disabled. |
