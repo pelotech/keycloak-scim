@@ -146,7 +146,7 @@ tasks.register<Test>("performanceTest") {
     // Forward selected -D system properties from the gradle invocation to
     // the test JVM. Without this, `-Dperf.userCount=10000` would be set on
     // the gradle daemon but invisible to Integer.getInteger() inside tests.
-    listOf("perf.userCount", "perf.scimSinkLatencyMs").forEach { prop ->
+    listOf("perf.userCount", "perf.scimSinkLatencyMs", "perf.membershipCount").forEach { prop ->
         System.getProperty(prop)?.let { systemProperty(prop, it) }
     }
     // Always re-run perf tests (their inputs are wall-clock-sensitive,

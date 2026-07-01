@@ -113,8 +113,16 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             boolean isAdd = event.getOperationType() == OperationType.CREATE;
             dispatcher.run(ScimDispatcher.SCOPE_GROUP,
                     client -> client.patchGroupMembership(GroupAdapter::new, groupId, userId, isAdd));
-            var user = getUser(userId);
-            dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
+            // The user's SCIM resource has no groups field, so membership only
+            // affects it via roles — and roles are pushed only for scim-marked
+            // roles. So a membership change needs a user replace only when the
+            // group confers one; otherwise the replace re-sends an identical
+            // resource. If the group can't be resolved, replace to be safe.
+            var group = getGroup(groupId);
+            if (group == null || groupConfersScimRole(group)) {
+                var user = getUser(userId);
+                dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
+            }
         }
         if (event.getResourceType() == ResourceType.REALM_ROLE_MAPPING) {
             var type = matcher.group(1);
@@ -138,5 +146,17 @@ public class ScimEventListenerProvider implements EventListenerProvider {
 
     private GroupModel getGroup(String id) {
         return session.groups().getGroupById(session.getContext().getRealm(), id);
+    }
+
+    /**
+     * Whether the group carries a role mapping to a {@code scim="true"} role —
+     * the same mark {@code UserAdapter} uses to decide which roles reach the
+     * SCIM {@code roles} field. If false, a membership change on this group
+     * cannot alter any member's SCIM representation.
+     */
+    // package-private for tests
+    boolean groupConfersScimRole(GroupModel group) {
+        return group.getRoleMappingsStream()
+                .anyMatch(r -> "true".equals(r.getFirstAttribute("scim")));
     }
 }

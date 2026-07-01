@@ -11,6 +11,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -21,8 +22,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>All tests configure the SCIM provider with {@code propagation-group=true}
  * and enable the {@code scim} event listener on the realm. The event listener
  * fires the group adapter on GROUP_CREATE / GROUP_UPDATE / GROUP_DELETE
- * events, and on GROUP_MEMBERSHIP it dispatches both a group replace (PUT
- * with current membership) and a user replace.
+ * events, and on GROUP_MEMBERSHIP it always dispatches a group write, plus a
+ * user replace only when the group confers a {@code scim="true"} role (a
+ * plain group can't change a member's SCIM resource, so the replace is
+ * skipped).
  */
 class ScimGroupPropagationIT extends IntegrationTestBase {
 
@@ -111,6 +114,71 @@ class ScimGroupPropagationIT extends IntegrationTestBase {
             assertTrue(groupPuts >= 1,
                 "expected SCIM PUT /Groups/* after membership add, got " + groupPuts);
         });
+    }
+
+    @Test
+    void membershipChangeOnPlainGroupSkipsUserReplace() {
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        stubScimGroupCreateOk();
+        stubScimGroupUpdateOk();
+        stubScimGroupPatchOk();
+        var r = setupRealmWithGroupPropagation();
+
+        String userId = createAdminUser(r.realm(), "plain-mem", "plain-mem@test.local");
+        awaitUserPostFor("plain-mem");
+        String groupId = createGroup(r.realm(), "plain-group"); // confers no scim-marked role
+        awaitGroupPostFor("plain-group");
+
+        int userPutsBefore = wireMock.countRequestsMatching(
+            putRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
+
+        r.realm().users().get(userId).joinGroup(groupId);
+
+        // The group write still fires; wait for it, then confirm no user PUT was added.
+        await().atMost(20, SECONDS).untilAsserted(() -> assertTrue(
+            wireMock.countRequestsMatching(putRequestedFor(urlPathMatching("/Groups/.*")).build())
+                .getCount() >= 1,
+            "expected a SCIM group write after membership add"));
+        sleepQuietly(2);
+
+        int userPutsAfter = wireMock.countRequestsMatching(
+            putRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
+        assertEquals(userPutsBefore, userPutsAfter,
+            "a plain group confers no scim-marked role, so no user replace should fire; "
+                + "was " + userPutsBefore + ", now " + userPutsAfter);
+    }
+
+    @Test
+    void membershipChangeOnScimRoleGroupFiresUserReplace() {
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        stubScimGroupCreateOk();
+        stubScimGroupUpdateOk();
+        var r = setupRealmWithGroupPropagation();
+
+        String userId = createAdminUser(r.realm(), "role-mem", "role-mem@test.local");
+        awaitUserPostFor("role-mem");
+        String groupId = createGroup(r.realm(), "role-group");
+        awaitGroupPostFor("role-group");
+
+        // Mark a realm role scim=true and map it to the group.
+        var role = new org.keycloak.representations.idm.RoleRepresentation();
+        role.setName("scim-marked");
+        role.setAttributes(java.util.Map.of("scim", java.util.List.of("true")));
+        r.realm().roles().create(role);
+        var roleRep = r.realm().roles().get("scim-marked").toRepresentation();
+        r.realm().groups().group(groupId).roles().realmLevel().add(java.util.List.of(roleRep));
+
+        int userPutsBefore = wireMock.countRequestsMatching(
+            putRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
+
+        r.realm().users().get(userId).joinGroup(groupId);
+
+        await().atMost(20, SECONDS).untilAsserted(() -> assertTrue(
+            wireMock.countRequestsMatching(putRequestedFor(urlPathMatching("/Users/.*")).build())
+                .getCount() > userPutsBefore,
+            "group confers a scim-marked role, so a user replace should fire"));
     }
 
     private TestRealm setupRealmWithGroupPatchOp() {
