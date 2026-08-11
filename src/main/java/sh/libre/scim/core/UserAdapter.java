@@ -142,9 +142,14 @@ public class UserAdapter extends Adapter<UserModel, User> {
         boolean scimSkip = StringUtils.equals(user.getFirstAttribute("scim-skip"), "true");
         this.skip = scimSkip || skippedByPropagationRole(user);
         var extModel = getModel();
+        // Map.get, not MultivaluedMap.getList: getList is compute(key, absent ->
+        // new ArrayList<>()), so it inserts on a miss and structurally modifies
+        // the config map. Realm-cached ComponentModels share that map across
+        // dispatch threads, and racing HashMap.compute throws
+        // ConcurrentModificationException out of this method.
+        var extConfig = extModel == null ? null : extModel.getConfig().get("user-extension-mappings");
         this.extensionMappings = ExtensionAttributeMappings.fromConfig(
-            extModel == null ? List.of()
-                             : extModel.getConfig().getList("user-extension-mappings"));
+            extConfig == null ? List.of() : extConfig);
         this.extensionValues = this.extensionMappings.read(user);
     }
 
