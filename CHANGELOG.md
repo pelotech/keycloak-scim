@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.5.1](https://github.com/pelotech/keycloak-scim/compare/v1.5.0...v1.5.1) (2026-08-11)
+
+
+### Bug fixes
+
+* read component config without mutating it (ConcurrentModificationException) ([#49](https://github.com/pelotech/keycloak-scim/issues/49)) ([8c86edc](https://github.com/pelotech/keycloak-scim/commit/8c86edc223ddb9c3ffc1877e4afa1b2c7280fbe2))
+* stop bundling BouncyCastle in the shaded provider JAR ([#48](https://github.com/pelotech/keycloak-scim/issues/48)) ([f0b5015](https://github.com/pelotech/keycloak-scim/commit/f0b501571eaf3212c0204711b997e3cb2534fc7d))
+
+
+### Performance
+
+* skip the redundant per-membership user replace for groups with no SCIM role ([#46](https://github.com/pelotech/keycloak-scim/issues/46)) ([8b6a8b1](https://github.com/pelotech/keycloak-scim/commit/8b6a8b102bb555b43bbbb9167cd4bdea318e38fa))
+
 ## [1.5.0](https://github.com/pelotech/keycloak-scim/compare/v1.4.1...v1.5.0) (2026-07-01)
 
 
