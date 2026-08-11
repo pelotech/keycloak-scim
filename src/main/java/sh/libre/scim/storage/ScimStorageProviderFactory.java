@@ -270,8 +270,9 @@ public class ScimStorageProviderFactory
         ReconcilerConfigValidator.validate(model, ldapFederations);
 
         try {
-            ExtensionAttributeMappings.parse(
-                model.getConfig().getList("user-extension-mappings"));
+            // Map.get rather than MultivaluedMap.getList — see UserAdapter.apply.
+            var rows = model.getConfig().get("user-extension-mappings");
+            ExtensionAttributeMappings.parse(rows == null ? List.of() : rows);
         } catch (IllegalArgumentException e) {
             throw new ComponentValidationException(
                 "Invalid user-extension-mappings: " + e.getMessage(), e);
