@@ -73,7 +73,18 @@ dependencies {
     implementation(libs.jakarta.ws.rs)
     implementation(libs.jakarta.persistence)
     implementation(libs.scim.sdk.common)
-    implementation(libs.scim.sdk.client)
+    implementation(libs.scim.sdk.client) {
+        // scim-sdk-client declares bcprov/bcpkix at compile scope, but its only
+        // reference to them is a static field in SecurityProvider, reached from
+        // the keystore-based mTLS path. We never populate ScimClientConfig's
+        // key- or truststore, so those classes never load.
+        //
+        // Shading them regardless put org.bouncycastle.* in the provider JAR,
+        // which split-packages with bc-fips on FIPS Keycloak images — there,
+        // which implementation resolves is classpath-order dependent. See
+        // ShadedJarContentsIT.
+        exclude(group = "org.bouncycastle")
+    }
     implementation(libs.commons.lang3)
 
     testImplementation(libs.assertj)
