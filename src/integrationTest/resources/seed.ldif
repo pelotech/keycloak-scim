@@ -35,3 +35,12 @@ objectClass: groupOfNames
 cn: engineers
 member: uid=alice,ou=users,dc=test,dc=local
 member: uid=bob,ou=users,dc=test,dc=local
+
+dn: ou=roles,dc=test,dc=local
+objectClass: organizationalUnit
+ou: roles
+
+dn: cn=directory-role,ou=roles,dc=test,dc=local
+objectClass: groupOfNames
+cn: directory-role
+member: uid=alice,ou=users,dc=test,dc=local
