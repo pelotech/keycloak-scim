@@ -126,27 +126,6 @@ class ScimGroupReconcileIT extends IntegrationTestBase {
         }
     }
 
-    /**
-     * Triggers a full federation sync, tolerating the transient HTTP 400 /
-     * {@code BindException: Cannot assign requested address} that Keycloak can
-     * surface when its LDAP connection pool briefly cannot open a socket (an
-     * environmental hiccup under ephemeral-port pressure, not a data error).
-     * Retries with a generous backoff window.
-     */
-    private void triggerFullSync(TestRealm r) {
-        RuntimeException last = null;
-        for (int attempt = 0; attempt < 15; attempt++) {
-            try {
-                r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-                return;
-            } catch (RuntimeException e) {
-                last = e;
-                sleepQuietly(5);
-            }
-        }
-        throw last;
-    }
-
     /** A SCIM mapping for a Group only exists once its component id is known. */
     private String scimComponentId(TestRealm r) {
         return r.realm().components()

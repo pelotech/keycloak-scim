@@ -14,9 +14,11 @@ import de.captaingoldfish.scim.sdk.client.builder.BulkBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.constants.enums.HttpMethod;
+import de.captaingoldfish.scim.sdk.common.constants.enums.PatchOp;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
 import de.captaingoldfish.scim.sdk.common.resources.Group;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
+import de.captaingoldfish.scim.sdk.common.resources.User;
 import de.captaingoldfish.scim.sdk.common.response.BulkResponse;
 import de.captaingoldfish.scim.sdk.common.response.ListResponse;
 
@@ -37,11 +39,15 @@ import sh.libre.scim.core.exceptions.InconsistentScimMappingException;
 import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
 import sh.libre.scim.core.exceptions.ScimPropagationException;
 import sh.libre.scim.jpa.ScimProvisionLock;
+import sh.libre.scim.jpa.ScimResource;
+import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 
 public class ScimClient {
     private static final ScimTracingBridge TRACING = ScimTracingBridge.create();
     private static final String GROUP_PATCH_OP_KEY = "group-patchOp";
+    private static final String USER_PATCH_OP_KEY = "user-patchOp";
+    private static final String DELETE_MODE_KEY = ScimStorageProviderFactory.DELETE_MODE;
 
     final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
     final protected ScimRequestBuilder scimRequestBuilder;
@@ -163,6 +169,20 @@ public class ScimClient {
         return InvalidResponseFromScimEndpointException.transport(op, e);
     }
 
+    /**
+     * True when deprovisioning should set active:false instead of DELETE.
+     * Only Users can deactivate (RFC 7643 Groups have no {@code active}
+     * attribute); the default mode is {@code delete}. Package-private for tests.
+     */
+    static boolean shouldDeactivate(ComponentModel model, String adapterType) {
+        return "deactivate".equals(model.get(DELETE_MODE_KEY, "delete")) && "User".equals(adapterType);
+    }
+
+    /** Whether the sole findById row for this KC id is a retained deactivation tombstone. */
+    private static boolean isDeactivatedTombstone(List<ScimResource> rows) {
+        return !rows.isEmpty() && rows.get(0).getDeactivatedAt() != null;
+    }
+
     protected String genScimUrl(String scimEndpoint, String resourcePath) {
         return "%s/%s/%s".formatted(scimApplicationBaseUrl,
                 scimEndpoint,
@@ -188,28 +208,27 @@ public class ScimClient {
         long t0 = System.nanoTime();
         var adapter = getAdapter(factory);
         adapter.apply(kcModel);
-        if (!adapter.skip) {
-            ScimClientMetrics.APPLY_MODEL_NANOS.add(System.nanoTime() - t0);
-        }
-        sendCreate(adapter);
-    }
-
-    // Shared create send/persist path: skip + idempotent short-circuit on an
-    // existing mapping, then POST and persist the mapping. Used by create()
-    // (full apply) and the member-less group-membership provisioning path.
-    private <S extends ResourceNode> void sendCreate(Adapter<?, S> adapter) {
         if (adapter.skip) {
             return;
         }
-        // If a mapping already exists (created by a prior import or provision), skip.
-        if (adapter.query("findById", adapter.getId()).getResultList().size() != 0) {
+        ScimClientMetrics.APPLY_MODEL_NANOS.add(System.nanoTime() - t0);
+        // A mapping from a prior import or provision means there is nothing to
+        // create. Unless it's a deactivation tombstone: then the user has come
+        // back, so replace() pushes active from isEnabled() to the same remote
+        // id and clears the flag on success.
+        var existing = adapter.query("findById", adapter.getId()).getResultList();
+        if (!existing.isEmpty()) {
+            if (isDeactivatedTombstone(existing)) {
+                LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
+                this.replace(factory, kcModel);
+            }
             return;
         }
         handleCreateResponse(adapter, postResource(adapter));
     }
 
     // POSTs the resource to the SCIM target and returns the raw response. Shared
-    // by sendCreate() (which then persists the mapping in the caller's transaction)
+    // by create() (which then persists the mapping in the caller's transaction)
     // and provisionGroupForMembership() (which persists in a nested transaction
     // under a lock). Does NOT touch the mapping table — persistence is the
     // caller's concern.
@@ -296,12 +315,39 @@ public class ScimClient {
     }
 
     /**
+     * After a create stores a live mapping, drop any tombstone rows
+     * (DEACTIVATED_AT set) with the same external id: the returning user's old
+     * mapping under a former KC id. If those stuck around and the component
+     * were later flipped back to delete-mode=delete, the reconciler could
+     * DELETE a remote id that a live mapping still points to, so this runs on
+     * every create-path save no matter the current mode. Tombstones whose
+     * external id never comes back are kept.
+     */
+    private void purgeDeactivatedTombstones(Adapter<?, ?> adapter) {
+        if (adapter.getExternalId() == null) {
+            return;
+        }
+        int purged = getEM().createNamedQuery("deleteDeactivatedByExternalId")
+            .setParameter("realmId", getRealmId())
+            .setParameter("componentId", model.getId())
+            .setParameter("type", adapter.getType())
+            .setParameter("id", adapter.getExternalId())
+            .executeUpdate();
+        if (purged > 0) {
+            LOGGER.infof("Purged %d deactivated mapping(s) for resurrected %s %s",
+                purged, adapter.getType(), adapter.getExternalId());
+        }
+    }
+
+    /**
      * Persists the SCIM mapping from a create response, but only when the POST
      * succeeded. A rejected create (e.g. the target returns 400 for a user with
      * no email) carries no parsed resource: {@code response.getResource()} is
      * null, so applying it NPEs, and a mapping persisted here would be a phantom
      * record for a resource the target never created. So a rejected create throws
      * instead, leaving the user unmapped for a later sync to retry.
+     * Also purges any DEACTIVATED_AT tombstone with this resource's external
+     * id; see {@link #purgeDeactivatedTombstones}.
      *
      * @return true if the mapping was applied and saved.
      * @throws InvalidResponseFromScimEndpointException if the POST was rejected.
@@ -321,6 +367,7 @@ public class ScimClient {
         adapter.saveMapping();
         long t2 = System.nanoTime();
         ScimClientMetrics.SAVE_MAPPING_NANOS.add(t2 - t1);
+        purgeDeactivatedTombstones(adapter);
         ScimClientMetrics.CREATE_COUNT.increment();
         return true;
     }
@@ -344,7 +391,7 @@ public class ScimClient {
                         try {
                             LOGGER.info(adapter.getType());
                             if ((adapter.getType() == "Group" && this.model.get(GROUP_PATCH_OP_KEY, false))
-                                 || (adapter.getType() == "User" && this.model.get("user-patchOp", false))) {
+                                 || (adapter.getType() == "User" && this.model.get(USER_PATCH_OP_KEY, false))) {
                                 return adapter.toPatchBuilder(scimRequestBuilder, url)
                                               .sendRequest();
                             }
@@ -395,6 +442,13 @@ public class ScimClient {
                             "replace " + adapter.getId() + ": " + response.getResponseBody());
                     }
                 }
+                if (resource.getDeactivatedAt() != null) {
+                    // A successful replace means the user is back (re-import or
+                    // an explicit admin action). Sync-refresh skips flagged
+                    // rows, so it never lands here.
+                    resource.setDeactivatedAt(null);
+                    LOGGER.infof("Cleared deactivation flag for %s %s", adapter.getType(), adapter.getId());
+                }
                 span.setHttpStatus(response.getHttpStatus());
             } catch (NoResultException e) {
                 span.recordError(e);
@@ -417,6 +471,11 @@ public class ScimClient {
             AdapterFactory<M, S, A> factory, String id) {
         var adapter = getAdapter(factory);
         adapter.setId(id);
+
+        if (shouldDeactivate(model, adapter.getType())) {
+            deactivateUser(adapter);
+            return;
+        }
 
         try (var span = TRACING.startSpan("scim.delete", adapter.getType(), scimApplicationBaseUrl)) {
             try {
@@ -455,6 +514,113 @@ public class ScimClient {
                 LOGGER.warnf("Failed to delete resource %s, scim mapping not found", id);
             }
         }
+    }
+
+    /**
+     * delete-mode=deactivate: set {@code active: false} on the remote user
+     * instead of DELETE, and keep the mapping row (flagged with DEACTIVATED_AT)
+     * so a returning user reactivates under the same remote id. With
+     * user-patchOp on this is a single PATCH; otherwise GET plus a full PUT
+     * with the flag flipped, skipping the PUT if the user is already inactive.
+     *
+     * <p>A 404 anywhere means the remote user is already gone, which is the
+     * goal state: flag the mapping and stop. Unlike replace(), never re-create
+     * on 404; re-creating a user in order to deactivate them is backwards. On
+     * any other failure the classified exception propagates and DEACTIVATED_AT
+     * stays null, so the next reconciler pass retries. Once flagged, repeat
+     * calls return without HTTP.
+     */
+    private void deactivateUser(Adapter<?, ?> adapter) {
+        try (var span = TRACING.startSpan("scim.deactivate", adapter.getType(), scimApplicationBaseUrl)) {
+            try {
+                ScimResource mapping = adapter.query("findById", adapter.getId()).getSingleResult();
+                if (mapping.getDeactivatedAt() != null) {
+                    LOGGER.debugf("User %s already deactivated, skipping", adapter.getId());
+                    return;
+                }
+                adapter.apply(mapping);
+                String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
+                var retry = registry.retry("deactivate");
+
+                ServerResponse<User> response;
+                try {
+                    if (this.model.get(USER_PATCH_OP_KEY, false)) {
+                        response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                            try {
+                                var patch = scimRequestBuilder.patch(url, User.class);
+                                patch.addOperation()
+                                    .path("active")
+                                    .op(PatchOp.REPLACE)
+                                    .value("false")
+                                    .build();
+                                return patch.sendRequest();
+                            } catch (ResponseException e) {
+                                throw new RuntimeException(e);
+                            }
+                        }));
+                    } else {
+                        ServerResponse<User> getResponse = auth.sendWithAuthRefresh(
+                            () -> retry.executeSupplier(() -> {
+                                try {
+                                    return scimRequestBuilder.get(url, User.class).sendRequest();
+                                } catch (ResponseException e) {
+                                    throw new RuntimeException(e);
+                                }
+                            }));
+                        span.setHttpStatus(getResponse.getHttpStatus());
+                        if (getResponse.getHttpStatus() == 404) {
+                            markDeactivated(mapping, adapter.getId(), "remote already gone (404)");
+                            return;
+                        }
+                        if (!getResponse.isSuccess()) {
+                            throw new InvalidResponseFromScimEndpointException(
+                                getResponse.getHttpStatus(),
+                                "deactivate (get) " + adapter.getId() + ": " + getResponse.getResponseBody());
+                        }
+                        User remote = getResponse.getResource();
+                        if (!remote.isActive().orElse(true)) {
+                            markDeactivated(mapping, adapter.getId(), "remote already inactive");
+                            return;
+                        }
+                        remote.setActive(false);
+                        response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
+                            try {
+                                return scimRequestBuilder
+                                    .update(url, User.class)
+                                    .setResource(remote)
+                                    .sendRequest();
+                            } catch (ResponseException e) {
+                                throw new RuntimeException(e);
+                            }
+                        }));
+                    }
+                } catch (RuntimeException e) {
+                    span.recordError(e);
+                    throw classifyCrudFailure("deactivate " + adapter.getId(), e);
+                }
+
+                span.setHttpStatus(response.getHttpStatus());
+                if (response.getHttpStatus() == 404) {
+                    markDeactivated(mapping, adapter.getId(), "remote already gone (404)");
+                    return;
+                }
+                if (!response.isSuccess()) {
+                    throw new InvalidResponseFromScimEndpointException(
+                        response.getHttpStatus(),
+                        "deactivate " + adapter.getId() + ": " + response.getResponseBody());
+                }
+                markDeactivated(mapping, adapter.getId(), "set active:false");
+            } catch (NoResultException e) {
+                span.recordError(e);
+                LOGGER.warnf("Failed to deactivate resource %s, scim mapping not found", adapter.getId());
+            }
+        }
+    }
+
+    /** Flags the (managed) mapping row; flushes with the surrounding transaction. */
+    private void markDeactivated(ScimResource mapping, String kcId, String reason) {
+        mapping.setDeactivatedAt(System.currentTimeMillis());
+        LOGGER.infof("SCIM user %s deactivated (%s); mapping retained", kcId, reason);
     }
 
     /**
@@ -621,14 +787,23 @@ public class ScimClient {
                     LOGGER.infof("Reconciling local resource %s", adapter.getId());
                     if (!adapter.skipRefresh()) {
                         var mapping = adapter.getMapping();
-                        if (mapping == null) {
-                            LOGGER.info("Creating it");
-                            this.create(factory, resource);
+                        if (mapping != null && mapping.getDeactivatedAt() != null) {
+                            // Don't re-push a deactivated user just because a
+                            // stale local copy still exists; that would fight
+                            // the reconciler, which would deactivate it again
+                            // next pass. Reactivation needs a re-import or an
+                            // explicit admin action.
+                            LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
                         } else {
-                            LOGGER.info("Replacing it");
-                            this.replace(factory, resource);
+                            if (mapping == null) {
+                                LOGGER.info("Creating it");
+                                this.create(factory, resource);
+                            } else {
+                                LOGGER.info("Replacing it");
+                                this.replace(factory, resource);
+                            }
+                            syncRes.increaseUpdated();
                         }
-                        syncRes.increaseUpdated();
                     }
                 } catch (ScimPropagationException e) {
                     LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
@@ -670,6 +845,12 @@ public class ScimClient {
                             if (adapter.entityExists()) {
                                 LOGGER.info("Valid mapping found, skipping");
                                 continue;
+                            } else if (mapping.getDeactivatedAt() != null) {
+                                // Deactivation tombstone: the local user is
+                                // supposed to be absent. Keep the row so a
+                                // returning user gets the same remote id.
+                                LOGGER.debugf("Keeping deactivated mapping %s (tombstone)", mapping.getId());
+                                continue;
                             } else {
                                 LOGGER.info("Delete a dangling mapping");
                                 adapter.deleteMapping();
@@ -681,6 +862,18 @@ public class ScimClient {
                             LOGGER.info("Matched");
                             adapter.saveMapping();
                         } else {
+                            if (shouldDeactivate(model, adapter.getType())
+                                    && resource instanceof User remoteUser
+                                    && !remoteUser.isActive().orElse(true)) {
+                                // Users we deactivated still show up in the
+                                // consumer's /Users list, and their local absence
+                                // is expected. DELETE_REMOTE would hard-delete our
+                                // own tombstone and CREATE_LOCAL would resurrect a
+                                // deprovisioned user, so skip both.
+                                LOGGER.debugf("Skipping inactive remote user %s under delete-mode=deactivate",
+                                    resource.getId().orElse("?"));
+                                continue;
+                            }
                             switch (this.model.get("sync-import-action")) {
                                 case "CREATE_LOCAL":
                                     LOGGER.info("Create local resource");
@@ -768,17 +961,37 @@ public class ScimClient {
         var realm = session.getContext().getRealm();
 
         var pending = new ArrayList<UserAdapter>(ops.size());
-        int skipped = 0;
+        int skipped = 0, failed = 0;
         for (var op : ops) {
             var user = session.users().getUserById(realm, op.kcUserId());
             if (user == null) { skipped++; continue; }
             var adapter = new UserAdapter(session, model.getId());
             adapter.apply(user);
             if (adapter.skip) { skipped++; continue; }
-            if (!adapter.query("findById", adapter.getId()).getResultList().isEmpty()) { skipped++; continue; }
+            var existing = adapter.query("findById", adapter.getId()).getResultList();
+            if (!existing.isEmpty()) {
+                if (isDeactivatedTombstone(existing)) {
+                    // Today's callers only feed the bulk lane freshly created
+                    // users (new KC ids, no mapping), so this shouldn't be
+                    // reachable from real LDAP flows. If a flagged mapping does
+                    // show up (a future caller, or an overlapping sync),
+                    // reactivate it with an individual replace rather than
+                    // silently skipping.
+                    try {
+                        this.replace(UserAdapter::new, user);
+                    } catch (ScimPropagationException e) {
+                        LOGGER.warnf(e, "Bulk-lane reactivation replace failed for user %s", op.kcUserId());
+                        failed++;
+                        continue;
+                    }
+                    // A reactivation is not a bulk create, so count it as skipped.
+                }
+                skipped++;
+                continue;
+            }
             pending.add(adapter);
         }
-        if (pending.isEmpty()) return new BulkResult(0, skipped, 0);
+        if (pending.isEmpty()) return new BulkResult(0, skipped, failed);
 
         var pairs = new ArrayList<String[]>(pending.size());
         for (var a : pending) {
@@ -796,7 +1009,7 @@ public class ScimClient {
         if (!response.isSuccess()) {
             LOGGER.warnf("SCIM /Bulk request failed: HTTP %d %s — %d user create(s) lost this round",
                 response.getHttpStatus(), response.getResponseBody(), pending.size());
-            return new BulkResult(0, skipped, pending.size());
+            return new BulkResult(0, skipped, failed + pending.size());
         }
 
         var bulk = response.getResource();
@@ -805,9 +1018,9 @@ public class ScimClient {
             // empty/unparseable-body case so it doesn't NPE the whole batch.
             LOGGER.warnf("SCIM /Bulk returned HTTP %d with no parseable body — %d create(s) lost this round",
                 response.getHttpStatus(), pending.size());
-            return new BulkResult(0, skipped, pending.size());
+            return new BulkResult(0, skipped, failed + pending.size());
         }
-        int created = 0, failed = 0;
+        int created = 0;
         for (var adapter : pending) {
             var maybe = bulk.getByBulkId(adapter.getId());
             if (maybe.isEmpty()) { failed++; LOGGER.warnf("No bulk response op for user %s", adapter.getId()); continue; }
@@ -817,6 +1030,7 @@ public class ScimClient {
             if (status != null && status >= 200 && status < 300 && extId.isPresent()) {
                 adapter.setExternalId(extId.get());
                 adapter.saveMapping();
+                purgeDeactivatedTombstones(adapter);
                 created++;
             } else {
                 failed++;

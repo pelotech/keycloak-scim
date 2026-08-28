@@ -64,9 +64,8 @@ public final class ReconcilerScheduler {
             }
             try {
                 var result = new ReconcilerRunner(innerSession, latest, threshold).run();
-                LOGGER.infof(
-                    "Reconciler %s: users deleted=%d; groups deleted=%d",
-                    taskName, result.usersDeleted(), result.groupsDeleted());
+                LOGGER.infof("Reconciler %s: %d user(s) deprovisioned (mode=%s), %d group(s) deleted",
+                    taskName, result.usersDeprovisioned(), result.userDeleteMode(), result.groupsDeleted());
             } catch (Exception e) {
                 LOGGER.errorf(e, "Reconciler %s failed", taskName);
             }

@@ -14,7 +14,8 @@ import jakarta.persistence.Table;
 @NamedQueries({
                 @NamedQuery(name = "findById", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and id = :id"),
                 @NamedQuery(name = "findByExternalId", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id"),
-                @NamedQuery(name = "findByComponentAndType", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type")})
+                @NamedQuery(name = "findByComponentAndType", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type"),
+                @NamedQuery(name = "deleteDeactivatedByExternalId", query = "delete from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id and deactivatedAt is not null")})
 public class ScimResource {
         @Id
         @Column(name = "ID", nullable = false)
@@ -35,6 +36,14 @@ public class ScimResource {
         @Id
         @Column(name = "EXTERNAL_ID", nullable = false)
         private String externalId;
+
+        /**
+         * Epoch millis when the remote resource was deactivated under
+         * delete-mode=deactivate; null means the mapping is live. Not part of
+         * the composite PK (see the changelog comment for why).
+         */
+        @Column(name = "DEACTIVATED_AT")
+        private Long deactivatedAt;
 
         public String getId() {
                 return id;
@@ -74,6 +83,14 @@ public class ScimResource {
 
         public void setType(String type) {
                 this.type = type;
+        }
+
+        public Long getDeactivatedAt() {
+                return deactivatedAt;
+        }
+
+        public void setDeactivatedAt(Long deactivatedAt) {
+                this.deactivatedAt = deactivatedAt;
         }
 
 }

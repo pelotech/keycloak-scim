@@ -39,13 +39,16 @@ import java.util.function.Consumer;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.delete;
+import static com.github.tomakehurst.wiremock.client.WireMock.deleteRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
+import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
 import static com.github.tomakehurst.wiremock.client.WireMock.patch;
 import static com.github.tomakehurst.wiremock.client.WireMock.patchRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.put;
+import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlMatching;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
@@ -253,6 +256,14 @@ public abstract class IntegrationTestBase {
                 throw new IllegalStateException("SCIM provider create failed: " + r.getStatus());
             }
         }
+    }
+
+    /** Fetches the realm's SCIM provider component representation. */
+    protected ComponentRepresentation scimComponent(RealmResource realm) {
+        return realm.components()
+            .query(null, "org.keycloak.storage.UserStorageProvider").stream()
+            .filter(c -> "scim".equals(c.getProviderId()))
+            .findFirst().orElseThrow();
     }
 
     protected String addLdapFederation(RealmResource realm) {
@@ -484,6 +495,57 @@ public abstract class IntegrationTestBase {
                       "userName": "placeholder",
                       "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
                     }""")));
+    }
+
+    /** Stubs GET /Users/{extId} returning a minimal valid User with the given active state. */
+    protected void stubScimUserGet(String extId, boolean active) {
+        wireMock.stubFor(get(urlPathEqualTo("/Users/" + extId))
+            .willReturn(aResponse()
+                .withStatus(200)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "%s",
+                      "userName": "placeholder",
+                      "displayName": "placeholder",
+                      "active": %s,
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                    }""".formatted(extId, active))));
+    }
+
+    /** Stubs GET /Users/{extId} as 404 (resource already gone downstream). */
+    protected void stubScimUserGet404(String extId) {
+        wireMock.stubFor(get(urlPathEqualTo("/Users/" + extId))
+            .willReturn(aResponse().withStatus(404)));
+    }
+
+    /** Current count of PUT requests to /Users/{extId}. */
+    protected int userPutCountFor(String extId) {
+        return wireMock.countRequestsMatching(
+            putRequestedFor(urlPathEqualTo("/Users/" + extId)).build()).getCount();
+    }
+
+    /** Current count of DELETE /Users/* requests. */
+    protected int userDeleteCount() {
+        return wireMock.countRequestsMatching(
+            deleteRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
+    }
+
+    /** Like {@link #stubScimUserCreateOk()} but with a caller-chosen resource id,
+     *  so tests can correlate later traffic. */
+    protected void stubScimUserCreateOk(String extId) {
+        wireMock.stubFor(post(urlPathEqualTo("/Users"))
+            .willReturn(aResponse()
+                .withStatus(201)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("""
+                    {
+                      "id": "%s",
+                      "userName": "placeholder",
+                      "displayName": "placeholder",
+                      "active": true,
+                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                    }""".formatted(extId))));
     }
 
     protected void stubScimUserDeleteOk() {
@@ -740,6 +802,27 @@ public abstract class IntegrationTestBase {
     }
 
     // ---------- generic ----------
+
+    /**
+     * Triggers a full federation sync, tolerating the transient HTTP 400 /
+     * {@code BindException: Cannot assign requested address} that Keycloak can
+     * surface when its LDAP connection pool briefly cannot open a socket (an
+     * environmental hiccup under ephemeral-port pressure, not a data error).
+     * Retries with a generous backoff window.
+     */
+    protected void triggerFullSync(TestRealm r) {
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < 15; attempt++) {
+            try {
+                r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                sleepQuietly(5);
+            }
+        }
+        throw last;
+    }
 
     protected static void sleepQuietly(int seconds) {
         try {

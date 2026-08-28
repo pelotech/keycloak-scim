@@ -40,4 +40,17 @@
         </insert>
     </changeSet>
 
+    <changeSet author="keycloak-scim" id="scim-resource-deactivated-at-1.0">
+        <!-- delete-mode=deactivate: non-null means we set active:false on the
+             remote resource at this epoch-millis instant and kept the mapping
+             so reactivation targets the same remote id. Not part of the
+             composite PK: after a Keycloak account re-create, a live row and
+             a tombstone can share an EXTERNAL_ID and differ only in ID. -->
+        <addColumn tableName="SCIM_RESOURCE">
+            <column name="DEACTIVATED_AT" type="BIGINT">
+                <constraints nullable="true" />
+            </column>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>
