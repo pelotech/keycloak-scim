@@ -239,3 +239,25 @@ in the suite).
 - **PATCH-only wire behavior**: single round trip but requires server PATCH
   support on Users, unconfirmed for the initial consumer (`user-patchOp=false`
   posture). Instead the write verb honors the existing `user-patchOp` switch.
+- **Let the consumer treat `DELETE /Users/{id}` as a soft delete**, with no
+  provider change at all. This covers the actual business requirement (records
+  outlive access), and RFC 7644 permits it: a service provider may keep the
+  row, provided the resource then returns 404 and is omitted from query
+  results. The reason it is not sufficient here is that `delete()` drops the
+  `SCIM_RESOURCE` mapping on a successful DELETE, and that row is what the rest
+  of this design hangs on. Without it: every returning user re-enters as a
+  `POST`, so identity continuity depends on the consumer's userName
+  resurrection in all cases rather than only after a Keycloak account is
+  re-created; `sync-refresh` sees a lingering local user with no mapping, calls
+  `create()`, and silently re-activates someone we just deprovisioned (the
+  #35235 orphan is exactly the population the reconciler acts on); and if the
+  consumer's soft-deleted users stay visible in `/Users`, `sync-import` either
+  materializes a local account for them (`CREATE_LOCAL`) or re-sends DELETE
+  every pass (`DELETE_REMOTE`). Those are all client-side behaviors that no
+  server-side convention can reach. A protocol argument points the same way:
+  `DELETE` meaning "not deleted" misleads operators reading access logs and any
+  other SCIM client the consumer later onboards, whereas `active: false` is the
+  RFC's own vocabulary for present-but-deprovisioned, and a component setting
+  makes the choice visible and per-realm rather than an invisible server
+  convention. The two are not exclusive: consumer-side soft delete remains a
+  sensible backstop under `delete-mode=delete`, which is still the default.
