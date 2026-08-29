@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/pelotech/keycloak-scim/compare/v1.5.1...v1.6.0) (2026-08-29)
+
+
+### Features
+
+* optionally deactivate users on deprovision instead of deleting ([#50](https://github.com/pelotech/keycloak-scim/issues/50)) ([ef1685f](https://github.com/pelotech/keycloak-scim/commit/ef1685f5bdda7e3d4b2a3899a6a6a1781ced094e))
+
 ## [1.5.1](https://github.com/pelotech/keycloak-scim/compare/v1.5.0...v1.5.1) (2026-08-11)
 
 
