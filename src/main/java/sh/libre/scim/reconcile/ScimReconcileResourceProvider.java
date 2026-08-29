@@ -26,9 +26,12 @@ import sh.libre.scim.storage.ScimStorageProviderFactory;
  * default 48).
  *
  * <p>Response: 200 with a JSON body
- * {@code {"deleted": N, "groupsDeleted": D}}. The {@code deleted} key carries
- * the number of user SCIM DELETE calls issued; {@code groupsDeleted} reports the
- * number of federated groups with zero local members deleted by the group phase.
+ * {@code {"deleted": N, "groupsDeleted": D, "userDeleteMode": "delete"|"deactivate"}}.
+ * {@code deleted} counts user deprovision operations issued: SCIM DELETE
+ * calls, or {@code active:false} deactivations when the component is
+ * configured with {@code delete-mode=deactivate}; {@code userDeleteMode} says
+ * which. {@code groupsDeleted} reports the number of federated groups with
+ * zero local members deleted by the group phase.
  */
 public class ScimReconcileResourceProvider implements RealmResourceProvider {
 
@@ -62,8 +65,9 @@ public class ScimReconcileResourceProvider implements RealmResourceProvider {
         var result = new ReconcilerRunner(session, component, threshold).run();
 
         return Response.ok(
-            "{\"deleted\":" + result.usersDeleted()
-            + ",\"groupsDeleted\":" + result.groupsDeleted() + "}",
+            "{\"deleted\":" + result.usersDeprovisioned()
+            + ",\"groupsDeleted\":" + result.groupsDeleted()
+            + ",\"userDeleteMode\":\"" + result.userDeleteMode() + "\"}",
             MediaType.APPLICATION_JSON).build();
     }
 

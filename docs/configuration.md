@@ -57,6 +57,51 @@ Both toggles apply across all paths: admin-REST events,
 LDAP-federation imports (when the `scim-ldap-sync` mapper is attached),
 and sync operations.
 
+### Deprovisioning mode
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `delete-mode` | enum | `delete` | How user deprovisioning reaches the SCIM service. Options: `delete`, `deactivate`. |
+
+`delete` (the default) sends `DELETE /Users/{id}` and drops the local
+mapping (the existing behavior, unchanged). `deactivate` never hard-deletes
+users: every deprovisioning path (admin user deletion, account self-deletion,
+and the LDAP-deletion reconciler) instead marks the remote user inactive in
+place and keeps the local mapping.
+
+On the wire (with `user-patchOp=false`, the default) this is a
+`GET /Users/{id}` followed by a `PUT /Users/{id}` of the fetched resource with
+`active: false`. If the GET already shows the user inactive, no PUT is sent.
+With `user-patchOp=true` it is a single `PATCH` replacing `active`. A 404 on
+any call means the resource is already gone downstream, and the deprovision is
+treated as complete.
+
+Deactivation is recorded locally (`DEACTIVATED_AT` on the mapping row), so the
+reconciler skips already-deactivated users on later passes: no repeated
+writes, no per-pass HTTP for retained users. `sync-refresh` also skips
+deactivated mappings, since a lingering local copy is not evidence the user is
+back, and `sync-import` neither deletes nor re-imports inactive unmatched
+remote users while this mode is active.
+
+Reactivation targets the same remote resource. If the user reappears (e.g. the
+directory entry returns) while the mapping is retained, the update goes to the
+same `/Users/{id}` with `active: true`. If the Keycloak account itself was
+deleted and re-created, the user goes out as a fresh `POST /Users`; identity
+continuity then depends on the SCIM service matching the existing deactivated
+user by `userName` and returning the same resource id. Treat `externalId` as
+advisory here: it is the Keycloak internal id and changes in this case. When a
+create response returns a resource id matching a retained deactivated mapping,
+the stale mapping is purged.
+
+Switching back to `delete` re-enables deletes: previously deactivated mappings
+lose their skip protection and go through the reconciler's normal absence
+checks like any other mapping. In practice that deletes them remotely, since
+the conditions that caused deactivation still hold.
+
+Groups are unaffected: SCIM groups have no `active` attribute, so group
+deletions always go out as `DELETE /Groups/{id}`. User *disable* is also
+unaffected; it already propagates as an ordinary update with `active: false`.
+
 ### Failure handling on interactive events
 
 By default the plugin is fail-open: when a SCIM call fails, the Keycloak
@@ -472,7 +517,7 @@ Realm-scoped endpoint mounted at
 
 | Method | Path | Query | Description |
 | --- | --- | --- | --- |
-| `POST` | `/{componentId}` | `thresholdHours` (optional, default 48) | Forces a reconciliation pass for the SCIM provider component with the given id. Returns `200 {"deleted": N}` with the number of SCIM DELETE calls issued. The `thresholdHours` query param overrides `reconciler-stale-threshold-seconds` for this single call — useful for operator-driven cleanups after a known LDAP cleanup. |
+| `POST` | `/{componentId}` | `thresholdHours` (optional, default 48) | Forces a reconciliation pass for the SCIM provider component with the given id. Returns `200 {"deleted": N, "groupsDeleted": D, "userDeleteMode": "delete"\|"deactivate"}`. `deleted` counts user deprovision operations issued: SCIM DELETE calls, or in-place `active: false` deactivations when the component has `delete-mode=deactivate` (`userDeleteMode` reports which of the two happened). `groupsDeleted` counts federated groups with zero local members deleted by the group phase. The `thresholdHours` query param overrides `reconciler-stale-threshold-seconds` for this single call, useful for operator-driven cleanups after a known LDAP cleanup. |
 | `GET` | `/metrics` | — | Returns a plain-text summary of `ScimClient.create` per-phase timing counters (applyModel, query, http send, applyResponse, saveMapping). Useful for live diagnostics; counters accumulate across the JVM lifetime. |
 | `POST` | `/metrics/reset` | — | Zeros the metrics counters. Used by the perf harness between scenarios. |
 
@@ -484,7 +529,7 @@ bearer token with realm-admin permissions.
 | Attribute | Set by | Read by | Purpose |
 | --- | --- | --- | --- |
 | `scim-skip` | operator (manual) | `UserAdapter.apply`, `GroupAdapter.apply` | Set to `"true"` on a user (or group) to opt them out of SCIM propagation. The mapper still fires for them, but propagation short-circuits. Useful for service accounts, internal admin users, or excluding an individual member of a `propagation-role`-eligible group. |
-| `ldap-federation-last-seen` | `ScimLdapStorageMapper.onImportUserFromLDAP` | `StaleAttributeWitness` (the reconciler) | ISO-8601 timestamp of the last time Keycloak's LDAP federation observed this user. The reconciler treats users whose attribute is older than `reconciler-stale-threshold-seconds` as absent and propagates SCIM DELETE. |
+| `ldap-federation-last-seen` | `ScimLdapStorageMapper.onImportUserFromLDAP` | `StaleAttributeWitness` (the reconciler) | ISO-8601 timestamp of the last time Keycloak's LDAP federation observed this user. The reconciler treats users whose attribute is older than `reconciler-stale-threshold-seconds` as absent and propagates deprovisioning (SCIM DELETE, or deactivation under `delete-mode=deactivate`). |
 
 ## JVM system properties
 

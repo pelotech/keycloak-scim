@@ -25,8 +25,9 @@ import java.util.concurrent.CompletionException;
 /**
  * One reconciliation pass for a single SCIM provider component: walks the
  * realm's federation-linked users, evaluates configured witnesses, and issues
- * a SCIM DELETE (via the existing {@link ScimClient}) for each user every
- * witness agrees is absent.
+ * a SCIM DELETE (or an active:false deactivation, under
+ * delete-mode=deactivate) via the existing {@link ScimClient} for each user
+ * every witness agrees is absent.
  *
  * <p>Scope note: we do not delete the local {@code UserModel}. That is
  * Keycloak's responsibility (see upstream issue #35235); when upstream lands
@@ -39,7 +40,7 @@ public class ReconcilerRunner {
     private static final Logger LOGGER = Logger.getLogger(ReconcilerRunner.class);
 
     /** Outcome of one reconciliation pass. */
-    public record ReconcileResult(int usersDeleted, int groupsDeleted) {}
+    public record ReconcileResult(int usersDeprovisioned, int groupsDeleted, String userDeleteMode) {}
 
     private final KeycloakSession session;
     private final ComponentModel scimProvider;
@@ -54,7 +55,8 @@ public class ReconcilerRunner {
     }
 
     /**
-     * @return the outcome of this pass (user and group deletes).
+     * @return the outcome of this pass: users deprovisioned (deleted or
+     *     deactivated, per the reported mode) and groups deleted.
      */
     public ReconcileResult run() {
         var realm = session.getContext().getRealm();
@@ -65,6 +67,9 @@ public class ReconcilerRunner {
                 staleThreshold,
                 Instant.now())
         );
+
+        boolean deactivateMode = "deactivate".equals(
+            scimProvider.get(ScimStorageProviderFactory.DELETE_MODE, "delete"));
 
         // Iterate our own mappings rather than Keycloak's user list. Walking
         // Keycloak's users triggers federation enumeration, which can silently
@@ -87,6 +92,9 @@ public class ReconcilerRunner {
         // HTTP cost in the synchronous version.
         List<String> toDelete = new ArrayList<>();
         for (ScimResource m : mappings) {
+            if (skipAlreadyDeactivated(deactivateMode, m.getDeactivatedAt())) {
+                continue;
+            }
             var user = session.users().getUserById(realm, m.getId());
             boolean shouldDelete;
             if (user == null) {
@@ -105,9 +113,9 @@ public class ReconcilerRunner {
             }
         }
 
-        int usersDeleted;
+        int usersDeprovisioned;
         if (toDelete.isEmpty()) {
-            usersDeleted = 0;
+            usersDeprovisioned = 0;
         } else {
             // Phase 2: parallel SCIM DELETEs via the shared worker pool.
             // Each worker opens its own KeycloakSession (so mapping cleanup runs
@@ -154,11 +162,22 @@ public class ReconcilerRunner {
                 // sees the exception. Just log and return what we attempted.
                 LOGGER.warnf(e.getCause(), "reconciler: one or more parallel deletes failed");
             }
-            usersDeleted = toDelete.size();
+            usersDeprovisioned = toDelete.size();
         }
 
         int groupsDeleted = reconcileGroups();
-        return new ReconcileResult(usersDeleted, groupsDeleted);
+        return new ReconcileResult(usersDeprovisioned, groupsDeleted, deactivateMode ? "deactivate" : "delete");
+    }
+
+    /**
+     * True when the user phase can skip this mapping without HTTP: deactivate
+     * mode and an already-flagged row. In delete mode a flagged mapping (left
+     * over from a mode flip) is deleted like any other orphan; if the consumer
+     * already removed the resource, the DELETE 404s into a no-op.
+     * Package-private for tests.
+     */
+    static boolean skipAlreadyDeactivated(boolean deactivateMode, Long deactivatedAt) {
+        return deactivateMode && deactivatedAt != null;
     }
 
     enum GroupAction { DELETE, KEEP }

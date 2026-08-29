@@ -39,6 +39,7 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_ENABLED = "reconciler-enabled";
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
+    public static final String DELETE_MODE = "delete-mode";
 
     public static String reconcilerTaskName(String componentId) {
         return "scim-reconciler-" + componentId;
@@ -140,6 +141,17 @@ public class ScimStorageProviderFactory
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable group propagation")
                 .defaultValue("true")
+                .add()
+                .property()
+                .name(DELETE_MODE)
+                .type(ProviderConfigProperty.LIST_TYPE)
+                .label("User deprovisioning mode")
+                .helpText("delete (default) sends DELETE /Users/{id} and drops the local mapping. "
+                    + "deactivate sets active:false on the remote user and keeps the mapping, so a "
+                    + "returning user reactivates under the same remote id. Users only; groups are "
+                    + "always deleted with DELETE /Groups/{id}.")
+                .options("delete", "deactivate")
+                .defaultValue("delete")
                 .add()
                 .property()
                 .name("sync-import")
