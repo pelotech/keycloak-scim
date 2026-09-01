@@ -369,7 +369,38 @@ public class ScimClient {
         ScimClientMetrics.SAVE_MAPPING_NANOS.add(t2 - t1);
         purgeDeactivatedTombstones(adapter);
         ScimClientMetrics.CREATE_COUNT.increment();
+        warnOnActiveDisagreement(adapter, response.getResource());
         return true;
+    }
+
+    /**
+     * Whether a create response contradicts the active state we pushed. A server
+     * holding its own suspension state can accept a user as active and still
+     * return {@code active: false}. An absent field counts as agreement, since
+     * not every endpoint echoes it. Package-private static as a test seam.
+     */
+    static boolean activeStateDisagrees(Boolean pushed, User returned) {
+        if (pushed == null) {
+            return false;
+        }
+        return returned.isActive().map(a -> !a.equals(pushed)).orElse(false);
+    }
+
+    /**
+     * Logs when the endpoint disagrees with the active state we pushed. We keep
+     * our own value and store no active state locally, so without this the
+     * difference is invisible: Keycloak shows an enabled user that the remote
+     * treats as suspended.
+     */
+    private void warnOnActiveDisagreement(Adapter<?, ?> adapter, ResourceNode created) {
+        if (!(created instanceof User createdUser) || !(adapter instanceof UserAdapter userAdapter)) {
+            return;
+        }
+        if (activeStateDisagrees(userAdapter.getActive(), createdUser)) {
+            LOGGER.warnf("SCIM user %s was created with active=%s but the endpoint returned active=%s; "
+                + "the remote is holding its own suspension state",
+                adapter.getId(), userAdapter.getActive(), createdUser.isActive().orElse(null));
+        }
     }
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
