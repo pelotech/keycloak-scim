@@ -153,28 +153,52 @@ are harmless under either mode.
 
 ### Consumer contract (stated, not assumed)
 
-Confirmed with the consuming service's team:
+Confirmed with the consuming service's team, and since checked by them against
+their own code:
 
 1. **Resource `id` is the consumer's own stable identifier** and survives
    Keycloak account re-creation. Case-B cleanup depends on this: if the
    consumer echoed the Keycloak uuid as its resource id, a resurrected
    user's create response would never match the tombstone and the cleanup
-   would not fire.
+   would not fire. Their adoption path keeps the record's existing
+   identifier.
 2. **`externalId` is the Keycloak user id and is advisory in both
    directions.** It changes on Case-B resurrection; `userName` is the durable
-   key.
-3. **`POST /Users` resurrection by `userName`** (return the existing
-   deactivated user, reactivated, rather than a duplicate) is the consumer's
-   gating work item before `delete-mode=deactivate` is enabled against its
-   current implementation. The consumer signals readiness.
+   key. The consumer stores the new value on the resurrected record.
+3. **`POST /Users` resurrects an existing deactivated user by `userName`**
+   instead of creating a duplicate. Their handler looks up the stored
+   Keycloak id first and falls back to `userName`. Case B still works: a
+   re-created account has a fresh Keycloak id, so the first lookup misses and
+   `userName` finds the deactivated record. The id-first order also covers a
+   case this design missed. The pushed `userName` can change while the
+   account does not, on a rename or an email change under
+   `username-source=email`, and if our mapping is absent at that point a
+   userName-only lookup would create a duplicate.
 4. **Group `DELETE`s continue** and the consumer absorbs org-lifecycle
-   handling on receipt.
+   handling on receipt. Their `DELETE` is a hard delete for both users and
+   groups, which is why this mode exists.
+5. **A create response must carry `id`, `userName`, `displayName` and
+   `active`.** `UserAdapter.apply(User)` calls `get()` on all four, so a
+   missing or JSON-null field throws before the mapping is saved: the create
+   succeeds downstream and we are left with no mapping. An empty string is
+   safe, since the SDK treats an attribute as absent only when it is missing
+   or null (`JsonHelper.getSimpleAttribute`).
+6. **A create response may return `active: false` for a user we pushed as
+   active.** The consumer's `active` combines status with a suspension flag
+   that the SCIM path does not clear. We ignore the returned value: the
+   adapter's setters are first-write-wins and already hold the Keycloak
+   state, and we store no active state locally. A suspension applied on their
+   side survives reactivation, and neither refresh pushes nor the reconciler
+   will fight it. `handleCreateResponse` logs the disagreement, because
+   nothing else would show it to a Keycloak operator.
 
 ### Rollout
 
 Default stays `delete`; enabling `deactivate` is a per-component realm-config
-decision, gated on item 3 above for any consumer whose create path does not
-yet resurrect.
+decision. Item 3 is implemented on the consumer side, so what remains is test
+coverage: their suite exercises adoption of active records, not the
+deactivated-record path this design depends on. Enable in a non-production realm
+first and hold production until that case is covered.
 
 ### `sync-refresh` respects tombstones
 
