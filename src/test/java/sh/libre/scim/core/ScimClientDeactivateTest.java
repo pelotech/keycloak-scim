@@ -249,4 +249,32 @@ class ScimClientDeactivateTest {
         verify(purge).setParameter("componentId", "comp-deactivate");
         verify(purge).executeUpdate();
     }
+
+    private static User userWithActive(Boolean active) {
+        var user = new User();
+        user.setActive(active);
+        return user;
+    }
+
+    /** A server holding its own suspension state can return active:false for a user we pushed as active. */
+    @Test
+    void activeDisagreement_pushedActiveReturnedInactive_warns() {
+        assertThat(ScimClient.activeStateDisagrees(true, userWithActive(false))).isTrue();
+    }
+
+    @Test
+    void activeDisagreement_matching_doesNotWarn() {
+        assertThat(ScimClient.activeStateDisagrees(true, userWithActive(true))).isFalse();
+    }
+
+    /** Not every endpoint echoes active, so an absent field counts as agreement. */
+    @Test
+    void activeDisagreement_absentInResponse_doesNotWarn() {
+        assertThat(ScimClient.activeStateDisagrees(true, new User())).isFalse();
+    }
+
+    @Test
+    void activeDisagreement_nothingPushed_doesNotWarn() {
+        assertThat(ScimClient.activeStateDisagrees(null, userWithActive(false))).isFalse();
+    }
 }
