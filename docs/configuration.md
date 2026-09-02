@@ -168,6 +168,11 @@ controlled by the LDAP component.
 independent of `rollback-strategy` (which covers interactive events only): a
 sync never rolls back already-applied records, it only skips or stops.
 
+Both `sync-import` and `sync-refresh` are off by default, so triggering a sync
+on this component without enabling at least one of them does nothing and
+returns an empty result. The plugin logs a line saying so, since an empty
+result on its own looks the same as a sync that ran and found no work.
+
 ### PATCH vs PUT preferences
 
 When updating an existing SCIM resource, the plugin can issue either
@@ -521,8 +526,34 @@ Realm-scoped endpoint mounted at
 | `GET` | `/metrics` | — | Returns a plain-text summary of `ScimClient.create` per-phase timing counters (applyModel, query, http send, applyResponse, saveMapping). Useful for live diagnostics; counters accumulate across the JVM lifetime. |
 | `POST` | `/metrics/reset` | — | Zeros the metrics counters. Used by the perf harness between scenarios. |
 
-Authentication: same as any Keycloak admin endpoint — caller needs a
-bearer token with realm-admin permissions.
+### Caller authentication
+
+Keycloak does not authenticate `RealmResourceProvider` routes, so the
+provider checks the caller itself. All three routes above apply the
+same rule.
+
+The caller sends an `Authorization: Bearer <access token>` header. The
+token must be issued by the realm named in the request path. Keycloak
+verifies a bearer token against the realm of the current request, so a
+token minted by the `master` realm does not authenticate a request to
+`/realms/other/scim-reconcile/...`. To call the endpoint for realm `X`,
+use a user or a client service account that lives in realm `X`.
+
+The authenticated user must hold the realm's `manage-users` admin role.
+In an ordinary realm that role lives on the `realm-management` client.
+The `master` realm has no `realm-management` client; there the same role
+lives on the `master-realm` client, and the `admin` realm role includes
+it as a composite. Composite and group-inherited roles both count, so
+`realm-admin` in an ordinary realm and `admin` in `master` also pass.
+
+Responses: `401` with a JSON error body when the `Authorization` header
+is missing or the token does not verify against this realm, `403` when
+the token verifies but its user lacks `manage-users`.
+
+A typical operator setup is a confidential client in the target realm
+with service accounts enabled, whose service-account user is granted
+`realm-management` `manage-users`. Fetch a token from that realm's
+token endpoint with the `client_credentials` grant.
 
 ## User attributes the plugin uses
 

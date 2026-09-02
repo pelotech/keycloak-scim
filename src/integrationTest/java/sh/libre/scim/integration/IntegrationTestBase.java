@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.keycloak.admin.client.Keycloak;
 import org.keycloak.admin.client.resource.RealmResource;
 import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.ComponentRepresentation;
 import org.keycloak.representations.idm.GroupRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
@@ -27,13 +28,17 @@ import javax.naming.directory.InitialDirContext;
 import javax.naming.directory.ModificationItem;
 import java.io.File;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Hashtable;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
@@ -788,17 +793,130 @@ public abstract class IntegrationTestBase {
 
     // ---------- Reconciler endpoint ----------
 
+    /** Client id of the service-account client the reconcile helpers create per realm. */
+    protected static final String RECONCILE_CLIENT_ID = "it-reconcile-admin";
+
+    /** Secret shared by every service-account client these helpers create. */
+    protected static final String SERVICE_ACCOUNT_SECRET = "it-service-account-secret";
+
+    /** Realms that already have {@link #RECONCILE_CLIENT_ID} provisioned. */
+    private static final Set<String> reconcileClientRealms = ConcurrentHashMap.newKeySet();
+
     protected HttpResponse<String> postReconcile(
             String realmName, String componentId, long thresholdHours) throws Exception {
+        return postReconcile(realmName, componentId, thresholdHours, reconcileToken(realmName));
+    }
+
+    /**
+     * Same as {@link #postReconcile(String, String, long)} but with a caller-supplied
+     * bearer token. Pass null to send the request with no Authorization header.
+     */
+    protected HttpResponse<String> postReconcile(
+            String realmName, String componentId, long thresholdHours, String token) throws Exception {
         var http = HttpClient.newHttpClient();
-        return http.send(
+        var request = HttpRequest.newBuilder(URI.create(
+            keycloak.getAuthServerUrl() + "/realms/" + realmName
+                + "/scim-reconcile/" + componentId
+                + "?thresholdHours=" + thresholdHours))
+            .POST(HttpRequest.BodyPublishers.noBody());
+        if (token != null) {
+            request.header("Authorization", "Bearer " + token);
+        }
+        return http.send(request.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * Returns a fresh access token that passes the /scim-reconcile authorization
+     * check for the given realm.
+     *
+     * <p>The endpoint verifies the token against the realm in the request path,
+     * so the master admin client cannot stand in here. The first call for a
+     * realm creates a confidential client with a service account and grants
+     * that account the realm-management manage-users role; later calls reuse it
+     * and just mint a new token, which keeps the helper safe for test classes
+     * that run longer than the realm's access-token lifespan.
+     */
+    protected String reconcileToken(String realmName) throws Exception {
+        if (reconcileClientRealms.add(realmName)) {
+            createServiceAccountClient(realmName, RECONCILE_CLIENT_ID, true);
+        }
+        return serviceAccountToken(realmName, RECONCILE_CLIENT_ID);
+    }
+
+    /**
+     * Creates a confidential client in the realm with service accounts enabled,
+     * using {@link #SERVICE_ACCOUNT_SECRET} as its secret. When
+     * {@code grantManageUsers} is set, the client's service-account user is
+     * given the realm-management manage-users role.
+     */
+    protected void createServiceAccountClient(
+            String realmName, String clientId, boolean grantManageUsers) {
+        RealmResource realm = admin.realm(realmName);
+
+        var client = new ClientRepresentation();
+        client.setClientId(clientId);
+        client.setSecret(SERVICE_ACCOUNT_SECRET);
+        client.setEnabled(true);
+        client.setPublicClient(false);
+        client.setServiceAccountsEnabled(true);
+        client.setStandardFlowEnabled(false);
+        client.setDirectAccessGrantsEnabled(false);
+        try (Response r = realm.clients().create(client)) {
+            if (r.getStatus() >= 400) {
+                throw new IllegalStateException(
+                    "service-account client create failed: " + r.getStatus());
+            }
+        }
+
+        if (!grantManageUsers) {
+            return;
+        }
+
+        String clientUuid = realm.clients().findByClientId(clientId).get(0).getId();
+        var serviceAccount = realm.clients().get(clientUuid).getServiceAccountUser();
+        String realmManagementUuid = realm.clients().findByClientId("realm-management").get(0).getId();
+        var manageUsers = realm.clients().get(realmManagementUuid)
+            .roles().get("manage-users").toRepresentation();
+        realm.users().get(serviceAccount.getId())
+            .roles().clientLevel(realmManagementUuid).add(List.of(manageUsers));
+    }
+
+    /** Fetches a client_credentials access token for a client created by
+     *  {@link #createServiceAccountClient}. */
+    protected String serviceAccountToken(String realmName, String clientId) throws Exception {
+        var form = "grant_type=client_credentials"
+            + "&client_id=" + URLEncoder.encode(clientId, StandardCharsets.UTF_8)
+            + "&client_secret=" + URLEncoder.encode(SERVICE_ACCOUNT_SECRET, StandardCharsets.UTF_8);
+        var http = HttpClient.newHttpClient();
+        var response = http.send(
             HttpRequest.newBuilder(URI.create(
                 keycloak.getAuthServerUrl() + "/realms/" + realmName
-                    + "/scim-reconcile/" + componentId
-                    + "?thresholdHours=" + thresholdHours))
-                .POST(HttpRequest.BodyPublishers.noBody())
+                    + "/protocol/openid-connect/token"))
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .POST(HttpRequest.BodyPublishers.ofString(form))
                 .build(),
             HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException(
+                "token request failed: " + response.statusCode() + " " + response.body());
+        }
+        return extractJsonString(response.body(), "access_token");
+    }
+
+    /** Access token for the container's master-realm admin, via the admin client. */
+    protected static String masterAdminToken() {
+        return admin.tokenManager().getAccessTokenString();
+    }
+
+    /** Minimal string-field reader, so the ITs don't need a JSON parser on the classpath. */
+    private static String extractJsonString(String json, String field) {
+        var matcher = java.util.regex.Pattern
+            .compile("\"" + java.util.regex.Pattern.quote(field) + "\"\\s*:\\s*\"([^\"]*)\"")
+            .matcher(json);
+        if (!matcher.find()) {
+            throw new IllegalStateException("no '" + field + "' in response: " + json);
+        }
+        return matcher.group(1);
     }
 
     // ---------- generic ----------

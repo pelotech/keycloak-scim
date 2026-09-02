@@ -51,10 +51,14 @@ class BulkUserImportPerfTest extends PerfTestBase {
         // the test has already passed.
         try {
             var http = java.net.http.HttpClient.newHttpClient();
-            // Any realm route works; the metrics endpoint is global.
+            // Any realm route works; the metrics counters are global. The route
+            // needs an admin token for the realm in the path, and the master
+            // admin qualifies.
+            var token = masterAdminToken();
             var resp = http.send(
                 java.net.http.HttpRequest.newBuilder(java.net.URI.create(
                     keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/metrics"))
+                    .header("Authorization", "Bearer " + token)
                     .GET().build(),
                 java.net.http.HttpResponse.BodyHandlers.ofString());
             System.out.println("[perf] " + resp.body());
@@ -62,6 +66,7 @@ class BulkUserImportPerfTest extends PerfTestBase {
             http.send(
                 java.net.http.HttpRequest.newBuilder(java.net.URI.create(
                     keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/metrics/reset"))
+                    .header("Authorization", "Bearer " + masterAdminToken())
                     .POST(java.net.http.HttpRequest.BodyPublishers.noBody()).build(),
                 java.net.http.HttpResponse.BodyHandlers.discarding());
         } catch (Exception e) {

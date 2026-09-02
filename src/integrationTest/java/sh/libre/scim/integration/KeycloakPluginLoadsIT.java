@@ -77,18 +77,34 @@ class KeycloakPluginLoadsIT {
         // route directly. POST with a bogus componentId: our handler returns
         // 404 with a JSON error body, which distinguishes "route registered,
         // component not found" from "route doesn't exist at all" (a plain
-        // Keycloak 404 HTML page).
-        var http = java.net.http.HttpClient.newHttpClient();
-        var response = http.send(
-            java.net.http.HttpRequest.newBuilder(java.net.URI.create(
-                keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/nope"))
-                .POST(java.net.http.HttpRequest.BodyPublishers.noBody())
-                .build(),
-            java.net.http.HttpResponse.BodyHandlers.ofString());
+        // Keycloak 404 HTML page). The route requires an admin token, and the
+        // master admin holds manage-users through the admin realm role.
+        var admin = AdminClients.forContainer(keycloak);
+        var response = postToReconcile("nope", admin.tokenManager().getAccessTokenString());
 
         org.junit.jupiter.api.Assertions.assertEquals(404, response.statusCode(),
             "expected 404 for unknown componentId");
         org.junit.jupiter.api.Assertions.assertTrue(response.body().contains("no SCIM provider component"),
             "expected our handler's JSON error body, got: " + response.body());
+    }
+
+    @Test
+    void scimReconcileResourceRejectsUnauthenticatedCallers() throws Exception {
+        var response = postToReconcile("nope", null);
+
+        org.junit.jupiter.api.Assertions.assertEquals(401, response.statusCode(),
+            "expected 401 without a bearer token, got: " + response.body());
+    }
+
+    private static java.net.http.HttpResponse<String> postToReconcile(
+            String componentId, String token) throws Exception {
+        var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create(
+            keycloak.getAuthServerUrl() + "/realms/master/scim-reconcile/" + componentId))
+            .POST(java.net.http.HttpRequest.BodyPublishers.noBody());
+        if (token != null) {
+            request.header("Authorization", "Bearer " + token);
+        }
+        return java.net.http.HttpClient.newHttpClient()
+            .send(request.build(), java.net.http.HttpResponse.BodyHandlers.ofString());
     }
 }
