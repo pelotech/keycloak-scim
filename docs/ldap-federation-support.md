@@ -411,7 +411,9 @@ A convenience endpoint via `RealmResourceProviderFactory`:
 immediate reconciliation pass for the given SCIM provider, without
 waiting for the timer. Optional `thresholdHours` query param overrides
 the default for a single call (useful for operator-forced cleanups).
-Returns `{"deleted": N}`.
+Returns `{"deleted": N}`. The caller needs a bearer token issued by
+that realm whose user holds the realm's `manage-users` admin role; see
+[the endpoint reference](configuration.md#caller-authentication).
 
 ### Scheduled trigger (shipped)
 

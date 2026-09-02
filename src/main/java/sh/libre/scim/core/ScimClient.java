@@ -953,10 +953,20 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(
             AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
-        if (this.model.get("sync-import", false)) {
+        boolean doImport = this.model.get("sync-import", false);
+        boolean doRefresh = this.model.get("sync-refresh", false);
+        if (!doImport && !doRefresh) {
+            // Both halves are off by default, so a sync triggered from the admin
+            // console or the user-storage REST endpoint otherwise returns an
+            // empty SynchronizationResult and looks like it worked.
+            LOGGER.infof("Sync requested for component %s but sync-import and sync-refresh are both "
+                + "disabled; nothing to do", model.getId());
+            return;
+        }
+        if (doImport) {
             this.importResources(factory, syncRes);
         }
-        if (this.model.get("sync-refresh", false)) {
+        if (doRefresh) {
             this.refreshResources(factory, syncRes);
         }
     }
