@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "sh.libre.scim"
-version = "1.6.0" // x-release-please-version
+version = "1.6.1" // x-release-please-version
 description = "keycloak-scim"
 
 java {
