@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.1](https://github.com/pelotech/keycloak-scim/compare/v1.6.0...v1.6.1) (2026-09-02)
+
+
+### Bug fixes
+
+* require an admin token on the scim-reconcile endpoints ([#55](https://github.com/pelotech/keycloak-scim/issues/55)) ([23d737b](https://github.com/pelotech/keycloak-scim/commit/23d737ba1b2f72123f1a65746d68ac26b16095a2))
+
+
+### Documentation
+
+* design notes for SCIM failure handling ([#52](https://github.com/pelotech/keycloak-scim/issues/52)) ([f78e631](https://github.com/pelotech/keycloak-scim/commit/f78e631e1c6f0ff77b4e89b9db41b356752fdbbd))
+
 ## [1.6.0](https://github.com/pelotech/keycloak-scim/compare/v1.5.1...v1.6.0) (2026-08-29)
 
 
