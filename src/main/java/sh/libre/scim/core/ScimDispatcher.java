@@ -142,6 +142,7 @@ public class ScimDispatcher implements AutoCloseable {
             String strategy = m.get("rollback-strategy", "never");
             boolean rollback = switch (strategy) {
                 case "always" -> true;
+                // Unlike sync-on-error, this still counts a 429 as critical: isTransient() has no throttle carve-out here.
                 case "critical-only" -> e.isTransient();
                 default -> false; // "never"
             };

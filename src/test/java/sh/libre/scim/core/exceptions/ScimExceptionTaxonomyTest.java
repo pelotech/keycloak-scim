@@ -32,4 +32,19 @@ class ScimExceptionTaxonomyTest {
         ScimPropagationException e = new InconsistentScimMappingException("m");
         assertThat(e).isInstanceOf(RuntimeException.class);
     }
+
+    @Test
+    void only429IsThrottled() {
+        assertThat(new InvalidResponseFromScimEndpointException(429, "x").isThrottled()).isTrue();
+        assertThat(new InvalidResponseFromScimEndpointException(503, "x").isThrottled()).isFalse();
+        assertThat(new InvalidResponseFromScimEndpointException(400, "x").isThrottled()).isFalse();
+        assertThat(InvalidResponseFromScimEndpointException.transport("conn refused",
+                new RuntimeException()).isThrottled()).isFalse();
+    }
+
+    @Test
+    void mappingAndDataExceptionsAreNotThrottled() {
+        assertThat(new InconsistentScimMappingException("m").isThrottled()).isFalse();
+        assertThat(new UnexpectedScimDataException("d").isThrottled()).isFalse();
+    }
 }

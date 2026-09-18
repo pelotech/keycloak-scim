@@ -24,8 +24,9 @@ import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
 /**
  * Sync batch loop skip/stop behaviour driven by SyncErrorPolicy.
  *
- * <p>Under {@code sync-on-error=auto}: transient failure stops the run; permanent
- * failure skips and continues. Under {@code sync-on-error=continue} a transient
+ * <p>Under {@code sync-on-error=auto}: a transient failure other than throttling
+ * stops the run; a permanent failure, or a 429 throttling response, skips the
+ * record and the run continues. Under {@code sync-on-error=continue} a transient
  * failure still continues.
  */
 class ScimSyncLoopTest {
@@ -94,6 +95,24 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InconsistentScimMappingException("bad mapping"))
+            .doNothing()
+            .when(client).create(any(), any());
+
+        client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
+
+        verify(client, times(2)).create(any(), any());
+    }
+
+    /** AUTO policy: 429 throttled failure on resource 1 → skip, resource 2 still attempted. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void autoPolicy_throttleFailure_continuesRun() {
+        var client = spy(newClient()); // default sync-on-error=auto
+
+        TestModel first = mock(TestModel.class);
+        TestModel second = mock(TestModel.class);
+
+        doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
             .doNothing()
             .when(client).create(any(), any());
 
