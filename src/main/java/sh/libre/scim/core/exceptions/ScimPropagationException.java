@@ -19,7 +19,17 @@ public abstract class ScimPropagationException extends RuntimeException {
     /**
      * Whether retrying the operation later might succeed (endpoint unreachable,
      * 5xx, 429) versus a permanent condition (bad mapping, malformed data, 4xx).
-     * Drives both the critical-only rollback decision and the auto skip/stop one.
+     * Drives the critical-only rollback decision, and with {@link #isThrottled()}
+     * the auto skip/stop one.
      */
     public abstract boolean isTransient();
+
+    /**
+     * Whether the endpoint refused the call because it is throttling the caller
+     * (HTTP 429). A throttled endpoint is working, so a batch sync keeps going
+     * instead of treating the failure as an outage.
+     */
+    public boolean isThrottled() {
+        return false;
+    }
 }
