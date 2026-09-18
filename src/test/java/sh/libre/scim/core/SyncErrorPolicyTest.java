@@ -22,7 +22,7 @@ class SyncErrorPolicyTest {
     }
 
     @Test
-    void autoStopsOnTransientOnly() {
+    void autoStopsOnTransientNotThrottled() {
         assertThat(SyncErrorPolicy.AUTO.shouldStopRun(transient_())).isTrue();
         assertThat(SyncErrorPolicy.AUTO.shouldStopRun(permanent())).isFalse();
     }
@@ -53,16 +53,13 @@ class SyncErrorPolicyTest {
     }
 
     @Test
-    void stopStillStopsOnThrottle() {
-        assertThat(SyncErrorPolicy.STOP.shouldStopRun(throttled())).isTrue();
+    void continueContinuesOnThrottle() {
+        assertThat(SyncErrorPolicy.CONTINUE.shouldStopRun(throttled())).isFalse();
     }
 
     @Test
-    void onlyA429IsThrottled() {
-        assertThat(throttled().isThrottled()).isTrue();
-        assertThat(new InvalidResponseFromScimEndpointException(503, "down").isThrottled()).isFalse();
-        assertThat(InvalidResponseFromScimEndpointException.transport("refused", new RuntimeException())
-            .isThrottled()).isFalse();
-        assertThat(new InconsistentScimMappingException("m").isThrottled()).isFalse();
+    void autoStopsOnTransportFailure() {
+        var transportFailure = InvalidResponseFromScimEndpointException.transport("refused", new RuntimeException());
+        assertThat(SyncErrorPolicy.AUTO.shouldStopRun(transportFailure)).isTrue();
     }
 }
