@@ -49,17 +49,56 @@ instead.
 ## Goal
 
 The user half of refresh runs as a sequence of short transactions, one per page,
-so the global transaction timeout can come down from 1800s to a bounded value
-and committed work survives a failure.
+so committed work survives a failure and no page holds a database connection for
+longer than it needs.
 
-The goal is explicitly not a return to 30s, and not a hard guarantee that no
-page exceeds its transaction. As the next section shows, no such bound is
+The goal is not a lower global transaction timeout. A spike settled that, and
+the next section records it: Keycloak opens a transaction of its own around the
+whole sync, so the timeout still has to cover the entire run. Nor is the goal a
+hard guarantee that no page exceeds its transaction, since no such bound is
 derivable from the current HTTP configuration. What the design delivers is a
 much smaller unit of loss when something does overrun.
 
 **Non-goals:** batching `sync-import` (see Deferred); a resumable sync that skips
 already-synced users on a re-run; parallel page dispatch; wiring SCIM `/Bulk`
 into the refresh path.
+
+## What the outer transaction does
+
+`UserStorageSyncManager.syncAllUsers` calls `factory.sync` inside its own
+`KeycloakModelUtils.runJobInTransaction`, on both the admin-triggered and the
+scheduled path. That transaction stays open for the whole run, however short the
+page transactions inside it are.
+
+A spike on Keycloak 25.0.6 measured what happens when a run outlives the global
+timeout: the timeout set to 30 seconds, the sync built from five 8-second
+transactions, triggered once through the admin API and once through Keycloak's
+periodic sync.
+
+- Narayana's reaper cancels the outer transaction at the timeout even though it
+  is suspended, idle, holds no locks and does no database work of its own
+  (`ARJUNA012117`, logged 30.0 seconds into every run).
+- Every inner transaction still commits. On the scheduled path exactly one
+  transaction was reaped, and it was Keycloak's.
+- The run continues to completion and fails only at the final commit, with
+  `ARJUNA016102: The transaction is not active!`. The admin path returns HTTP
+  400 to the caller; the scheduled path logs `Error occurred during FULL
+  users-sync`.
+
+So paging does not let the timeout come down. Under a short timeout a long sync
+would push every user and keep every mapping row, then report itself as failed.
+Durable data with an unusable result signal is worse to operate than a long
+timeout, so the timeout stays above the length of a run.
+
+What paging changes is the unit of loss: committed pages survive a failed run,
+memory stays bounded, enumeration no longer walks the directory, and the token
+is re-minted between pages rather than once for the run.
+
+One related limit is worth recording, though it is not addressed here.
+`syncAllUsers` takes its cluster lock with
+`clusterProvider.executeIfNotExecuted(taskKey, max(30, fullSyncPeriod), ...)`.
+That lock expires long before a multi-minute run finishes, so two syncs of the
+same realm can overlap. It is filed separately.
 
 ## What bounds a page, and what does not
 
@@ -105,12 +144,14 @@ should sit inside `T` for the latencies a deployment actually sees.
 | Symbol | Value | Source |
 | --- | --- | --- |
 | `P` | 45s | `sync-page-max-seconds`, default |
-| `T` | 300s | recommended transaction timeout after this change |
+| `T` | 1800s | the transaction timeout in place today, which has to cover the whole run |
 
 At the observed 4.3 pushes per second a 50-resource page finishes in about 12
-seconds, so `P` is a ceiling for degraded latency rather than the normal case,
-and `T` at 300s leaves room for the fetch plus a slow resource. An operator
-lowering `T` should lower `P` to match.
+seconds, so `P` is a ceiling for degraded latency rather than the normal case.
+`T` is sized from the population, not from `P`: it must exceed the total run
+length, and `P` only has to fit inside it, which it does with room to spare at
+any timeout large enough for a sync to finish. An operator lowering `T` should
+lower `P` to match.
 
 The token minter having no timeouts is a latent hang on every path that mints a
 token, not only this one. It is filed as its own fix rather than folded in here.
@@ -518,8 +559,8 @@ and is tracked separately.
 
 ## Rollout
 
-Several behaviours change the moment the new version is deployed, before any
-timeout is touched:
+Several behaviours change the moment the new version is deployed, and none of
+them depends on a configuration change:
 
 - The sync-path retry budget drops from 10 attempts to 4 with a capped interval.
 - `AUTO` no longer stops a run on 429.
@@ -538,21 +579,22 @@ federation runs with `Import Users = ON`, the `scim-ldap-sync` mapper is attache
 and LDAP synchronization is scheduled if refresh has been relied on to pull users
 in. Where directory removals matter, confirm the reconciler is enabled.
 
-1. Deploy. Sync behaviour changes as above; the 1800s timeout still applies, so
-   nothing is at risk from transaction length.
+1. Deploy. Sync behaviour changes as above. The 1800s timeout stays as it is.
 2. Run a sync and confirm from the logs that it completes in pages, with the
    users examined consistent with the realm's count of enabled users excluding
    service accounts. This is where a throttling endpoint would first show up
    under the new retry budget. Compare the enumeration time with the previous
    run: the directory walk that dominated it should be gone.
-3. Lower the global transaction timeout to 300s.
-4. Re-run a sync and confirm it still completes.
+3. Compare the run's duration with the transaction timeout and record the
+   headroom. Enumeration no longer dominates the run, so the duration should
+   fall, but the timeout still has to exceed it.
 
-If step 4 fails, raise the timeout back to its previous value. The sync is
-functional at any timeout large enough for one page, so the rollback is a
-configuration change rather than a redeploy.
-
-Leaving a deployment at 1800s is safe but keeps the original operational risk.
+The timeout cannot be lowered, for the reason measured under "What the outer
+transaction does". Should a run exceed it anyway, the sync is reported as failed
+while the pages it committed are kept, so a re-run repeats work rather than
+losing it. The remaining operational risk of a long global timeout, that any
+wedged transaction holds its connection and locks for half an hour, is unchanged
+by this design.
 
 ## Deferred: sync-import
 
@@ -601,11 +643,12 @@ step carries its own complications, and each is contained in it:
 - **Index base.** SCIM's `startIndex` is 1-based, and the step owns that
   convention.
 
-Because import reads one page today it is short, and the recommended 300s
-timeout accommodates it, though the remote server chooses the page size and
+Because import reads one page today it is short and finishes well inside the
+timeout, though the remote server chooses the page size and
 `sync-import-action=CREATE_LOCAL` adds a local write per unmatched resource, so
-that is guidance rather than a measured figure. It is the fixed version that
-will need batching before it can run under a bounded timeout.
+that is guidance rather than a measured figure. It is the fixed version, reading
+the whole remote population, that will need batching before its transaction
+length becomes a concern.
 
 ## Testing
 
@@ -652,9 +695,11 @@ Integration:
 - A directory entry that was never imported is not pushed by refresh, and is
   pushed once LDAP synchronization imports it. This pins the behaviour change
   called out in Rollout.
-- Short transaction timeout: seed a population that cannot finish inside a low
-  timeout unbatched, assert the sync completes. This one fails against the
-  current code.
+- A run longer than the transaction timeout: seed a population that cannot
+  finish inside a low timeout, and assert that every page commits and the pushed
+  users keep their mappings even though Keycloak reports the sync as failed.
+  This pins the behaviour the spike measured, and it fails against the current
+  code, which keeps nothing.
 - Stop preserves progress: the endpoint returns 200 for the first page and 503
   after it; assert the run aborts and the first page's mappings survive.
 - Counter accuracy: `SynchronizationResult` reflects only committed work, and
@@ -668,8 +713,8 @@ cannot be varied per test class from there. `PerfTestBase` suggests Keycloak
 honours `JAVA_OPTS`-style environment variables, though it asserts nothing about
 it, and it lives in the `perfTest` source set rather than `integrationTest`. If
 a dedicated container proves impractical, the stop-preserves-progress test
-covers the substance and the timeout test becomes an assertion about the number
-of commits.
+covers the substance, since both turn on committed pages outliving a failed
+run.
 
 ## Alternatives considered
 
@@ -682,9 +727,11 @@ of commits.
 - **Enumerate from the mapping table instead of Keycloak's user list.** Avoids
   the federation walk, as the reconciler does. Rejected because it only sees
   already-mapped users, so it cannot serve a first-time backfill.
-- **Raise the transaction timeout.** The current mitigation. Rejected as a fix
-  because it is global, it leaves roughly 20 percent headroom before the same
-  failure returns, and it does nothing about work discarded on rollback.
+- **Raise the transaction timeout.** The current mitigation. Rejected as a
+  complete fix because it is global, it leaves roughly 20 percent headroom
+  before the same failure returns, and it does nothing about work discarded on
+  rollback. The raised timeout stays under this design, which addresses the
+  second and third objections only.
 - **Keep the retry budget at 10 on the sync path.** Rejected because it makes a
   page unboundable: one resource can hold a transaction for over five minutes,
   so no page size or wall-clock bound restores a sane timeout.
@@ -704,7 +751,10 @@ of commits.
   setting, answering the "the timeout is global" half of the problem directly.
   Rejected as a solution because it does nothing about the other half: one
   transaction still wraps the whole run, so a failure still discards every
-  mapping row written. It would be a narrower workaround, not a fix.
+  mapping row written. The spike adds a second objection: the outer transaction
+  belongs to Keycloak and takes the global timeout, so a per-job timeout on the
+  plugin's own transactions cannot extend it. It would be a narrower workaround,
+  not a fix.
 - **Parallel page dispatch over the existing worker pool.** Rejected for now. It
   adds concurrent load on the SCIM endpoint and more failure modes, and the
   requirement is completing reliably rather than completing faster. It would not
