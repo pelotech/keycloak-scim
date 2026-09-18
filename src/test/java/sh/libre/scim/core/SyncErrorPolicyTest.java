@@ -17,6 +17,10 @@ class SyncErrorPolicyTest {
         return new InconsistentScimMappingException("m");
     }
 
+    private static ScimPropagationException throttled() {
+        return new InvalidResponseFromScimEndpointException(429, "slow down");
+    }
+
     @Test
     void autoStopsOnTransientOnly() {
         assertThat(SyncErrorPolicy.AUTO.shouldStopRun(transient_())).isTrue();
@@ -41,5 +45,24 @@ class SyncErrorPolicyTest {
         assertThat(SyncErrorPolicy.fromConfig("stop")).isEqualTo(SyncErrorPolicy.STOP);
         assertThat(SyncErrorPolicy.fromConfig("continue")).isEqualTo(SyncErrorPolicy.CONTINUE);
         assertThat(SyncErrorPolicy.fromConfig("auto")).isEqualTo(SyncErrorPolicy.AUTO);
+    }
+
+    @Test
+    void autoContinuesOnThrottle() {
+        assertThat(SyncErrorPolicy.AUTO.shouldStopRun(throttled())).isFalse();
+    }
+
+    @Test
+    void stopStillStopsOnThrottle() {
+        assertThat(SyncErrorPolicy.STOP.shouldStopRun(throttled())).isTrue();
+    }
+
+    @Test
+    void onlyA429IsThrottled() {
+        assertThat(throttled().isThrottled()).isTrue();
+        assertThat(new InvalidResponseFromScimEndpointException(503, "down").isThrottled()).isFalse();
+        assertThat(InvalidResponseFromScimEndpointException.transport("refused", new RuntimeException())
+            .isThrottled()).isFalse();
+        assertThat(new InconsistentScimMappingException("m").isThrottled()).isFalse();
     }
 }

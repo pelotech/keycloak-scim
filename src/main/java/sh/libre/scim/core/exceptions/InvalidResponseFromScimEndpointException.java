@@ -30,4 +30,9 @@ public class InvalidResponseFromScimEndpointException extends ScimPropagationExc
     public boolean isTransient() {
         return httpStatus == 0 || httpStatus == 429 || httpStatus >= 500;
     }
+
+    @Override
+    public boolean isThrottled() {
+        return httpStatus == 429;
+    }
 }
