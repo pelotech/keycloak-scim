@@ -1,6 +1,8 @@
 package sh.libre.scim.storage;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.component.ComponentValidationException;
@@ -102,5 +104,44 @@ class ScimStorageProviderFactoryValidationTest {
     void rollbackAlways_withBulkDisabled_passes() {
         assertThatCode(() -> validate(modelWithRollbackAndBulk("always", false)))
             .doesNotThrowAnyException();
+    }
+
+    // --- sync-page-size + sync-page-max-seconds ---
+
+    private ComponentModel modelWithPaging(String pageSize, String pageMaxSeconds) {
+        var model = modelWith(List.of());
+        if (pageSize != null) {
+            model.getConfig().putSingle("sync-page-size", pageSize);
+        }
+        if (pageMaxSeconds != null) {
+            model.getConfig().putSingle("sync-page-max-seconds", pageMaxSeconds);
+        }
+        return model;
+    }
+
+    @Test
+    void pagingUnset_passes() {
+        assertThatCode(() -> validate(modelWithPaging(null, null))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void pagingPositive_passes() {
+        assertThatCode(() -> validate(modelWithPaging("50", "45"))).doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5"})
+    void pageSize_notAPositiveWholeNumber_isRejected(String value) {
+        assertThatThrownBy(() -> validate(modelWithPaging(value, null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("sync-page-size");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5"})
+    void pageMaxSeconds_notAPositiveWholeNumber_isRejected(String value) {
+        assertThatThrownBy(() -> validate(modelWithPaging(null, value)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("sync-page-max-seconds");
     }
 }
