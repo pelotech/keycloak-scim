@@ -5,6 +5,7 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.ProcessingException;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -58,43 +59,67 @@ public class ScimClient {
     final protected ScimAuthHeaders auth;
 
     public ScimClient(ComponentModel model, KeycloakSession session) {
-        this(model, session, new ScimAuthHeaders(model));
+        this(model, session, new ScimAuthHeaders(model), defaultRetryConfig());
     }
 
     // package-private for tests: inject an explicit token source.
     ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
-        this(model, session, new ScimAuthHeaders(model, tokenSource));
+        this(model, session, new ScimAuthHeaders(model, tokenSource), defaultRetryConfig());
     }
 
-    private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth) {
+    private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth,
+                       RetryConfig retryConfig) {
         this.model = model;
         this.session = session;
         this.scimApplicationBaseUrl = model.get("endpoint");
         this.auth = auth;
 
         scimRequestBuilder = new ScimRequestBuilder(scimApplicationBaseUrl, genScimClientConfig());
+        registry = RetryRegistry.of(retryConfig);
+    }
 
-        RetryConfig retryConfig = RetryConfig.custom()
-            .maxAttempts(10)
-            .intervalFunction(IntervalFunction.ofExponentialBackoff())
+    /**
+     * A client for one page of a batch sync. It uses {@link #batchSyncRetryConfig()},
+     * so a single failing resource cannot hold a page transaction for minutes.
+     */
+    static ScimClient forBatchSync(ComponentModel model, KeycloakSession session) {
+        return new ScimClient(model, session, new ScimAuthHeaders(model), batchSyncRetryConfig());
+    }
+
+    /** Retry policy for interactive and event-driven calls. */
+    static RetryConfig defaultRetryConfig() {
+        return retryConfig(10, IntervalFunction.ofExponentialBackoff());
+    }
+
+    /** Retry policy for batch sync: four attempts, backoff capped at five seconds. */
+    static RetryConfig batchSyncRetryConfig() {
+        return retryConfig(4, batchSyncInterval());
+    }
+
+    // package-private for tests
+    static IntervalFunction batchSyncInterval() {
+        return IntervalFunction.ofExponentialBackoff(Duration.ofMillis(500), 1.5, Duration.ofSeconds(5));
+    }
+
+    private static RetryConfig retryConfig(int maxAttempts, IntervalFunction interval) {
+        return RetryConfig.custom()
+            .maxAttempts(maxAttempts)
+            .intervalFunction(interval)
             // Retry on both JAX-RS-level network errors (ProcessingException)
-            // and the SCIM SDK's own network-error wrapper (IORuntimeException
-            // — what Captain Goldfish throws when Apache HttpClient surfaces
+            // and the SCIM SDK's own network-error wrapper (IORuntimeException,
+            // what Captain Goldfish throws when Apache HttpClient surfaces
             // SocketException, NoHttpResponseException, etc.). Without
-            // IORuntimeException here, the entire retry policy is effectively
-            // dead code for this client stack — every real-world transient
-            // failure surfaces as IORuntimeException and bypasses retry.
+            // IORuntimeException here, the retry policy would never see the
+            // transient failures this client stack actually produces.
             //
             // HTTP error responses do NOT throw; they return a ServerResponse
             // with isSuccess()=false. The result predicate below retries the
-            // transient ones (429 + any 5xx — see isRetryableStatus). See
+            // transient ones (429 + any 5xx, see isRetryableStatus). See
             // ScimResilienceIT#serverErrorIsRetriedAndEventuallySucceeds.
             .retryExceptions(ProcessingException.class, IORuntimeException.class)
             .retryOnResult(result ->
                 result instanceof ServerResponse<?> resp && isRetryableStatus(resp.getHttpStatus()))
             .build();
-
-        registry = RetryRegistry.of(retryConfig);
     }
 
     /** The SCIM provider component id — stable across syncs/restarts. */
