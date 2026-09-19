@@ -39,16 +39,16 @@ class ScimClientRetryTest {
     }
 
     @Test
-    void syncPageRetryConfigUsesFourAttempts() {
-        assertThat(ScimClient.syncPageRetryConfig().getMaxAttempts()).isEqualTo(4);
+    void syncPageRetryConfigUsesThreeAttempts() {
+        assertThat(ScimClient.syncPageRetryConfig().getMaxAttempts()).isEqualTo(3);
     }
 
     /**
      * Asserts the actual waits a sync-page retry performs, not the interval
-     * function's shape in isolation. With four attempts there are only three
-     * waits (500, 750, 1125ms); the cap at 5s never applies at this attempt
-     * count, so an assertion against it would pass even if someone quietly
-     * changed the backoff to grow unbounded again.
+     * function's shape in isolation. With three attempts there are only two
+     * waits (500, 750ms); the cap at 5s never applies at this attempt count,
+     * so an assertion against it would pass even if someone quietly changed
+     * the backoff to grow unbounded again.
      */
     @Test
     void syncPageIntervalWaitsSumToTheExpectedBudget() {
@@ -60,19 +60,19 @@ class ScimClientRetryTest {
             totalWaitMillis += interval.apply(attempt);
         }
 
-        assertThat(totalWaitMillis).isEqualTo(2375L);
+        assertThat(totalWaitMillis).isEqualTo(1250L);
     }
 
     /**
      * Pins the attempt count and the retry-on-result predicate together: a
      * retry built from the sync-page config must call the supplier exactly
-     * four times when every response is a retryable 503. The interval
+     * three times when every response is a retryable 503. The interval
      * function is swapped for a 1ms one so the test doesn't actually wait
      * out the real backoff; that shape is covered separately above.
      */
     @Test
     @SuppressWarnings("unchecked")
-    void syncPageRetryInvokesSupplierExactlyFourTimesOn503() {
+    void syncPageRetryInvokesSupplierExactlyThreeTimesOn503() {
         var fastConfig = RetryConfig.from(ScimClient.syncPageRetryConfig())
             .intervalFunction(IntervalFunction.of(1))
             .build();
@@ -88,7 +88,7 @@ class ScimClientRetryTest {
             return response;
         });
 
-        assertThat(calls.get()).isEqualTo(4);
+        assertThat(calls.get()).isEqualTo(3);
     }
 
     @Test
@@ -103,26 +103,23 @@ class ScimClientRetryTest {
 
         var client = ScimClient.forSyncPage(model, mock(KeycloakSession.class));
         try {
-            assertThat(client.registry.getDefaultConfig().getMaxAttempts()).isEqualTo(4);
+            assertThat(client.registry.getDefaultConfig().getMaxAttempts()).isEqualTo(3);
         } finally {
             client.close();
         }
     }
 
-    private static ComponentModel componentModel(String id) {
+    @Test
+    void defaultClientUsesThirtySecondHttpTimeouts() {
         var model = new ComponentModel();
         var config = new MultivaluedHashMap<String, String>();
         config.putSingle("auth-mode", "NONE");
         config.putSingle("endpoint", "https://scim.example/scim/v2");
         config.putSingle("content-type", "application/scim+json");
         model.setConfig(config);
-        model.setId(id);
-        return model;
-    }
+        model.setId("comp-default");
 
-    @Test
-    void defaultClientUsesThirtySecondHttpTimeouts() {
-        var client = new ScimClient(componentModel("comp-default"), mock(KeycloakSession.class));
+        var client = new ScimClient(model, mock(KeycloakSession.class));
         try {
             var scimClientConfig = client.genScimClientConfig();
             assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(30);
@@ -134,13 +131,21 @@ class ScimClientRetryTest {
     }
 
     @Test
-    void forSyncPageClientUsesFiveSecondHttpTimeouts() {
-        var client = ScimClient.forSyncPage(componentModel("comp-page-timeouts"), mock(KeycloakSession.class));
+    void forSyncPageClientUsesShorterPerComponentHttpTimeouts() {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "NONE");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId("comp-page-timeouts");
+
+        var client = ScimClient.forSyncPage(model, mock(KeycloakSession.class));
         try {
             var scimClientConfig = client.genScimClientConfig();
-            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(5);
-            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(5);
-            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(5);
+            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(1);
+            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(3);
+            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(10);
         } finally {
             client.close();
         }

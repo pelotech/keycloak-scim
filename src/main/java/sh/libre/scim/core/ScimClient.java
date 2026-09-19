@@ -50,6 +50,22 @@ public class ScimClient {
     private static final String USER_PATCH_OP_KEY = "user-patchOp";
     private static final String DELETE_MODE_KEY = ScimStorageProviderFactory.DELETE_MODE;
 
+    // Every other caller uses these. They have no page to fit inside, and a
+    // slow endpoint should not fail a user's login.
+    private static final int DEFAULT_REQUEST_TIMEOUT_SECONDS = 30;
+    private static final int DEFAULT_CONNECT_TIMEOUT_SECONDS = 30;
+    private static final int DEFAULT_SOCKET_TIMEOUT_SECONDS = 30;
+
+    // Pool lease wait: time to get a free pooled connection. This never
+    // touches the network, so 1 second is ample.
+    private static final int SYNC_PAGE_REQUEST_TIMEOUT_SECONDS = 1;
+    // TCP connect. A same-region connect takes under 50ms, so 3 seconds
+    // leaves wide margin.
+    private static final int SYNC_PAGE_CONNECT_TIMEOUT_SECONDS = 3;
+    // Read: must hold one real SCIM write. The measured push takes 0.23s,
+    // so 10 seconds is about 40 times that.
+    private static final int SYNC_PAGE_SOCKET_TIMEOUT_SECONDS = 10;
+
     final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
     final protected ScimRequestBuilder scimRequestBuilder;
     final protected RetryRegistry registry;
@@ -58,47 +74,69 @@ public class ScimClient {
     final protected String scimApplicationBaseUrl;
     final protected ScimAuthHeaders auth;
 
-    private static final int DEFAULT_HTTP_TIMEOUT_SECONDS = 30;
-    // A sync page must fit in sync-page-max-seconds. Four attempts at 5s to
-    // connect and 5s per read is about 42s, which fits the 45s default; at 30s
-    // it would be about 242s. Interactive callers keep 30s: they have no page
-    // to fit inside, and a slow endpoint should not fail a user's login.
-    private static final int SYNC_PAGE_HTTP_TIMEOUT_SECONDS = 5;
-
-    final private int httpTimeoutSeconds;
+    private final int requestTimeoutSeconds;
+    private final int connectTimeoutSeconds;
+    private final int socketTimeoutSeconds;
 
     public ScimClient(ComponentModel model, KeycloakSession session) {
-        this(model, session, new ScimAuthHeaders(model), defaultRetryConfig(), DEFAULT_HTTP_TIMEOUT_SECONDS);
+        this(model, session, new ScimAuthHeaders(model), defaultRetryConfig(),
+            DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_SOCKET_TIMEOUT_SECONDS);
     }
 
     // package-private for tests: inject an explicit token source.
     ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
         this(model, session, new ScimAuthHeaders(model, tokenSource), defaultRetryConfig(),
-            DEFAULT_HTTP_TIMEOUT_SECONDS);
+            DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_SOCKET_TIMEOUT_SECONDS);
     }
 
     private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth,
-                       RetryConfig retryConfig, int httpTimeoutSeconds) {
+                       RetryConfig retryConfig, int requestTimeoutSeconds, int connectTimeoutSeconds,
+                       int socketTimeoutSeconds) {
         this.model = model;
         this.session = session;
         this.scimApplicationBaseUrl = model.get("endpoint");
         this.auth = auth;
-        this.httpTimeoutSeconds = httpTimeoutSeconds;
+        this.requestTimeoutSeconds = requestTimeoutSeconds;
+        this.connectTimeoutSeconds = connectTimeoutSeconds;
+        this.socketTimeoutSeconds = socketTimeoutSeconds;
 
         scimRequestBuilder = new ScimRequestBuilder(scimApplicationBaseUrl, genScimClientConfig());
         registry = RetryRegistry.of(retryConfig);
     }
 
     /**
-     * A client for one page of a sync run. It uses {@link #syncPageRetryConfig()}
-     * (four attempts instead of the default ten) together with
-     * {@link #SYNC_PAGE_HTTP_TIMEOUT_SECONDS} HTTP timeouts, which together cap
-     * the worst case for one stuck resource at about 42 seconds, inside the
-     * 45-second page budget.
+     * A client for one page of a sync run. It uses {@link #syncPageRetryConfig()}:
+     * three attempts, each with a 1-second pool-lease wait, a 3-second connect,
+     * and a 10-second read.
+     *
+     * <p>Three components (1 + 3 + 10 = 14 seconds) times three attempts is 42
+     * seconds. Two backoff waits (500ms + 750ms) add 1.25 seconds. The total is
+     * about 43.25 seconds. A later change adds a 45-second sync-page budget.
+     * This value is meant to fit inside it.
+     *
+     * <p>This is the normal worst case, not a guarantee. Several things can
+     * push one page past it:
+     * <ul>
+     * <li>The read timeout applies per read. A server that sends one byte
+     * every 9 seconds holds an attempt open.</li>
+     * <li>The TLS handshake and the DNS lookup are not covered by any of the
+     * three timeouts.</li>
+     * <li>The connect timeout applies per resolved address. A dual-stack
+     * endpoint can pay it twice.</li>
+     * <li>A 401 or 403 re-mints the token. It then runs the whole retry loop
+     * again. That doubles the figure.</li>
+     * <li>The token minter uses its own HTTP client with no timeouts. A
+     * {@code CLIENT_CREDENTIALS} deployment is not bounded by this change.
+     * That gap is tracked separately.</li>
+     * <li>A failed {@code replace} can fall back to a PATCH and then to a
+     * create. Both sit outside the retry loop and add about 14 seconds
+     * each.</li>
+     * </ul>
      */
     static ScimClient forSyncPage(ComponentModel model, KeycloakSession session) {
         return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig(),
-            SYNC_PAGE_HTTP_TIMEOUT_SECONDS);
+            SYNC_PAGE_REQUEST_TIMEOUT_SECONDS, SYNC_PAGE_CONNECT_TIMEOUT_SECONDS,
+            SYNC_PAGE_SOCKET_TIMEOUT_SECONDS);
     }
 
     /** Retry policy for interactive and event-driven calls. */
@@ -106,16 +144,17 @@ public class ScimClient {
         return retryConfig(10, IntervalFunction.ofExponentialBackoff());
     }
 
-    /** Retry policy for a sync page: four attempts instead of the default ten. */
+    /** Retry policy for a sync page: three attempts instead of the default ten. */
     static RetryConfig syncPageRetryConfig() {
-        return retryConfig(4, syncPageInterval());
+        return retryConfig(3, syncPageInterval());
     }
 
     // package-private for tests
     static IntervalFunction syncPageInterval() {
-        // Backoff starts at 500ms and multiplies by 1.5, capped at 5s. At four
-        // attempts the three waits (500, 750, 1125ms) never reach the cap; it's
-        // kept as a ceiling in case the attempt count here is ever raised.
+        // Backoff starts at 500ms and multiplies by 1.5, capped at 5s. At
+        // three attempts there are two waits: 500ms and 750ms. Neither
+        // reaches the cap. The cap stays as a ceiling in case the attempt
+        // count rises later.
         return IntervalFunction.ofExponentialBackoff(Duration.ofMillis(500), 1.5, Duration.ofSeconds(5));
     }
 
@@ -161,9 +200,9 @@ public class ScimClient {
     protected ScimClientConfig genScimClientConfig() {
         var builder = ScimClientConfig.builder()
         .httpHeaders(auth.headers())
-        .connectTimeout(httpTimeoutSeconds)
-        .requestTimeout(httpTimeoutSeconds)
-        .socketTimeout(httpTimeoutSeconds)
+        .connectTimeout(connectTimeoutSeconds)
+        .requestTimeout(requestTimeoutSeconds)
+        .socketTimeout(socketTimeoutSeconds)
         .expectedHttpResponseHeaders(auth.expectedResponseHeaders())
         // Override the SDK's hardcoded "no TCP connection reuse" + tiny
         // default pool. See KeepAliveConfigManipulator's javadoc for the
