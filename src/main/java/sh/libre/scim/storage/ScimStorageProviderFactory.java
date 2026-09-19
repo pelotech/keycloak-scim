@@ -40,6 +40,10 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
     public static final String DELETE_MODE = "delete-mode";
+    public static final String SYNC_PAGE_SIZE = "sync-page-size";
+    public static final String SYNC_PAGE_MAX_SECONDS = "sync-page-max-seconds";
+    public static final int DEFAULT_SYNC_PAGE_SIZE = 50;
+    public static final int DEFAULT_SYNC_PAGE_MAX_SECONDS = 45;
 
     public static String reconcilerTaskName(String componentId) {
         return "scim-reconciler-" + componentId;
@@ -184,6 +188,23 @@ public class ScimStorageProviderFactory
                 .defaultValue("auto")
                 .add()
                 .property()
+                .name(SYNC_PAGE_SIZE)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Sync page size")
+                .helpText("Users examined per transaction during sync-refresh. Each page commits on "
+                    + "its own, so a failure costs one page rather than the whole run. Default 50.")
+                .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_SIZE))
+                .add()
+                .property()
+                .name(SYNC_PAGE_MAX_SECONDS)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Sync page time limit (seconds)")
+                .helpText("Wall-clock limit for one sync-refresh page, checked between users. A page "
+                    + "that exceeds it commits what it has done and the next page carries on. Keep it "
+                    + "well under the transaction timeout. Default 45.")
+                .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_MAX_SECONDS))
+                .add()
+                .property()
                 .name("group-patchOp")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Use PATCH for groups")
@@ -283,6 +304,9 @@ public class ScimStorageProviderFactory
             .toList();
         ReconcilerConfigValidator.validate(model, ldapFederations);
 
+        requirePositiveIntIfSet(model, SYNC_PAGE_SIZE);
+        requirePositiveIntIfSet(model, SYNC_PAGE_MAX_SECONDS);
+
         try {
             // Map.get rather than MultivaluedMap.getList — see UserAdapter.apply.
             var rows = model.getConfig().get("user-extension-mappings");
@@ -331,6 +355,25 @@ public class ScimStorageProviderFactory
                 name + " is required when auth-mode is CLIENT_CREDENTIALS");
         }
         return v.trim();
+    }
+
+    /** Throws unless {@code name} is absent or a whole number greater than zero. */
+    private static void requirePositiveIntIfSet(ComponentModel m, String name) {
+        String value = m.get(name);
+        if (value == null) {
+            return;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new ComponentValidationException(
+                name + " must be a whole number greater than zero (got '" + value + "')");
+        }
+        if (parsed <= 0) {
+            throw new ComponentValidationException(
+                name + " must be a whole number greater than zero (got " + parsed + ")");
+        }
     }
 
     @Override
