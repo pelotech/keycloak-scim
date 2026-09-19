@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
@@ -122,6 +123,29 @@ class EnsureGroupMembershipTest {
 
         assertTrue(applied);
         verify(client).replaceBody(any(), any());
+    }
+
+    /**
+     * An excluded group has nothing to push and nothing to retry, so the
+     * membership counts as handled. The replace reports false for the same
+     * adapter, because it answers whether it pushed.
+     */
+    @Test
+    void groupPatchOpOff_excludedGroup_reportsHandled() {
+        var group = mock(GroupModel.class);
+        when(group.getId()).thenReturn("grp-1");
+        var client = spy(newClient(false, group));
+        doAnswer(invocation -> {
+            // The replace applies the model, finds the exclusion, and pushes
+            // nothing. This stub stands in for that.
+            Adapter<?, ?> adapter = invocation.getArgument(0);
+            adapter.skip = true;
+            return false;
+        }).when(client).replaceBody(any(), any());
+
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+
+        assertTrue(applied);
     }
 
     /**
