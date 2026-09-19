@@ -79,11 +79,15 @@ public class ScimClient {
     }
 
     /**
-     * A client for one page of a batch sync. It uses {@link #batchSyncRetryConfig()},
-     * so a single failing resource cannot hold a page transaction for minutes.
+     * A client for one page of a sync run. It uses {@link #syncPageRetryConfig()}:
+     * four attempts instead of the default ten, which cuts the worst case for
+     * one stuck resource from roughly 637 seconds down to roughly 242 seconds.
+     * That remaining 242 seconds is dominated by the per-attempt HTTP timeouts
+     * (30s connect + 30s socket, see {@link #genScimClientConfig()}), not the
+     * backoff between attempts; this change only reduces how many attempts run.
      */
-    static ScimClient forBatchSync(ComponentModel model, KeycloakSession session) {
-        return new ScimClient(model, session, new ScimAuthHeaders(model), batchSyncRetryConfig());
+    static ScimClient forSyncPage(ComponentModel model, KeycloakSession session) {
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig());
     }
 
     /** Retry policy for interactive and event-driven calls. */
@@ -91,13 +95,16 @@ public class ScimClient {
         return retryConfig(10, IntervalFunction.ofExponentialBackoff());
     }
 
-    /** Retry policy for batch sync: four attempts, backoff capped at five seconds. */
-    static RetryConfig batchSyncRetryConfig() {
-        return retryConfig(4, batchSyncInterval());
+    /** Retry policy for a sync page: four attempts instead of the default ten. */
+    static RetryConfig syncPageRetryConfig() {
+        return retryConfig(4, syncPageInterval());
     }
 
     // package-private for tests
-    static IntervalFunction batchSyncInterval() {
+    static IntervalFunction syncPageInterval() {
+        // Backoff starts at 500ms and multiplies by 1.5, capped at 5s. At four
+        // attempts the three waits (500, 750, 1125ms) never reach the cap; it's
+        // kept as a ceiling in case the attempt count here is ever raised.
         return IntervalFunction.ofExponentialBackoff(Duration.ofMillis(500), 1.5, Duration.ofSeconds(5));
     }
 
@@ -106,15 +113,16 @@ public class ScimClient {
             .maxAttempts(maxAttempts)
             .intervalFunction(interval)
             // Retry on both JAX-RS-level network errors (ProcessingException)
-            // and the SCIM SDK's own network-error wrapper (IORuntimeException,
-            // what Captain Goldfish throws when Apache HttpClient surfaces
+            // and the SCIM SDK's own network-error wrapper (IORuntimeException
+            // — what Captain Goldfish throws when Apache HttpClient surfaces
             // SocketException, NoHttpResponseException, etc.). Without
-            // IORuntimeException here, the retry policy would never see the
-            // transient failures this client stack actually produces.
+            // IORuntimeException here, the entire retry policy is effectively
+            // dead code for this client stack — every real-world transient
+            // failure surfaces as IORuntimeException and bypasses retry.
             //
             // HTTP error responses do NOT throw; they return a ServerResponse
             // with isSuccess()=false. The result predicate below retries the
-            // transient ones (429 + any 5xx, see isRetryableStatus). See
+            // transient ones (429 + any 5xx — see isRetryableStatus). See
             // ScimResilienceIT#serverErrorIsRetriedAndEventuallySucceeds.
             .retryExceptions(ProcessingException.class, IORuntimeException.class)
             .retryOnResult(result ->

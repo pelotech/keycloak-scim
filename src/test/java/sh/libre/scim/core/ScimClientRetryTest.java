@@ -2,6 +2,9 @@ package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -9,6 +12,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.KeycloakSession;
+
+import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
+import de.captaingoldfish.scim.sdk.common.resources.User;
+import io.github.resilience4j.core.IntervalFunction;
+import io.github.resilience4j.retry.Retry;
+import io.github.resilience4j.retry.RetryConfig;
 
 class ScimClientRetryTest {
 
@@ -30,29 +39,69 @@ class ScimClientRetryTest {
     }
 
     @Test
-    void batchSyncRetryConfigUsesFourAttempts() {
-        assertThat(ScimClient.batchSyncRetryConfig().getMaxAttempts()).isEqualTo(4);
+    void syncPageRetryConfigUsesFourAttempts() {
+        assertThat(ScimClient.syncPageRetryConfig().getMaxAttempts()).isEqualTo(4);
+    }
+
+    /**
+     * Asserts the actual waits a sync-page retry performs, not the interval
+     * function's shape in isolation. With four attempts there are only three
+     * waits (500, 750, 1125ms); the cap at 5s never applies at this attempt
+     * count, so an assertion against it would pass even if someone quietly
+     * changed the backoff to grow unbounded again.
+     */
+    @Test
+    void syncPageIntervalWaitsSumToTheExpectedBudget() {
+        var config = ScimClient.syncPageRetryConfig();
+        var interval = ScimClient.syncPageInterval();
+
+        long totalWaitMillis = 0;
+        for (int attempt = 1; attempt < config.getMaxAttempts(); attempt++) {
+            totalWaitMillis += interval.apply(attempt);
+        }
+
+        assertThat(totalWaitMillis).isEqualTo(2375L);
+    }
+
+    /**
+     * Pins the attempt count and the retry-on-result predicate together: a
+     * retry built from the sync-page config must call the supplier exactly
+     * four times when every response is a retryable 503. The interval
+     * function is swapped for a 1ms one so the test doesn't actually wait
+     * out the real backoff; that shape is covered separately above.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void syncPageRetryInvokesSupplierExactlyFourTimesOn503() {
+        var fastConfig = RetryConfig.from(ScimClient.syncPageRetryConfig())
+            .intervalFunction(IntervalFunction.of(1))
+            .build();
+        var retry = Retry.of("sync-page-test", fastConfig);
+        var calls = new AtomicInteger();
+
+        ServerResponse<User> response = mock(ServerResponse.class);
+        when(response.isSuccess()).thenReturn(false);
+        when(response.getHttpStatus()).thenReturn(503);
+
+        retry.executeSupplier(() -> {
+            calls.incrementAndGet();
+            return response;
+        });
+
+        assertThat(calls.get()).isEqualTo(4);
     }
 
     @Test
-    void batchSyncIntervalStartsAtHalfASecondAndIsCappedAtFive() {
-        var interval = ScimClient.batchSyncInterval();
-        assertThat(interval.apply(1)).isEqualTo(500L);
-        assertThat(interval.apply(2)).isEqualTo(750L);
-        assertThat(interval.apply(20)).isEqualTo(5000L);
-    }
-
-    @Test
-    void forBatchSyncBuildsAClientWithTheBatchPolicy() {
+    void forSyncPageBuildsAClientWithTheSyncPagePolicy() {
         var model = new ComponentModel();
         var config = new MultivaluedHashMap<String, String>();
         config.putSingle("auth-mode", "NONE");
         config.putSingle("endpoint", "https://scim.example/scim/v2");
         config.putSingle("content-type", "application/scim+json");
         model.setConfig(config);
-        model.setId("comp-batch");
+        model.setId("comp-page");
 
-        var client = ScimClient.forBatchSync(model, mock(KeycloakSession.class));
+        var client = ScimClient.forSyncPage(model, mock(KeycloakSession.class));
         try {
             assertThat(client.registry.getDefaultConfig().getMaxAttempts()).isEqualTo(4);
         } finally {
