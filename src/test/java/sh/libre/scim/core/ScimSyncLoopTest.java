@@ -366,6 +366,23 @@ class ScimSyncLoopTest {
     }
 
     /**
+     * The CONTINUE policy does not hide the throttle. The streak counter must
+     * still see it, because a throttled run makes no progress under any policy.
+     */
+    @Test
+    void refreshOne_throttledFailureUnderContinuePolicy_returnsThrottled() {
+        var client = spy(newClient("continue"));
+        doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
+            .when(client).create(any(), any());
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(),
+            SyncErrorPolicy.CONTINUE);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.THROTTLED);
+    }
+
+    /**
      * The STOP policy outranks the throttle report. A caller that continued on
      * THROTTLED would ignore the operator's choice to stop on any failure.
      */
