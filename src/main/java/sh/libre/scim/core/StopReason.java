@@ -8,5 +8,7 @@ enum StopReason {
     /** {@code sync-on-error} decided the run should stop. */
     POLICY,
     /** A page used up its wall-clock budget. */
-    PAGE_BUDGET
+    PAGE_BUDGET,
+    /** The endpoint throttled a full page of resources in a row. */
+    THROTTLE_STREAK
 }
