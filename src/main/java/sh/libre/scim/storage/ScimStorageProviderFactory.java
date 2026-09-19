@@ -53,11 +53,13 @@ public class ScimStorageProviderFactory
      */
     public static int positiveIntSetting(ComponentModel model, String name, int fallback) {
         String value = model.get(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             return fallback;
         }
         try {
-            int parsed = Integer.parseInt(value.trim());
+            // No trim, so this accepts exactly what the validator accepts. A
+            // value the admin console refuses to save must not work either.
+            int parsed = Integer.parseInt(value);
             if (parsed > 0) {
                 return parsed;
             }
@@ -65,7 +67,7 @@ public class ScimStorageProviderFactory
             // The warning below reports it; the cause adds nothing.
         }
         LOGGER.warnf("Component %s has an unusable %s of '%s'; using %d instead",
-            model.getId(), name, value, fallback);
+            model.getId(), name, forMessage(value), fallback);
         return fallback;
     }
 
@@ -432,7 +434,8 @@ public class ScimStorageProviderFactory
     @Override
     public SynchronizationResult sync(KeycloakSessionFactory sessionFactory, String realmId,
             UserStorageProviderModel model) {
-        LOGGER.info("sync");
+        LOGGER.infof("SCIM sync requested for component %s (%s) in realm %s",
+            model.getId(), model.getName(), realmId);
         return ScimSync.run(sessionFactory, realmId, model);
     }
 

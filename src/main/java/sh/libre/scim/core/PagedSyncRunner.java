@@ -20,15 +20,32 @@ final class PagedSyncRunner {
     private PagedSyncRunner() {}
 
     /**
+     * How a run ended. The counters cannot show this: a run that stopped at the
+     * third page of ninety-one looks like a complete one.
+     *
+     * @param stopReason why the run ended; {@link StopReason#NONE} when the
+     *     step reported its source exhausted
+     * @param cursor the position the run ended at
+     */
+    record RunOutcome<C>(StopReason stopReason, C cursor) {
+
+        /** Whether the run reached the end of its source. */
+        boolean completed() {
+            return stopReason == StopReason.NONE;
+        }
+    }
+
+    /**
      * Runs pages until the step stops the run or exhausts its source.
      *
      * @param step supplies the pages and does all of the work
      * @param pageSize how many resources one page may process; at least 1
      * @param syncRes the run's counters; each page's counters are added to it
+     * @return why the run ended and where
      * @throws IllegalArgumentException if {@code pageSize} is below 1
      * @throws IllegalStateException if a page reports no progress and no reason
      */
-    static <C> void run(PageStep<C> step, int pageSize, SynchronizationResult syncRes) {
+    static <C> RunOutcome<C> run(PageStep<C> step, int pageSize, SynchronizationResult syncRes) {
         if (pageSize < 1) {
             throw new IllegalArgumentException("Paged sync needs a page size of at least 1, got " + pageSize);
         }
@@ -55,10 +72,10 @@ final class PagedSyncRunner {
                 syncRes.add(outcome.counters());
             }
             if (endsTheRun(outcome)) {
-                return;
+                return new RunOutcome<>(outcome.stopReason(), outcome.next());
             }
             if (outcome.exhausted()) {
-                return;
+                return new RunOutcome<>(StopReason.NONE, outcome.next());
             }
             if (!outcome.progressed()) {
                 LOGGER.errorf("Paged sync aborted: the page after cursor %s made no progress", cursor);

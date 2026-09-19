@@ -201,12 +201,25 @@ class ScimStorageProviderFactoryValidationTest {
             model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(200);
     }
 
+    /**
+     * The same values the validator rejects. A value that cannot be saved must
+     * not be usable either, or a realm import would run with a setting the
+     * admin console refuses.
+     */
     @ParameterizedTest
-    @ValueSource(strings = {"", "  ", "0", "-1", "abc", "2.5", "99999999999999999999"})
-    void anUnusablePageSettingReadsAsItsDefault(String value) {
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
+    void aPageSettingTheValidatorRejectsReadsAsItsDefault(String value) {
         var model = modelWithPaging(value, null);
 
         assertThat(ScimStorageProviderFactory.positiveIntSetting(
             model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(50);
+    }
+
+    @Test
+    void aPageSettingWithALeadingPlusIsRead() {
+        var model = modelWithPaging("+5", null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(5);
     }
 }

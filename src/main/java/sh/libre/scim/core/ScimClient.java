@@ -66,7 +66,8 @@ public class ScimClient {
     // so 10 seconds is about 40 times that.
     private static final int SYNC_PAGE_SOCKET_TIMEOUT_SECONDS = 10;
 
-    final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
+    // Static so the static helpers below can log too.
+    protected static final Logger LOGGER = Logger.getLogger(ScimClient.class);
     final protected ScimRequestBuilder scimRequestBuilder;
     final protected RetryRegistry registry;
     final protected KeycloakSession session;
@@ -105,7 +106,7 @@ public class ScimClient {
     }
 
     /**
-     * A client for one page of a sync run. It uses {@link #syncPageRetryConfig()}:
+     * A client for one page of a sync run. It uses {@link #syncRetryConfig()}:
      * three attempts, each with a 1-second pool-lease wait, a 3-second connect,
      * and a 10-second read.
      *
@@ -134,7 +135,7 @@ public class ScimClient {
      * </ul>
      */
     static ScimClient forSyncPage(ComponentModel model, KeycloakSession session) {
-        return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig(),
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncRetryConfig(),
             SYNC_PAGE_REQUEST_TIMEOUT_SECONDS, SYNC_PAGE_CONNECT_TIMEOUT_SECONDS,
             SYNC_PAGE_SOCKET_TIMEOUT_SECONDS);
     }
@@ -149,9 +150,22 @@ public class ScimClient {
      * list, and that one response can take far longer than a push.
      */
     static ScimClient forBatchSync(ComponentModel model, KeycloakSession session) {
-        return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig(),
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncRetryConfig(),
             DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS,
             DEFAULT_SOCKET_TIMEOUT_SECONDS);
+    }
+
+    /**
+     * Closes {@code client} and keeps any failure out of the caller's
+     * transaction. A throw from close would roll the transaction back and
+     * discard the mappings for resources the endpoint has already accepted.
+     */
+    static void closeQuietly(ScimClient client) {
+        try {
+            client.close();
+        } catch (RuntimeException e) {
+            LOGGER.warnf(e, "SCIM sync: a client did not close cleanly");
+        }
     }
 
     /** Retry policy for interactive and event-driven calls. */
@@ -160,12 +174,12 @@ public class ScimClient {
     }
 
     /** Retry policy for every part of a sync: three attempts instead of the default ten. */
-    static RetryConfig syncPageRetryConfig() {
-        return retryConfig(3, syncPageInterval());
+    static RetryConfig syncRetryConfig() {
+        return retryConfig(3, syncInterval());
     }
 
     // package-private for tests
-    static IntervalFunction syncPageInterval() {
+    static IntervalFunction syncInterval() {
         // Backoff starts at 500ms and multiplies by 1.5, capped at 5s. At
         // three attempts there are two waits: 500ms and 750ms. Neither
         // reaches the cap. The cap stays as a ceiling in case the attempt

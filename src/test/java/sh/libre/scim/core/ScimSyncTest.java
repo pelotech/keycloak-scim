@@ -20,8 +20,8 @@ import sh.libre.scim.core.exceptions.InconsistentScimMappingException;
 
 /**
  * The parts of the sync coordinator that need no database: the gates that open
- * no transaction, the failure containment around each half, and the group
- * count warning.
+ * no transaction, the failure containment around each stage, how a stage's
+ * counters reach the run, and the group count warning.
  */
 class ScimSyncTest {
 
@@ -45,7 +45,7 @@ class ScimSyncTest {
     }
 
     @Test
-    void bothHalvesDisabledOpensNoTransaction() {
+    void bothSyncSettingsDisabledOpensNoTransaction() {
         var sessionFactory = mock(KeycloakSessionFactory.class);
 
         var result = ScimSync.run(sessionFactory, "realm-1",
@@ -68,10 +68,10 @@ class ScimSyncTest {
     }
 
     @Test
-    void aPropagationFailureInOneHalfIsCountedAndContained() {
+    void aPropagationFailureInOneStageIsCountedAndContained() {
         var result = new SynchronizationResult();
 
-        ScimSync.contained(model(), "user refresh", result, () -> {
+        ScimSync.runContained(model(), "user refresh", result, () -> {
             throw new InconsistentScimMappingException("no mapping");
         });
 
@@ -79,10 +79,10 @@ class ScimSyncTest {
     }
 
     @Test
-    void anUnexpectedFailureInOneHalfIsCountedAndContained() {
+    void anUnexpectedFailureInOneStageIsCountedAndContained() {
         var result = new SynchronizationResult();
 
-        ScimSync.contained(model(), "user refresh", result, () -> {
+        ScimSync.runContained(model(), "user refresh", result, () -> {
             throw new IllegalStateException("commit failed");
         });
 
@@ -109,5 +109,70 @@ class ScimSyncTest {
         when(session.getContext()).thenThrow(new IllegalStateException("no context"));
 
         assertThatCode(() -> ScimSync.warnIfManyGroups(session, model())).doesNotThrowAnyException();
+    }
+
+    // --- merging one stage into the run ---
+
+    @Test
+    void aCommittedStageContributesEveryCounter() {
+        var result = new SynchronizationResult();
+        var staged = new SynchronizationResult();
+        staged.setAdded(3);
+        staged.setUpdated(4);
+        staged.setRemoved(1);
+        staged.setFailed(2);
+
+        ScimSync.mergeStage(result, staged, true);
+
+        assertThat(result.getAdded()).isEqualTo(3);
+        assertThat(result.getUpdated()).isEqualTo(4);
+        assertThat(result.getRemoved()).isEqualTo(1);
+        assertThat(result.getFailed()).isEqualTo(2);
+    }
+
+    /**
+     * A rolled-back stage kept nothing, so reporting its pushes would name work
+     * the database discarded. Its failures still happened, and the stage itself
+     * is one more.
+     */
+    @Test
+    void aRolledBackStageContributesOnlyItsFailuresPlusTheLostStage() {
+        var result = new SynchronizationResult();
+        var staged = new SynchronizationResult();
+        staged.setAdded(3);
+        staged.setUpdated(4);
+        staged.setRemoved(1);
+        staged.setFailed(2);
+
+        ScimSync.mergeStage(result, staged, false);
+
+        assertThat(result.getAdded()).isZero();
+        assertThat(result.getUpdated()).isZero();
+        assertThat(result.getRemoved()).isZero();
+        assertThat(result.getFailed()).isEqualTo(3);
+    }
+
+    @Test
+    void aRolledBackStageThatFailedNothingStillCountsAsOneFailure() {
+        var result = new SynchronizationResult();
+
+        ScimSync.mergeStage(result, new SynchronizationResult(), false);
+
+        assertThat(result.getFailed()).isEqualTo(1);
+    }
+
+    @Test
+    void mergingAStageAddsToWhatTheRunAlreadyHas() {
+        var result = new SynchronizationResult();
+        result.setUpdated(10);
+        result.setFailed(5);
+        var staged = new SynchronizationResult();
+        staged.setUpdated(2);
+        staged.setFailed(1);
+
+        ScimSync.mergeStage(result, staged, false);
+
+        assertThat(result.getUpdated()).isEqualTo(10);
+        assertThat(result.getFailed()).isEqualTo(7);
     }
 }

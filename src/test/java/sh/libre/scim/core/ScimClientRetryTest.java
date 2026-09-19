@@ -1,7 +1,10 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -39,8 +42,8 @@ class ScimClientRetryTest {
     }
 
     @Test
-    void syncPageRetryConfigUsesThreeAttempts() {
-        assertThat(ScimClient.syncPageRetryConfig().getMaxAttempts()).isEqualTo(3);
+    void syncRetryConfigUsesThreeAttempts() {
+        assertThat(ScimClient.syncRetryConfig().getMaxAttempts()).isEqualTo(3);
     }
 
     /**
@@ -51,9 +54,9 @@ class ScimClientRetryTest {
      * the backoff to grow unbounded again.
      */
     @Test
-    void syncPageIntervalWaitsSumToTheExpectedBudget() {
-        var config = ScimClient.syncPageRetryConfig();
-        var interval = ScimClient.syncPageInterval();
+    void syncIntervalWaitsSumToTheExpectedBudget() {
+        var config = ScimClient.syncRetryConfig();
+        var interval = ScimClient.syncInterval();
 
         long totalWaitMillis = 0;
         for (int attempt = 1; attempt < config.getMaxAttempts(); attempt++) {
@@ -73,7 +76,7 @@ class ScimClientRetryTest {
     @Test
     @SuppressWarnings("unchecked")
     void syncPageRetryInvokesSupplierExactlyThreeTimesOn503() {
-        var fastConfig = RetryConfig.from(ScimClient.syncPageRetryConfig())
+        var fastConfig = RetryConfig.from(ScimClient.syncRetryConfig())
             .intervalFunction(IntervalFunction.of(1))
             .build();
         var retry = Retry.of("sync-page-test", fastConfig);
@@ -171,5 +174,14 @@ class ScimClientRetryTest {
         } finally {
             client.close();
         }
+    }
+
+    @Test
+    void aFailureToCloseAClientStaysOutOfTheCallersTransaction() {
+        var client = mock(ScimClient.class);
+        doThrow(new IllegalStateException("pool already shut down")).when(client).close();
+
+        assertThatCode(() -> ScimClient.closeQuietly(client)).doesNotThrowAnyException();
+        verify(client).close();
     }
 }
