@@ -215,8 +215,9 @@ public class ScimStorageProviderFactory
                 .name(SYNC_PAGE_SIZE)
                 .type(ProviderConfigProperty.STRING_TYPE)
                 .label("Sync page size")
-                .helpText("Users examined per transaction during sync-refresh. Each page commits on "
-                    + "its own, so a failure costs one page rather than the whole run. Default 50.")
+                .helpText("Users examined per transaction during sync-refresh, and how many throttled "
+                    + "users in a row will stop the run. Each page commits on its own, so a failure "
+                    + "costs one page rather than the whole run. Default " + DEFAULT_SYNC_PAGE_SIZE + ".")
                 .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_SIZE))
                 .add()
                 .property()
@@ -225,7 +226,8 @@ public class ScimStorageProviderFactory
                 .label("Sync page time limit (seconds)")
                 .helpText("Wall-clock limit for one sync-refresh page, checked between users. A page "
                     + "that exceeds it commits what it has done and the next page carries on. Keep it "
-                    + "well under the transaction timeout. Default 45.")
+                    + "well under Keycloak's default transaction timeout of 300 seconds. Default "
+                    + DEFAULT_SYNC_PAGE_MAX_SECONDS + ".")
                 .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_MAX_SECONDS))
                 .add()
                 .property()
@@ -392,12 +394,29 @@ public class ScimStorageProviderFactory
             parsed = Integer.parseInt(value);
         } catch (NumberFormatException e) {
             throw new ComponentValidationException(
-                name + " must be a whole number greater than zero (got '" + value + "')");
+                name + " must be a whole number greater than zero (got '" + forMessage(value) + "')");
         }
         if (parsed <= 0) {
             throw new ComponentValidationException(
                 name + " must be a whole number greater than zero (got " + parsed + ")");
         }
+    }
+
+    /** Longest value {@link #forMessage} will show before it cuts the rest. */
+    private static final int MAX_MESSAGE_VALUE_LENGTH = 40;
+
+    /**
+     * Cleans a value before it goes into an exception message. The value came
+     * from an operator and is shown as typed in the admin console and the log,
+     * so a control character (a stray newline, say) must not break the line
+     * and a long paste must not blow up the message.
+     */
+    private static String forMessage(String value) {
+        String cleaned = value.replaceAll("\\p{Cntrl}", "?");
+        if (cleaned.length() <= MAX_MESSAGE_VALUE_LENGTH) {
+            return cleaned;
+        }
+        return cleaned.substring(0, MAX_MESSAGE_VALUE_LENGTH) + "...";
     }
 
     @Override
