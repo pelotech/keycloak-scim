@@ -130,8 +130,28 @@ class ScimStorageProviderFactoryValidationTest {
         assertThatCode(() -> validate(modelWithPaging("50", "45"))).doesNotThrowAnyException();
     }
 
+    @Test
+    void pagingPositive_leavesConfigValuesUnchanged() {
+        var model = modelWithPaging("50", "45");
+
+        validate(model);
+
+        assertThat(model.getConfig().getFirst("sync-page-size")).isEqualTo("50");
+        assertThat(model.getConfig().getFirst("sync-page-max-seconds")).isEqualTo("45");
+    }
+
+    @Test
+    void pageSize_leadingPlus_isAccepted() {
+        assertThatCode(() -> validate(modelWithPaging("+5", null))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void pageMaxSeconds_leadingPlus_isAccepted() {
+        assertThatCode(() -> validate(modelWithPaging(null, "+5"))).doesNotThrowAnyException();
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5"})
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
     void pageSize_notAPositiveWholeNumber_isRejected(String value) {
         assertThatThrownBy(() -> validate(modelWithPaging(value, null)))
             .isInstanceOf(ComponentValidationException.class)
@@ -139,11 +159,28 @@ class ScimStorageProviderFactoryValidationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5"})
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
     void pageMaxSeconds_notAPositiveWholeNumber_isRejected(String value) {
         assertThatThrownBy(() -> validate(modelWithPaging(null, value)))
             .isInstanceOf(ComponentValidationException.class)
             .hasMessageContaining("sync-page-max-seconds");
+    }
+
+    @Test
+    void pageSize_controlCharacterInValue_isNotInMessage() {
+        assertThatThrownBy(() -> validate(modelWithPaging("50\n", null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageNotContaining("\n");
+    }
+
+    @Test
+    void pageSize_longValue_isTruncatedInMessage() {
+        String longValue = "x".repeat(200);
+
+        assertThatThrownBy(() -> validate(modelWithPaging(longValue, null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("x".repeat(40) + "...")
+            .hasMessageNotContaining("x".repeat(41));
     }
 
     // --- reading a page setting, which validation cannot guarantee ---
