@@ -825,9 +825,10 @@ public class ScimClient {
      *
      * @return {@code true} if applied; {@code false} if it couldn't be applied this
      *     import because the group or user mapping isn't committed yet (lazy-import
-     *     lag), or because the fallback replace pushed nothing. {@code false} is
-     *     the self-heal signal — the caller retries next import — so hard failures
-     *     throw rather than return it.
+     *     lag), or because the fallback replace pushed nothing. An excluded group
+     *     counts as applied: there is nothing to push and nothing to retry.
+     *     {@code false} is the self-heal signal — the caller retries next
+     *     import — so hard failures throw rather than return it.
      * @throws ScimPropagationException on a hard failure (non-2xx after retries, or
      *     a transport-level failure, both transient).
      */
@@ -854,9 +855,17 @@ public class ScimClient {
                 return true;
             }
             var groupAdapter = getAdapter(factory);
-            // Report what the push did. A replace that pushed nothing leaves
-            // the membership unpropagated, and the caller retries it.
-            return replaceBody(groupAdapter, () -> groupAdapter.apply(group));
+            boolean pushed = replaceBody(groupAdapter, () -> groupAdapter.apply(group));
+            // The two results answer different questions. The replace says
+            // whether it pushed. This method says whether the membership is
+            // handled, and the caller retries when it is not. An excluded
+            // group has nothing to push and nothing to retry, so it is
+            // handled. Any other empty push leaves the membership behind, and
+            // the next import must try again.
+            if (!pushed && Boolean.TRUE.equals(groupAdapter.skip)) {
+                return true;
+            }
+            return pushed;
         }
 
         var adapter = getAdapter(factory);
