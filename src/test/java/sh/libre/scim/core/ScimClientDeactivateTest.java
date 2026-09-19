@@ -3,7 +3,7 @@ package sh.libre.scim.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -138,11 +138,12 @@ class ScimClientDeactivateTest {
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory =
             (session, componentId) -> adapter;
         var kcModel = mock(TestModel.class);
-        doNothing().when(client).replace(any(), any());
+        doReturn(true).when(client).replaceApplied(any());
 
         client.create(factory, kcModel);
 
-        verify(client).replace(factory, kcModel);
+        // The reactivation reuses the adapter that create already applied.
+        verify(client).replaceApplied(adapter);
     }
 
     /** A live (unflagged) mapping keeps the existing short-circuit: no replace, no POST. */
@@ -155,7 +156,7 @@ class ScimClientDeactivateTest {
 
         client.create(factory, mock(TestModel.class));
 
-        verify(client, never()).replace(any(), any());
+        verify(client, never()).replaceApplied(any());
     }
 
     /**
@@ -177,14 +178,14 @@ class ScimClientDeactivateTest {
         when(adapter.getMapping()).thenReturn(tombstone);
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory =
             (session, componentId) -> adapter;
-        doNothing().when(client).replace(any(), any());
-        doNothing().when(client).create(any(), any());
+        doReturn(true).when(client).replaceApplied(any());
+        doReturn(true).when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
-        verify(client, never()).replace(any(), any());
-        verify(client, never()).create(any(), any());
+        verify(client, never()).replaceApplied(any());
+        verify(client, never()).createApplied(any());
         assertThat(syncRes.getUpdated()).isZero();
     }
 
@@ -202,11 +203,11 @@ class ScimClientDeactivateTest {
         when(adapter.getMapping()).thenReturn(new ScimResource());
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory =
             (session, componentId) -> adapter;
-        doNothing().when(client).replace(any(), any());
+        doReturn(true).when(client).replaceApplied(any());
 
         client.refreshResources(factory, new SynchronizationResult());
 
-        verify(client).replace(any(), any());
+        verify(client).replaceApplied(any());
     }
 
     /**

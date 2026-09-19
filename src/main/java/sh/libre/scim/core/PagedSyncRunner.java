@@ -7,7 +7,8 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 /**
  * Drives a {@link PageStep} page by page. It passes each outcome's cursor to
- * the next page and merges counters after each page. It stops on a policy stop,
+ * the next page and merges the counters of each page that kept its
+ * work. It stops on a policy stop,
  * on a throttle streak, on a failed page transaction, or when the step reports
  * its source exhausted. It fails
  * the run when a page reports no progress and gives no reason for it. It infers
@@ -45,8 +46,11 @@ final class PagedSyncRunner {
                 throw e;
             }
             // Merge after the page returns. A page that throws keeps no
-            // committed rows, so it must add no counts.
-            syncRes.add(outcome.counters());
+            // committed rows, so it must add no counts. A page that reports a
+            // failed transaction keeps nothing either, so it is dropped too.
+            if (outcome.stopReason() != StopReason.TRANSACTION_FAILED) {
+                syncRes.add(outcome.counters());
+            }
             if (endsTheRun(outcome)) {
                 return;
             }

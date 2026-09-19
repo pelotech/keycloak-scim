@@ -3,7 +3,7 @@ package sh.libre.scim.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -13,6 +13,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import de.captaingoldfish.scim.sdk.common.resources.User;
+import jakarta.persistence.TypedQuery;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.keycloak.common.util.MultivaluedHashMap;
@@ -81,11 +84,11 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InvalidResponseFromScimEndpointException(503, "down"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
-        verify(client, times(1)).create(any(), any());
+        verify(client, times(1)).createApplied(any());
     }
 
     /** AUTO policy: permanent failure on resource 1 → skip, resource 2 still attempted. */
@@ -98,13 +101,13 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InconsistentScimMappingException("bad mapping"))
-            .doNothing()
-            .when(client).create(any(), any());
+            .doReturn(true)
+            .when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(twoResourceFactory(first, second), syncRes);
 
-        verify(client, times(2)).create(any(), any());
+        verify(client, times(2)).createApplied(any());
         assertThat(syncRes.getFailed()).isEqualTo(1);
     }
 
@@ -118,12 +121,12 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
-            .doNothing()
-            .when(client).create(any(), any());
+            .doReturn(true)
+            .when(client).createApplied(any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
-        verify(client, times(2)).create(any(), any());
+        verify(client, times(2)).createApplied(any());
     }
 
     /** CONTINUE policy: transient failure on resource 1 → skip, resource 2 still attempted. */
@@ -136,12 +139,12 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InvalidResponseFromScimEndpointException(503, "down"))
-            .doNothing()
-            .when(client).create(any(), any());
+            .doReturn(true)
+            .when(client).createApplied(any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
-        verify(client, times(2)).create(any(), any());
+        verify(client, times(2)).createApplied(any());
     }
 
     /** STOP policy: any failure on resource 1 → stop (resource 2 not attempted). */
@@ -154,11 +157,11 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InconsistentScimMappingException("bad mapping"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
-        verify(client, times(1)).create(any(), any());
+        verify(client, times(1)).createApplied(any());
     }
 
     // -----------------------------------------------------------------------
@@ -178,12 +181,12 @@ class ScimSyncLoopTest {
         TestModel second = mock(TestModel.class);
 
         doThrow(new InconsistentScimMappingException("no scim mapping"))
-            .doNothing()
-            .when(client).create(any(), any());
+            .doReturn(true)
+            .when(client).createApplied(any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
-        verify(client, times(2)).create(any(), any());
+        verify(client, times(2)).createApplied(any());
     }
 
     // -----------------------------------------------------------------------
@@ -205,14 +208,14 @@ class ScimSyncLoopTest {
             when(a.getResourceStream()).thenReturn(Stream.of(only));
             return a;
         };
-        doNothing().when(client).create(any(), any());
+        doReturn(true).when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
         assertThat(syncRes.getUpdated()).isZero();
         assertThat(syncRes.getFailed()).isZero();
-        verify(client, never()).create(any(), any());
+        verify(client, never()).createApplied(any());
     }
 
     /**
@@ -235,14 +238,14 @@ class ScimSyncLoopTest {
             when(a.getResourceStream()).thenReturn(Stream.of(only));
             return a;
         };
-        doNothing().when(client).replace(any(), any());
+        doReturn(true).when(client).replaceApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
         assertThat(syncRes.getUpdated()).isZero();
         assertThat(syncRes.getFailed()).isZero();
-        verify(client, never()).replace(any(), any());
+        verify(client, never()).replaceApplied(any());
     }
 
     /**
@@ -273,12 +276,12 @@ class ScimSyncLoopTest {
             }).when(a).apply(any(TestModel.class));
             return a;
         };
-        doNothing().when(client).create(any(), any());
+        doReturn(true).when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
-        verify(client, times(1)).create(any(), any());
+        verify(client, times(1)).createApplied(any());
         assertThat(syncRes.getUpdated()).isEqualTo(1);
         assertThat(syncRes.getFailed()).isZero();
     }
@@ -303,7 +306,7 @@ class ScimSyncLoopTest {
     @Test
     void refreshOne_pushedResource_returnsContinue() {
         var client = spy(newClient());
-        doNothing().when(client).create(any(), any());
+        doReturn(true).when(client).createApplied(any());
 
         var outcome = client.refreshOne(
             oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.AUTO);
@@ -327,7 +330,7 @@ class ScimSyncLoopTest {
     void refreshOne_throttledFailure_returnsThrottled() {
         var client = spy(newClient());
         doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         var outcome = client.refreshOne(
@@ -342,7 +345,7 @@ class ScimSyncLoopTest {
     void refreshOne_permanentFailure_returnsContinue() {
         var client = spy(newClient());
         doThrow(new InconsistentScimMappingException("bad mapping"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         var outcome = client.refreshOne(
@@ -357,7 +360,7 @@ class ScimSyncLoopTest {
     void refreshOne_policyStop_returnsStop() {
         var client = spy(newClient());
         doThrow(new InvalidResponseFromScimEndpointException(503, "down"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
 
         var outcome = client.refreshOne(
             oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.AUTO);
@@ -373,13 +376,108 @@ class ScimSyncLoopTest {
     void refreshOne_throttledFailureUnderContinuePolicy_returnsThrottled() {
         var client = spy(newClient("continue"));
         doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
 
         var outcome = client.refreshOne(
             oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(),
             SyncErrorPolicy.CONTINUE);
 
         assertThat(outcome).isEqualTo(RefreshOutcome.THROTTLED);
+    }
+
+    // -----------------------------------------------------------------------
+    // refreshOne counts a push that did not happen
+    // -----------------------------------------------------------------------
+
+    /**
+     * An adapter for the unmapped path. The create call finds the row that
+     * {@code existing} holds, so it needs no endpoint.
+     */
+    @SuppressWarnings("unchecked")
+    private Adapter<TestModel, User> unmappedAdapter(List<ScimResource> existing) {
+        Adapter<TestModel, User> a = mock(Adapter.class);
+        a.skip = false;
+        when(a.getType()).thenReturn("User");
+        when(a.getId()).thenReturn("u1");
+        when(a.skipRefresh()).thenReturn(false);
+        when(a.getMapping()).thenReturn(null);
+        TypedQuery<ScimResource> query = mock(TypedQuery.class);
+        when(query.getResultList()).thenReturn(existing);
+        when(a.query("findById", "u1")).thenReturn(query);
+        return a;
+    }
+
+    /** Counts how many adapters the sync path builds for one resource. */
+    private AdapterFactory<TestModel, User, Adapter<TestModel, User>> sharedFactory(
+            Adapter<TestModel, User> adapter, AtomicInteger built) {
+        return (session, componentId) -> {
+            built.incrementAndGet();
+            return adapter;
+        };
+    }
+
+    /**
+     * The replace call logs a fault of its own and returns. The resource never
+     * reached the endpoint, so the run must not report it as updated.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshOne_replaceThatPushedNothing_countsFailed() {
+        var client = newClient();
+        Adapter<TestModel, User> a = mock(Adapter.class);
+        a.skip = false;
+        when(a.getType()).thenReturn("User");
+        when(a.getId()).thenReturn("u1");
+        when(a.skipRefresh()).thenReturn(false);
+        when(a.getMapping()).thenReturn(new ScimResource());
+        when(a.query("findById", "u1")).thenThrow(new IllegalStateException("the mapping query broke"));
+        var syncRes = new SynchronizationResult();
+
+        var outcome = client.refreshOne(
+            (session, componentId) -> a, mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
+        assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /**
+     * The create call finds a mapping that the refresh did not see and returns
+     * without a push. Nothing went to the endpoint, so nothing was updated.
+     */
+    @Test
+    void refreshOne_createThatPushedNothing_countsFailed() {
+        var client = newClient();
+        var adapter = unmappedAdapter(List.of(new ScimResource()));
+        var syncRes = new SynchronizationResult();
+
+        var outcome = client.refreshOne(
+            (session, componentId) -> adapter, mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
+        assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // refreshOne applies the model once
+    // -----------------------------------------------------------------------
+
+    /**
+     * Applying the model walks role mappings and reads the component config,
+     * so a second pass halves how many users fit in a page.
+     */
+    @Test
+    void refreshOne_appliesTheModelOnceAndBuildsOneAdapter() {
+        var client = newClient();
+        var adapter = unmappedAdapter(List.of(new ScimResource()));
+        var built = new AtomicInteger();
+
+        client.refreshOne(sharedFactory(adapter, built), mock(TestModel.class),
+            new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        verify(adapter, times(1)).apply(any(TestModel.class));
+        assertThat(built.get()).isEqualTo(1);
     }
 
     /**
@@ -390,7 +488,7 @@ class ScimSyncLoopTest {
     void refreshOne_throttledFailureUnderStopPolicy_returnsStop() {
         var client = spy(newClient("stop"));
         doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
-            .when(client).create(any(), any());
+            .when(client).createApplied(any());
 
         var outcome = client.refreshOne(
             oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.STOP);
