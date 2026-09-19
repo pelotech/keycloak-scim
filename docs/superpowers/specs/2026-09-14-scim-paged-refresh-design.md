@@ -136,21 +136,33 @@ capping it at 5s holds the backoff contribution to roughly 2.4 seconds over
 four. Four attempts still rides out a brief blip, which two would not.
 
 **A sync page uses shorter HTTP timeouts.** The attempt count is not what
-dominates a stuck resource; the per-attempt HTTP timeouts are. At 30s to
-connect and 30s per read, four attempts still allow about 242 seconds for one
-resource, well past a 45-second page. A client built for a sync page therefore
-uses 5 seconds for connect, request and socket, which holds one resource to
-about 42 seconds: four attempts of 10 seconds, plus 2.4 seconds of backoff.
-Every other caller keeps 30 seconds, because an interactive call has no page to
-fit inside.
+dominates a stuck resource; the per-attempt HTTP timeouts are. Three of them
+apply to one attempt and they add up: the wait for a pooled connection
+(`requestTimeout`), the TCP connect, and each read. At 30s each, four attempts
+allow about 362 seconds for one resource, against a 45-second page.
 
-Five seconds is about twenty times the observed per-user push time of 0.23
-seconds, so normal traffic is unaffected. A deployment whose endpoint answers
-writes more slowly than five seconds will see those writes fail during a sync
-while they still succeed elsewhere, which is the first thing to check if
-failures rise after this change. The socket timeout is per read, so a server
-that sends a byte every four seconds still holds an attempt open; the bound is
-a normal worst case, not a guarantee.
+A client built for a sync page uses 1s for the pool wait, 3s to connect and 10s
+per read, over three attempts rather than four. The values differ because the
+timeouts mean different things. The pool wait never touches the network and
+should not block at all. A same-region connect takes under 50ms. Only the read
+has to hold a real SCIM write, and 10s is about forty times the observed
+per-user push of 0.23 seconds. One resource then costs about 43 seconds: three
+attempts of 14 seconds plus 1.25 seconds of backoff. Every other caller keeps
+30 seconds, because an interactive call has no page to fit inside.
+
+This is a normal worst case, not a guarantee, and several paths escape it. The
+read timeout applies per read, so a server that sends a byte every 9 seconds
+holds an attempt open. The TLS handshake and the DNS lookup are covered by none
+of the three values. The connect timeout applies per resolved address, so a
+dual-stack endpoint can pay it twice. A 401 re-mints the token and runs the
+whole retry loop again. The token minter has no timeouts at all, so a
+`CLIENT_CREDENTIALS` deployment is not bounded by this change; that is filed
+separately. A failed `replace` can fall back to a PATCH and then to a create,
+each outside the retry loop.
+
+A deployment whose endpoint answers writes more slowly than 10 seconds will see
+those writes fail during a sync while they still succeed on interactive paths.
+That is the first thing to check if failures rise after this change.
 
 **Sizing guidance, not a guarantee.** Let `P` be the page wall-clock bound and `T`
 the transaction timeout. The page step starts its clock before the fetch, so `P`
@@ -588,8 +600,9 @@ Several behaviours change the moment the new version is deployed, and none of
 them depends on a configuration change:
 
 - The sync-path retry budget drops from 10 attempts to 4 with a capped interval.
-- A sync page uses 5-second HTTP timeouts instead of 30. Other paths are
-  unchanged.
+- A sync page uses shorter HTTP timeouts, 1s to wait for a pooled connection,
+  3s to connect and 10s per read, over three attempts. Other paths keep 30s and
+  ten attempts.
 - `AUTO` no longer stops a run on 429, but one page of consecutive 429s stops
   the run.
 - Refresh commits per page rather than per run, which also narrows the orphan
@@ -617,8 +630,8 @@ in. Where directory removals matter, confirm the reconciler is enabled.
    headroom. Enumeration no longer dominates the run, so the duration should
    fall, but the timeout still has to exceed it.
 4. Check the first run after deployment for two new failure modes. Writes that
-   time out at 5 seconds show the endpoint is slower than the new sync-page
-   timeout; raise it or investigate the endpoint. A run that stops with the
+   time out at 10 seconds show the endpoint is slower than the new sync-page
+   read timeout; raise it or investigate the endpoint. A run that stops with the
    throttle-streak reason shows the endpoint rate-limited a whole page in a
    row.
 
