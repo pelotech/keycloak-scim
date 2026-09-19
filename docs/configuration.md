@@ -163,6 +163,8 @@ controlled by the LDAP component.
 | `sync-import-action` | enum | `CREATE_LOCAL` | What to do when a remote SCIM user/group has no local Keycloak counterpart. Options: `NOTHING` (log only), `CREATE_LOCAL` (add to Keycloak), `DELETE_REMOTE` (remove from SCIM). Choose `DELETE_REMOTE` only for one-way Keycloak-as-source-of-truth deployments. |
 | `sync-refresh` | bool | `false` | When true, push local users/groups out to the SCIM server during sync (covering anything the event listener missed). Combine with `sync-import=false` for a pure outbound sync. |
 | `sync-on-error` | enum | `auto` | How a per-record failure in the sync loop is handled. `auto` (default): a bad mapping, malformed data, a non-throttling 4xx response, or a 429 throttling response skips that record and the run continues; an unreachable endpoint or a 5xx response stops the run, since every remaining record would fail the same way. `continue`: always skip the failed record and keep going. `stop`: abort on the first failure of any kind. Options: `auto`, `continue`, `stop`. Against an endpoint that is persistently throttling, `auto` retries and skips one record after another instead of aborting early, so a sync can take much longer to finish instead of failing fast. |
+| `sync-page-size` | int (string) | `50` | Users read and pushed per `sync-refresh` transaction. Also sets how many throttled users in a row stop the run. Must be a whole number greater than zero. |
+| `sync-page-max-seconds` | int (string) | `45` | Wall-clock limit for one `sync-refresh` page, checked between users. A page that runs past it commits the work it already did, and the next page carries on. Must be a whole number greater than zero. |
 
 `sync-on-error` governs both the import and refresh halves of a sync. It is
 independent of `rollback-strategy` (which covers interactive events only): a
@@ -172,6 +174,111 @@ Both `sync-import` and `sync-refresh` are off by default, so triggering a sync
 on this component without enabling at least one of them does nothing and
 returns an empty result. The plugin logs a line saying so, since an empty
 result on its own looks the same as a sync that ran and found no work.
+
+A bad `sync-page-size` or `sync-page-max-seconds` is rejected when you save
+the component through the admin console or the REST API. A realm imported
+from a file skips that check, so a stored value can still be unusable. At
+sync time, an unusable stored value falls back to its default and the plugin
+logs a warning naming the component and the bad value.
+
+#### How sync-refresh pages through users
+
+`sync-refresh` commits one page of users per transaction, instead of pushing
+every user in a realm in a single transaction. A failure costs only the page
+it happened in. Pages already committed keep their SCIM mappings.
+
+Users are read from Keycloak's local user table, in username order, one page
+at a time. Compared to earlier versions, this changes what refresh does:
+
+- **Service accounts are not refreshed.** Earlier versions pushed enabled
+  service-account users. They are left out now. Their existing SCIM records
+  stop receiving updates. They are not deleted.
+- **Refresh only examines users with a local row.** LDAP federation must run
+  with `Import Users = ON`, which the plugin already requires (see
+  [LDAP federation support](ldap-federation-support.md)). Refresh no longer
+  imports directory users it has never seen. LDAP synchronization does that,
+  and the `scim-ldap-sync` mapper pushes them from there.
+- **Removing users is the reconciler's job.** A user whose directory entry is
+  gone is skipped when Keycloak's user cache does not have them. A cached
+  user is still pushed, as an ordinary update, and the reconciler
+  deprovisions them later. A cached user can be pushed with attribute values
+  stored locally, rather than the current directory values.
+- **Skipped users no longer count as updated.** A user excluded by
+  `scim-skip` or `propagation-role` used to be counted in the sync result's
+  `updated` total. It is not counted now. What is actually propagated does
+  not change.
+- **A refresh that stops early now reports a failure.** Earlier versions did
+  not flag this in the result. The sync result now records a failure, and the
+  log names the cursor the run stopped at and the reason.
+- **Groups still refresh in one transaction.** Keycloak has no paged way to
+  list every group. The plugin logs a warning when a realm has more than 500
+  groups. Refreshing that many groups in one transaction may exceed the
+  transaction timeout.
+
+**Transaction timeout.** Paging does not let you lower it. Keycloak wraps the
+whole sync in a transaction of its own. It cancels that transaction at the
+global timeout, even though the transaction sits idle while the pages run
+underneath it. A sync that outlasts the timeout still pushes every user and
+keeps every mapping the pages committed, but Keycloak still reports the sync
+as failed. Keep the timeout above the time a full sync takes. Paging is not a
+way to shorten it.
+
+What paging changes is the cost of a failure. Pages that already committed
+keep their SCIM mappings, so a re-run repeats work instead of starting from
+nothing.
+
+**Retry and timeouts during a sync.** Every part of a sync retries a failed
+call up to 3 times, not the 10 attempts an interactive event gets. Backoff
+starts at 500 ms and grows to a 5 second cap.
+
+Only the `sync-refresh` pages that push users use shorter HTTP timeouts:
+
+- 1 second to wait for a pooled connection.
+- 3 seconds to connect.
+- 10 seconds per read.
+
+Import and group refresh keep the normal 30-second timeouts. Import reads a
+whole remote list in one response, which can take longer than a single push.
+
+A deployment whose endpoint takes more than 10 seconds to answer one write
+will see failures during a refresh. It will not see those failures on other
+paths. Check this first if failures rise after an upgrade.
+
+**Throttling (HTTP 429).** A single 429 no longer stops a run under
+`sync-on-error=auto`. The retry already backs off, and one throttled response
+does not mean the endpoint is down. But `sync-page-size` throttled users in a
+row does stop the run. This stops the run from walking the whole population
+against an endpoint that throttles every request, for no result. The streak
+carries across pages, and resets on any push, skip, or failure of another
+kind.
+
+**Rollback strategy does not apply to a sync.** `rollback-strategy` (above)
+already covers interactive console and account events only. `sync-refresh`
+and `sync-import` no longer run through the dispatcher those events use. The
+code now matches what this document already said: a sync never rolls back.
+It only skips or stops, governed by `sync-on-error`.
+
+**Two syncs of the same realm can overlap.** Keycloak locks a component
+before a sync starts. That lock's expiry does not grow with the run's
+length, so it can expire long before a long run ends. A second scheduled or
+admin-triggered sync can then start on the same component while the first is
+still running. A run that stops because a page cannot commit, with no
+throttle streak and no `sync-on-error` stop logged, is the likely sign of
+this.
+
+**What to check on the first run after upgrading.** A few behaviors change
+without any configuration change:
+
+- Service accounts stop being refreshed. Check whether any deployment relied
+  on that.
+- Refresh stops importing directory users it has never seen. On any realm
+  that relied on refresh to pull new users in, confirm LDAP synchronization
+  is scheduled and the `scim-ldap-sync` mapper is attached.
+- The sync result's `updated` count may fall on realms using `scim-skip` or
+  `propagation-role`. What is actually propagated does not change.
+- A refresh that stops before finishing the realm's users now reports a
+  failure, with the reason in the log. Check the log, not only the result
+  counters.
 
 ### PATCH vs PUT preferences
 
@@ -578,12 +685,20 @@ Tunables read from `System.getProperty(...)` at runtime. Set via
 
 ## What's NOT configurable (by design)
 
-- **Retry policy.** `ScimClient` retries on `ProcessingException` and
-  `IORuntimeException` (network-level errors), max 10 attempts with
-  exponential backoff starting at 500 ms. Hardcoded — tunable knobs
-  for this would invite per-deployment drift without a clear win.
-- **HTTP timeouts.** Connect / request / socket all 30 s. Hardcoded
-  in `ScimClient.genScimClientConfig`.
+- **Retry policy.** `ScimClient` retries `ProcessingException` and
+  `IORuntimeException` (network-level errors), plus 429 and 5xx responses.
+  Calls outside a sync make up to 10 attempts, with exponential backoff
+  starting at 500 ms and no cap. This covers events, the LDAP mapper, the
+  bulk lane, and the reconciler. Every part of a sync makes up to 3 attempts
+  instead. That covers import, `sync-refresh` pages, and group refresh.
+  Its backoff also starts at 500 ms, but is capped at 5 s. The smaller
+  budget keeps one failing resource from holding a sync transaction open for
+  minutes. Hardcoded. Tunable knobs for this would invite per-deployment
+  drift without a clear win.
+- **HTTP timeouts.** Interactive calls, import, and group refresh use 30 s
+  for connect, request, and socket, in `ScimClient.genScimClientConfig`. A
+  `sync-refresh` page uses shorter timeouts instead. See "How sync-refresh
+  pages through users" above for the values.
 - **`/Bulk` scope.** SCIM `/Bulk` batching is available for the
   federation-sync user **create** path only (opt-in via the
   `bulk-enabled` component flag; see above). Replace, delete, and
