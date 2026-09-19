@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -99,10 +100,12 @@ class ScimSyncLoopTest {
         doThrow(new InconsistentScimMappingException("bad mapping"))
             .doNothing()
             .when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
 
-        client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
+        client.refreshResources(twoResourceFactory(first, second), syncRes);
 
         verify(client, times(2)).create(any(), any());
+        assertThat(syncRes.getFailed()).isEqualTo(1);
     }
 
     /** AUTO policy: 429 throttled failure on resource 1 → skip, resource 2 still attempted. */
@@ -184,7 +187,7 @@ class ScimSyncLoopTest {
     }
 
     // -----------------------------------------------------------------------
-    // Task 2 — refreshOne must not count a skipped resource as updated
+    // refreshOne must not count a skipped resource as updated
     // -----------------------------------------------------------------------
 
     /** A user excluded by scim-skip or propagation-role is neither pushed nor counted. */
@@ -208,10 +211,16 @@ class ScimSyncLoopTest {
         client.refreshResources(factory, syncRes);
 
         assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isZero();
         verify(client, never()).create(any(), any());
     }
 
-    /** A mapped user excluded by scim-skip or propagation-role is not replaced either. */
+    /**
+     * A mapped user excluded by scim-skip or propagation-role is not replaced
+     * either. The skip check in refreshOne returns before getMapping() is
+     * consulted, so this stubs a mapping precisely to guard against that check
+     * ever moving below the mapping branch.
+     */
     @Test
     @SuppressWarnings("unchecked")
     void skippedMappedResource_isNotReplacedOrCountedAsUpdated() {
@@ -232,6 +241,45 @@ class ScimSyncLoopTest {
         client.refreshResources(factory, syncRes);
 
         assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isZero();
         verify(client, never()).replace(any(), any());
+    }
+
+    /**
+     * A skipped resource must not stop the loop or swallow the next one: the
+     * first of two resources is excluded, and the second is still pushed and
+     * counted. This is the contract the paged refresh runner depends on.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedResource_doesNotBlockSubsequentPush() {
+        var client = spy(newClient());
+        TestModel skipped = mock(TestModel.class);
+        TestModel pushed = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(null);
+            when(a.getResourceStream()).thenReturn(Stream.of(skipped, pushed));
+            // refreshOne calls apply(resource) before checking adapter.skip, so
+            // derive skip from the resource actually applied rather than from
+            // which factory.create() call this is — the factory is also invoked
+            // for bookkeeping (getType/getResourceStream) before either resource
+            // is processed.
+            doAnswer(inv -> {
+                a.skip = inv.getArgument(0) == skipped;
+                return null;
+            }).when(a).apply(any(TestModel.class));
+            return a;
+        };
+        doNothing().when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        verify(client, times(1)).create(any(), any());
+        assertThat(syncRes.getUpdated()).isEqualTo(1);
+        assertThat(syncRes.getFailed()).isZero();
     }
 }

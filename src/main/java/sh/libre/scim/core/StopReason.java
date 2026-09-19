@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 /** Why a unit of batch-sync work ended early, if it did. */
+// package-private: shared by the paged user path and the unpaged group path
 enum StopReason {
     /** Ran to completion. */
     NONE,
