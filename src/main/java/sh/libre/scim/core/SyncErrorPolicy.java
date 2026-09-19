@@ -24,6 +24,19 @@ public enum SyncErrorPolicy {
         };
     }
 
+    /**
+     * Whether the batch run should abort after a push that did nothing and
+     * raised nothing.
+     *
+     * <p>There is no exception to classify here, so {@code auto} cannot judge
+     * the category. It treats the failure as permanent and goes on, as it does
+     * for a bad mapping. Only an operator who asked to stop on any failure
+     * stops the run.
+     */
+    public boolean shouldStopRunOnSilentFailure() {
+        return this == STOP;
+    }
+
     /** Unknown or {@code null} values default to {@link #AUTO}. */
     public static SyncErrorPolicy fromConfig(String value) {
         if (value == null) return AUTO;

@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -417,13 +418,11 @@ class ScimSyncLoopTest {
     }
 
     /**
-     * The replace call logs a fault of its own and returns. The resource never
-     * reached the endpoint, so the run must not report it as updated.
+     * An adapter for the mapped path whose mapping query breaks. The replace
+     * call logs that fault, raises nothing, and pushes nothing.
      */
-    @Test
     @SuppressWarnings("unchecked")
-    void refreshOne_replaceThatPushedNothing_countsFailed() {
-        var client = newClient();
+    private Adapter<TestModel, User> mappedAdapterThatCannotPush() {
         Adapter<TestModel, User> a = mock(Adapter.class);
         a.skip = false;
         when(a.getType()).thenReturn("User");
@@ -431,14 +430,54 @@ class ScimSyncLoopTest {
         when(a.skipRefresh()).thenReturn(false);
         when(a.getMapping()).thenReturn(new ScimResource());
         when(a.query("findById", "u1")).thenThrow(new IllegalStateException("the mapping query broke"));
+        return a;
+    }
+
+    /**
+     * The replace call logs a fault of its own and returns. The resource never
+     * reached the endpoint, so the run must not report it as updated.
+     */
+    @Test
+    void refreshOne_replaceThatPushedNothing_countsFailed() {
+        var client = newClient();
+        var adapter = mappedAdapterThatCannotPush();
         var syncRes = new SynchronizationResult();
 
         var outcome = client.refreshOne(
-            (session, componentId) -> a, mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
+            (session, componentId) -> adapter, mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
 
         assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
         assertThat(syncRes.getUpdated()).isZero();
         assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /**
+     * The operator asked the run to stop on any failure. A push that pushed
+     * nothing is a failure, so it must stop the run like any other.
+     */
+    @Test
+    void refreshOne_pushedNothingUnderStopPolicy_returnsStop() {
+        var client = newClient("stop");
+        var adapter = mappedAdapterThatCannotPush();
+        var syncRes = new SynchronizationResult();
+
+        var outcome = client.refreshOne(
+            (session, componentId) -> adapter, mock(TestModel.class), syncRes, SyncErrorPolicy.STOP);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.STOP);
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /** The CONTINUE policy goes on to the next resource, as it does for any failure. */
+    @Test
+    void refreshOne_pushedNothingUnderContinuePolicy_returnsContinue() {
+        var client = newClient("continue");
+        var adapter = mappedAdapterThatCannotPush();
+
+        var outcome = client.refreshOne((session, componentId) -> adapter, mock(TestModel.class),
+            new SynchronizationResult(), SyncErrorPolicy.CONTINUE);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
     }
 
     /**
@@ -468,7 +507,7 @@ class ScimSyncLoopTest {
      * so a second pass halves how many users fit in a page.
      */
     @Test
-    void refreshOne_appliesTheModelOnceAndBuildsOneAdapter() {
+    void refreshOne_createBranch_appliesTheModelOnceAndBuildsOneAdapter() {
         var client = newClient();
         var adapter = unmappedAdapter(List.of(new ScimResource()));
         var built = new AtomicInteger();
@@ -478,6 +517,52 @@ class ScimSyncLoopTest {
 
         verify(adapter, times(1)).apply(any(TestModel.class));
         assertThat(built.get()).isEqualTo(1);
+    }
+
+    /**
+     * A steady-state sync replaces every user, so this is the branch where the
+     * second apply cost the page most of its budget.
+     */
+    @Test
+    void refreshOne_replaceBranch_appliesTheModelOnceAndBuildsOneAdapter() {
+        var client = newClient();
+        var adapter = mappedAdapterThatCannotPush();
+        var built = new AtomicInteger();
+
+        client.refreshOne(sharedFactory(adapter, built), mock(TestModel.class),
+            new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        verify(adapter, times(1)).apply(any(TestModel.class));
+        assertThat(built.get()).isEqualTo(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // the applied push methods refuse an excluded resource
+    // -----------------------------------------------------------------------
+
+    /** Pushing an excluded resource cannot be undone at the endpoint, so it must fail loudly. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void createApplied_excludedResource_throws() {
+        var client = newClient();
+        Adapter<TestModel, User> adapter = mock(Adapter.class);
+        adapter.skip = true;
+        when(adapter.getId()).thenReturn("u1");
+
+        assertThatThrownBy(() -> client.createApplied(adapter))
+            .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void replaceApplied_excludedResource_throws() {
+        var client = newClient();
+        Adapter<TestModel, User> adapter = mock(Adapter.class);
+        adapter.skip = true;
+        when(adapter.getId()).thenReturn("u1");
+
+        assertThatThrownBy(() -> client.replaceApplied(adapter))
+            .isInstanceOf(IllegalStateException.class);
     }
 
     /**

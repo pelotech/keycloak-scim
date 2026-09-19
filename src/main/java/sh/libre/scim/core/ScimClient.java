@@ -288,6 +288,9 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(
             AdapterFactory<M, S, A> factory, M kcModel) {
+        // This timing covers the adapter build and the apply. The sync path
+        // times the apply alone, in refreshOne, because it builds the adapter
+        // before it knows which push it needs.
         long t0 = System.nanoTime();
         var adapter = getAdapter(factory);
         adapter.apply(kcModel);
@@ -299,17 +302,35 @@ public class ScimClient {
     }
 
     /**
+     * Fails when the caller asks to push a resource the operator excluded.
+     *
+     * <p>A push cannot be undone at the endpoint, so a caller that forgets the
+     * flag leaks data. It must fail before the request, not after it.
+     *
+     * @throws IllegalStateException if the adapter is flagged to skip
+     */
+    private static void requireNotSkipped(Adapter<?, ?> adapter, String op) {
+        if (Boolean.TRUE.equals(adapter.skip)) {
+            throw new IllegalStateException(
+                op + " of " + adapter.getId() + ": this resource is excluded and must not be pushed");
+        }
+    }
+
+    /**
      * Creates the resource that {@code adapter} already holds.
      *
-     * <p>The caller must have applied the local model to the adapter and must
-     * have honoured {@code adapter.skip}. Applying a model is expensive, so the
-     * sync path applies once and calls this method.
+     * <p>The caller must have applied the local model to the adapter. Applying
+     * a model is expensive, so the sync path applies once and calls this
+     * method.
      *
-     * @return true when this call pushed the resource to the endpoint
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it found nothing to push
+     * @throws IllegalStateException if the adapter is flagged to skip
      * @throws ScimPropagationException if the push failed
      */
     // package-private: the sync path applies the model itself
     <S extends ResourceNode> boolean createApplied(Adapter<?, S> adapter) {
+        requireNotSkipped(adapter, "create");
         // A mapping from a prior import or provision means there is nothing to
         // create. Unless it's a deactivation tombstone: then the user has come
         // back, so replace() pushes active from isEnabled() to the same remote
@@ -506,35 +527,42 @@ public class ScimClient {
         var adapter = getAdapter(factory);
         // The model is applied inside the span, so a fault there is traced and
         // handled the way it always has been.
-        replaceApplied(adapter, () -> adapter.apply(kcModel));
+        replaceBody(adapter, () -> adapter.apply(kcModel));
     }
 
     /**
      * Replaces the resource that {@code adapter} already holds.
      *
-     * <p>The caller must have applied the local model to the adapter and must
-     * have honoured {@code adapter.skip}. Applying a model is expensive, so the
-     * sync path applies once and calls this method.
+     * <p>The caller must have applied the local model to the adapter. Applying
+     * a model is expensive, so the sync path applies once and calls this
+     * method.
      *
-     * @return true when this call pushed the resource to the endpoint
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it pushed nothing and logged the reason
+     * @throws IllegalStateException if the adapter is flagged to skip
      * @throws ScimPropagationException if the push failed
      */
     // package-private: the sync path applies the model itself
     <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter) {
-        return replaceApplied(adapter, () -> {});
+        requireNotSkipped(adapter, "replace");
+        return replaceBody(adapter, () -> {});
     }
 
     /**
      * The body of a replace. {@code applyModel} carries the work the public
      * entry point must still do, so both entry points share one span and one
-     * set of error handlers.
+     * set of error handlers. An applied adapter passes an empty step.
      *
      * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
      */
-    private <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter, Runnable applyModel) {
+    // package-private so the membership path and its test can reach it
+    <S extends ResourceNode> boolean replaceBody(Adapter<?, S> adapter, Runnable applyModel) {
         try (var span = TRACING.startSpan("scim.replace", adapter.getType(), scimApplicationBaseUrl)) {
             try {
                 applyModel.run();
+                // Only a caller that applies the model here can find this flag.
+                // A caller with an applied adapter is stopped before this point.
                 if (adapter.skip) {
                     return false;
                 }
@@ -797,8 +825,9 @@ public class ScimClient {
      *
      * @return {@code true} if applied; {@code false} if it couldn't be applied this
      *     import because the group or user mapping isn't committed yet (lazy-import
-     *     lag). {@code false} is the self-heal signal — the caller retries next
-     *     import — so hard failures throw rather than return it.
+     *     lag), or because the fallback replace pushed nothing. {@code false} is
+     *     the self-heal signal — the caller retries next import — so hard failures
+     *     throw rather than return it.
      * @throws ScimPropagationException on a hard failure (non-2xx after retries, or
      *     a transport-level failure, both transient).
      */
@@ -824,8 +853,10 @@ public class ScimClient {
                 }
                 return true;
             }
-            this.replace(factory, group);
-            return true;
+            var groupAdapter = getAdapter(factory);
+            // Report what the push did. A replace that pushed nothing leaves
+            // the membership unpropagated, and the caller retries it.
+            return replaceBody(groupAdapter, () -> groupAdapter.apply(group));
         }
 
         var adapter = getAdapter(factory);
@@ -964,7 +995,9 @@ public class ScimClient {
      *
      * <p>Only a push that reached the endpoint counts as updated. A push that
      * did not happen counts as failed, even when the client logged the cause
-     * and raised nothing.
+     * and raised nothing. Such a failure has no exception to classify, so the
+     * policy decides on it through
+     * {@link SyncErrorPolicy#shouldStopRunOnSilentFailure()}.
      *
      * <p>The model is applied once, here. The push methods take the adapter
      * this method already applied, because applying it again is expensive.
@@ -984,6 +1017,9 @@ public class ScimClient {
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
         var adapter = getAdapter(factory);
         try {
+            // This timing covers the apply alone. The create entry point times
+            // the adapter build with it, so the two figures are close but not
+            // the same span of work.
             long t0 = System.nanoTime();
             adapter.apply(resource);
             long applyNanos = System.nanoTime() - t0;
@@ -1006,21 +1042,33 @@ public class ScimClient {
                 return RefreshOutcome.CONTINUE;
             }
             boolean pushed;
+            String branch;
             if (mapping == null) {
                 LOGGER.info("Creating it");
                 // The meter reports the cost of a create, so only this branch
                 // adds the apply it paid for.
                 ScimClientMetrics.APPLY_MODEL_NANOS.add(applyNanos);
+                branch = "create";
                 pushed = createApplied(adapter);
             } else {
                 LOGGER.info("Replacing it");
+                branch = "replace";
                 pushed = replaceApplied(adapter);
             }
             if (!pushed) {
                 // The push did not happen and raised nothing. Count it as a
                 // failure, or the run reports work the endpoint never saw.
-                LOGGER.warnf("SCIM sync: resource %s was not pushed and reported no error", adapter.getId());
+                // Name the branch, because its own error line carries no
+                // resource id.
+                LOGGER.warnf("SCIM sync: the %s of resource %s pushed nothing and reported no error",
+                    branch, adapter.getId());
                 syncRes.increaseFailed();
+                // There is no exception to classify, so ask the policy about a
+                // failure of this kind.
+                if (policy.shouldStopRunOnSilentFailure()) {
+                    LOGGER.errorf("SCIM sync aborted after resource %s pushed nothing", adapter.getId());
+                    return RefreshOutcome.STOP;
+                }
                 return RefreshOutcome.CONTINUE;
             }
             syncRes.increaseUpdated();
