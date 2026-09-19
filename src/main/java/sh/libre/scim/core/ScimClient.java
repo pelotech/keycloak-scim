@@ -895,6 +895,10 @@ public class ScimClient {
             // Use a plain for-loop (not forEach) so a returned
             // RefreshOutcome.STOP can stop the whole run instead of just
             // skipping one lambda call.
+            // This path drops RefreshOutcome.THROTTLED, so a throttling
+            // endpoint makes it walk the whole tree. Groups accept that,
+            // because a realm holds few groups. The throttle-streak guard
+            // protects the user population, which is large.
             for (var resource : getAdapter(factory).getResourceStream().toList()) {
                 if (refreshOne(factory, resource, syncRes, policy) == RefreshOutcome.STOP) {
                     return;

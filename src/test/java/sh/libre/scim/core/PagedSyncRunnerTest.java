@@ -17,10 +17,11 @@ import org.keycloak.storage.user.SynchronizationResult;
  */
 class PagedSyncRunnerTest {
 
-    /** Replays scripted outcomes and records the cursor each page was given. */
+    /** Replays scripted outcomes and records what each page was asked for. */
     private static final class ScriptedStep implements PageStep<String> {
         private final Deque<PageOutcome<String>> outcomes;
         final List<String> cursorsSeen = new ArrayList<>();
+        final List<Integer> sizesSeen = new ArrayList<>();
 
         ScriptedStep(List<PageOutcome<String>> outcomes) {
             this.outcomes = new ArrayDeque<>(outcomes);
@@ -34,6 +35,7 @@ class PagedSyncRunnerTest {
         @Override
         public PageOutcome<String> run(String cursor, int size) {
             cursorsSeen.add(cursor);
+            sizesSeen.add(size);
             if (outcomes.isEmpty()) {
                 throw new AssertionError("runner asked for a page past the end of the script");
             }
@@ -129,6 +131,104 @@ class PagedSyncRunnerTest {
 
         assertThatThrownBy(() -> PagedSyncRunner.run(step, 2, new SynchronizationResult()))
             .isInstanceOf(IllegalStateException.class);
+    }
+
+    /**
+     * The first page can stop the run. Every other stop test runs a normal page
+     * first, so a runner that judged stops only from the second page would pass
+     * them.
+     */
+    @Test
+    void stopsOnAPolicyStopOnTheFirstPage() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("b", true, false, updated(1), StopReason.POLICY),
+            page("c", 1)));
+        var result = new SynchronizationResult();
+
+        PagedSyncRunner.run(step, 2, result);
+
+        assertThat(step.cursorsSeen).containsExactly((String) null);
+        assertThat(result.getUpdated()).isEqualTo(1);
+    }
+
+    /**
+     * A budget stop with no progress ends the run without a failure. The next
+     * sync starts the page again.
+     */
+    @Test
+    void stopsWithoutFailingWhenTheBudgetRanOutBeforeAnyProgress() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>(null, false, false, new SynchronizationResult(), StopReason.PAGE_BUDGET)));
+
+        PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(step.cursorsSeen).containsExactly((String) null);
+    }
+
+    /** Work that committed before the abort must survive the abort. */
+    @Test
+    void mergesTheCountersOfEveryPageBeforeANoProgressAbort() {
+        var step = new ScriptedStep(List.of(
+            page("b", 2),
+            new PageOutcome<>("b", false, false, updated(1), StopReason.NONE)));
+        var result = new SynchronizationResult();
+
+        assertThatThrownBy(() -> PagedSyncRunner.run(step, 2, result))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(result.getUpdated()).isEqualTo(3);
+    }
+
+    /** The cursor is the operator's only clue about where the run stalled. */
+    @Test
+    void theNoProgressFailureNamesTheCursor() {
+        var step = new ScriptedStep(List.of(
+            page("b", 1),
+            new PageOutcome<>("b", false, false, new SynchronizationResult(), StopReason.NONE)));
+
+        assertThatThrownBy(() -> PagedSyncRunner.run(step, 2, new SynchronizationResult()))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("b");
+    }
+
+    @Test
+    void asksTheStepForThePageSizeItWasGiven() {
+        var step = new ScriptedStep(List.of(page("b", 1), lastPage("c", 1)));
+
+        PagedSyncRunner.run(step, 7, new SynchronizationResult());
+
+        assertThat(step.sizesSeen).containsExactly(7, 7);
+    }
+
+    @Test
+    void rejectsAPageSizeBelowOne() {
+        var step = new ScriptedStep(List.of());
+
+        assertThatThrownBy(() -> PagedSyncRunner.run(step, 0, new SynchronizationResult()))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(step.cursorsSeen).isEmpty();
+    }
+
+    /**
+     * A step that claims progress but returns the cursor it was given breaks the
+     * contract. The runner warns and goes on, because only the step can tell
+     * whether the source really moved.
+     */
+    @Test
+    void goesOnWhenAStepRepeatsTheCursorItWasGiven() {
+        var step = new ScriptedStep(List.of(page(null, 1), lastPage("c", 1)));
+
+        PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(step.cursorsSeen).containsExactly(null, null);
+    }
+
+    /** The runner dereferences the counters, so a page must always supply them. */
+    @Test
+    void aPageOutcomeRejectsNullCounters() {
+        assertThatThrownBy(() -> new PageOutcome<>("b", true, false, null, StopReason.NONE))
+            .isInstanceOf(NullPointerException.class);
     }
 
     @Test
