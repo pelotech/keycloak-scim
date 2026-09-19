@@ -135,6 +135,23 @@ unbounded growth contributes about 37 seconds of sleeping over ten attempts, and
 capping it at 5s holds the backoff contribution to roughly 2.4 seconds over
 four. Four attempts still rides out a brief blip, which two would not.
 
+**A sync page uses shorter HTTP timeouts.** The attempt count is not what
+dominates a stuck resource; the per-attempt HTTP timeouts are. At 30s to
+connect and 30s per read, four attempts still allow about 242 seconds for one
+resource, well past a 45-second page. A client built for a sync page therefore
+uses 5 seconds for connect, request and socket, which holds one resource to
+about 42 seconds: four attempts of 10 seconds, plus 2.4 seconds of backoff.
+Every other caller keeps 30 seconds, because an interactive call has no page to
+fit inside.
+
+Five seconds is about twenty times the observed per-user push time of 0.23
+seconds, so normal traffic is unaffected. A deployment whose endpoint answers
+writes more slowly than five seconds will see those writes fail during a sync
+while they still succeed elsewhere, which is the first thing to check if
+failures rise after this change. The socket timeout is per read, so a server
+that sends a byte every four seconds still holds an attempt open; the bound is
+a normal worst case, not a guarantee.
+
 **Sizing guidance, not a guarantee.** Let `P` be the page wall-clock bound and `T`
 the transaction timeout. The page step starts its clock before the fetch, so `P`
 covers the fetch as well as the resources, and it checks the clock between
@@ -529,6 +546,14 @@ This pairs with the smaller retry budget. Four attempts ride out a blip; a
 sustained throttle then skips the resource and the run carries on, rather than
 discarding the remaining pages.
 
+**A long streak of throttles stops the run.** If `AUTO` never stops on 429, an
+endpoint that throttles every request makes the run walk the whole population.
+Each user costs its four attempts and its backoff, and almost nothing is
+pushed. The step counts throttled failures in a row. One page of them in a row
+means the endpoint is not available to this run, so the run stops with the
+reason recorded. Any push, skip, or failure of another kind resets the count.
+The count carries across pages, because the step lives for the whole run.
+
 A stop raised mid-page commits what that page has done. Those records
 succeeded, and discarding them would reproduce the original problem at smaller
 scale.
@@ -563,7 +588,10 @@ Several behaviours change the moment the new version is deployed, and none of
 them depends on a configuration change:
 
 - The sync-path retry budget drops from 10 attempts to 4 with a capped interval.
-- `AUTO` no longer stops a run on 429.
+- A sync page uses 5-second HTTP timeouts instead of 30. Other paths are
+  unchanged.
+- `AUTO` no longer stops a run on 429, but one page of consecutive 429s stops
+  the run.
 - Refresh commits per page rather than per run, which also narrows the orphan
   window.
 - Refresh no longer imports directory users that were never imported.
@@ -588,6 +616,11 @@ in. Where directory removals matter, confirm the reconciler is enabled.
 3. Compare the run's duration with the transaction timeout and record the
    headroom. Enumeration no longer dominates the run, so the duration should
    fall, but the timeout still has to exceed it.
+4. Check the first run after deployment for two new failure modes. Writes that
+   time out at 5 seconds show the endpoint is slower than the new sync-page
+   timeout; raise it or investigate the endpoint. A run that stops with the
+   throttle-streak reason shows the endpoint rate-limited a whole page in a
+   row.
 
 The timeout cannot be lowered, for the reason measured under "What the outer
 transaction does". Should a run exceed it anyway, the sync is reported as failed
