@@ -7,13 +7,11 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 /**
  * Drives a {@link PageStep} page by page. It passes each outcome's cursor to
- * the next page and merges the counters of each page that kept its
- * work. It stops on a policy stop,
- * on a throttle streak, on a failed page transaction, or when the step reports
- * its source exhausted. It fails
- * the run when a page reports no progress and gives no reason for it. It infers
- * nothing about position or completion itself, because only the step knows how
- * its source behaves.
+ * the next page and merges the counters after each page. It stops on a policy
+ * stop, on a throttle streak, on a failed page transaction, or when the step
+ * reports its source exhausted. It fails the run when a page reports no
+ * progress and gives no reason for it. It infers nothing about position or
+ * completion itself, because only the step knows how its source behaves.
  */
 final class PagedSyncRunner {
 
@@ -46,9 +44,14 @@ final class PagedSyncRunner {
                 throw e;
             }
             // Merge after the page returns. A page that throws keeps no
-            // committed rows, so it must add no counts. A page that reports a
-            // failed transaction keeps nothing either, so it is dropped too.
-            if (outcome.stopReason() != StopReason.TRANSACTION_FAILED) {
+            // committed rows, so it must add no counts.
+            if (outcome.stopReason() == StopReason.TRANSACTION_FAILED) {
+                // The rollback undid the pushes, so the updated count would
+                // report work the database threw away. The failures still
+                // happened, and this result is the only place besides the log
+                // where an operator sees them.
+                syncRes.setFailed(syncRes.getFailed() + outcome.counters().getFailed());
+            } else {
                 syncRes.add(outcome.counters());
             }
             if (endsTheRun(outcome)) {

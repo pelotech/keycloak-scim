@@ -57,6 +57,18 @@ class SyncErrorPolicyTest {
         assertThat(SyncErrorPolicy.CONTINUE.shouldStopRun(throttled())).isFalse();
     }
 
+    /**
+     * A push that did nothing and raised nothing has no exception to
+     * classify. Only the operator's choice to stop on any failure stops the
+     * run. AUTO treats it like a permanent failure and goes on.
+     */
+    @Test
+    void onlyStopPolicyStopsOnASilentFailure() {
+        assertThat(SyncErrorPolicy.AUTO.shouldStopRunOnSilentFailure()).isFalse();
+        assertThat(SyncErrorPolicy.CONTINUE.shouldStopRunOnSilentFailure()).isFalse();
+        assertThat(SyncErrorPolicy.STOP.shouldStopRunOnSilentFailure()).isTrue();
+    }
+
     @Test
     void autoStopsOnTransportFailure() {
         var transportFailure = InvalidResponseFromScimEndpointException.transport("refused", new RuntimeException());

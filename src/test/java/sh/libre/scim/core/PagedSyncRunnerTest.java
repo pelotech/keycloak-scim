@@ -132,11 +132,12 @@ class PagedSyncRunnerTest {
     }
 
     /**
-     * A page that cannot commit keeps nothing, so its counters describe work
-     * the database rolled back. The runner must drop them.
+     * A page that cannot commit keeps none of its pushes, so its updated count
+     * describes work the database rolled back. Its failures still happened, and
+     * the result is the only place besides the log where they show.
      */
     @Test
-    void dropsTheCountersOfAPageThatCannotCommit() {
+    void keepsOnlyTheFailuresOfAPageThatCannotCommit() {
         var rolledBack = new SynchronizationResult();
         rolledBack.setUpdated(2);
         rolledBack.setFailed(1);
@@ -149,7 +150,7 @@ class PagedSyncRunnerTest {
 
         assertThat(step.cursorsSeen).containsExactly(null, "b");
         assertThat(result.getUpdated()).isEqualTo(3);
-        assertThat(result.getFailed()).isZero();
+        assertThat(result.getFailed()).isEqualTo(1);
     }
 
     @Test
