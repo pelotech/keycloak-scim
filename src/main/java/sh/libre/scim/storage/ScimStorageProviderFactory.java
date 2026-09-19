@@ -11,7 +11,6 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.component.ComponentValidationException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
-import org.keycloak.models.KeycloakSessionTask;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.PostMigrationEvent;
 import org.keycloak.provider.ProviderConfigProperty;
@@ -22,10 +21,8 @@ import org.keycloak.storage.user.ImportSynchronization;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.ExtensionAttributeMappings;
-import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.OAuthClientCredentialsTokenSource;
-import sh.libre.scim.core.ScimDispatcher;
-import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.core.ScimSync;
 import sh.libre.scim.reconcile.ReconcilerConfigValidator;
 import sh.libre.scim.reconcile.ReconcilerScheduler;
 
@@ -33,7 +30,7 @@ import de.captaingoldfish.scim.sdk.common.constants.HttpHeader;
 
 public class ScimStorageProviderFactory
         implements UserStorageProviderFactory<ScimStorageProvider>, ImportSynchronization {
-    final private Logger LOGGER = Logger.getLogger(ScimStorageProviderFactory.class);
+    private static final Logger LOGGER = Logger.getLogger(ScimStorageProviderFactory.class);
     public final static String ID = "scim";
 
     public static final String RECONCILER_ENABLED = "reconciler-enabled";
@@ -44,6 +41,33 @@ public class ScimStorageProviderFactory
     public static final String SYNC_PAGE_MAX_SECONDS = "sync-page-max-seconds";
     public static final int DEFAULT_SYNC_PAGE_SIZE = 50;
     public static final int DEFAULT_SYNC_PAGE_MAX_SECONDS = 45;
+
+    /**
+     * Reads a whole-number setting that must be greater than zero, and falls
+     * back to {@code fallback} when the stored value cannot serve.
+     *
+     * <p>{@link #validateConfiguration} rejects a bad value on the admin
+     * console and REST paths, but a realm import creates a component without
+     * calling it. A stored value can therefore be anything, and a running sync
+     * must not fail on it.
+     */
+    public static int positiveIntSetting(ComponentModel model, String name, int fallback) {
+        String value = model.get(name);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            if (parsed > 0) {
+                return parsed;
+            }
+        } catch (NumberFormatException e) {
+            // The warning below reports it; the cause adds nothing.
+        }
+        LOGGER.warnf("Component %s has an unusable %s of '%s'; using %d instead",
+            model.getId(), name, value, fallback);
+        return fallback;
+    }
 
     public static String reconcilerTaskName(String componentId) {
         return "scim-reconciler-" + componentId;
@@ -390,27 +414,7 @@ public class ScimStorageProviderFactory
     public SynchronizationResult sync(KeycloakSessionFactory sessionFactory, String realmId,
             UserStorageProviderModel model) {
         LOGGER.info("sync");
-        var result = new SynchronizationResult();
-        KeycloakModelUtils.runJobInTransaction(sessionFactory, new KeycloakSessionTask() {
-
-            @Override
-            public void run(KeycloakSession session) {
-                var realm = session.realms().getRealm(realmId);
-                session.getContext().setRealm(realm);
-                try (var dispatcher = new ScimDispatcher(session)) {
-                    if ("true".equals(model.get("propagation-user"))) {
-                        dispatcher.runOne(model, client -> client.sync(UserAdapter::new, result));
-                    }
-                    if ("true".equals(model.get("propagation-group"))) {
-                        dispatcher.runOne(model, client -> client.sync(GroupAdapter::new, result));
-                    }
-                }
-            }
-
-        });
-
-        return result;
-
+        return ScimSync.run(sessionFactory, realmId, model);
     }
 
     @Override

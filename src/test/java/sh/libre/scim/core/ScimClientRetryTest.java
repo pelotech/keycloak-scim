@@ -150,4 +150,26 @@ class ScimClientRetryTest {
             client.close();
         }
     }
+
+    @Test
+    void forBatchSyncCapsTheAttemptsButKeepsTheDefaultHttpTimeouts() {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "NONE");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId("comp-batch");
+
+        var client = ScimClient.forBatchSync(model, mock(KeycloakSession.class));
+        try {
+            assertThat(client.registry.getDefaultConfig().getMaxAttempts()).isEqualTo(3);
+            var scimClientConfig = client.genScimClientConfig();
+            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(30);
+            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(30);
+            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(30);
+        } finally {
+            client.close();
+        }
+    }
 }

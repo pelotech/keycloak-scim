@@ -139,12 +139,27 @@ public class ScimClient {
             SYNC_PAGE_SOCKET_TIMEOUT_SECONDS);
     }
 
+    /**
+     * A client for the parts of a sync that run as one unit: the import and the
+     * group refresh. It shares the sync page's three-attempt budget, so one
+     * failing resource cannot hold the transaction for minutes.
+     *
+     * <p>It keeps the default HTTP timeouts. The page timeouts are sized for a
+     * single user push. An import first reads the endpoint's whole resource
+     * list, and that one response can take far longer than a push.
+     */
+    static ScimClient forBatchSync(ComponentModel model, KeycloakSession session) {
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig(),
+            DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS,
+            DEFAULT_SOCKET_TIMEOUT_SECONDS);
+    }
+
     /** Retry policy for interactive and event-driven calls. */
     static RetryConfig defaultRetryConfig() {
         return retryConfig(10, IntervalFunction.ofExponentialBackoff());
     }
 
-    /** Retry policy for a sync page: three attempts instead of the default ten. */
+    /** Retry policy for every part of a sync: three attempts instead of the default ten. */
     static RetryConfig syncPageRetryConfig() {
         return retryConfig(3, syncPageInterval());
     }
@@ -1194,26 +1209,6 @@ public class ScimClient {
             } catch (ResponseException e) {
                 throw new RuntimeException(e);
             }
-        }
-    }
-
-    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void sync(
-            AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
-        boolean doImport = this.model.get("sync-import", false);
-        boolean doRefresh = this.model.get("sync-refresh", false);
-        if (!doImport && !doRefresh) {
-            // Both halves are off by default, so a sync triggered from the admin
-            // console or the user-storage REST endpoint otherwise returns an
-            // empty SynchronizationResult and looks like it worked.
-            LOGGER.infof("Sync requested for component %s but sync-import and sync-refresh are both "
-                + "disabled; nothing to do", model.getId());
-            return;
-        }
-        if (doImport) {
-            this.importResources(factory, syncRes);
-        }
-        if (doRefresh) {
-            this.refreshResources(factory, syncRes);
         }
     }
 

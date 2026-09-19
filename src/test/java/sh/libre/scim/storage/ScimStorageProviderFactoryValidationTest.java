@@ -12,6 +12,7 @@ import org.keycloak.models.RealmModel;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -143,5 +144,32 @@ class ScimStorageProviderFactoryValidationTest {
         assertThatThrownBy(() -> validate(modelWithPaging(null, value)))
             .isInstanceOf(ComponentValidationException.class)
             .hasMessageContaining("sync-page-max-seconds");
+    }
+
+    // --- reading a page setting, which validation cannot guarantee ---
+
+    @Test
+    void anUnsetPageSettingReadsAsItsDefault() {
+        var model = modelWithPaging(null, null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(50);
+    }
+
+    @Test
+    void aStoredPageSettingIsRead() {
+        var model = modelWithPaging("200", null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(200);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", "2.5", "99999999999999999999"})
+    void anUnusablePageSettingReadsAsItsDefault(String value) {
+        var model = modelWithPaging(value, null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(50);
     }
 }
