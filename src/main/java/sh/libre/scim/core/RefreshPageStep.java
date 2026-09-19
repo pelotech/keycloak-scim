@@ -149,7 +149,7 @@ final class RefreshPageStep implements PageStep<String> {
                 return new PageOutcome<>(progress.cursor(), progress.progressed(),
                     progress.exhausted(), counters, progress.stopReason());
             } finally {
-                closeQuietly(client);
+                ScimClient.closeQuietly(client);
             }
         });
     }
@@ -161,19 +161,6 @@ final class RefreshPageStep implements PageStep<String> {
      */
     static PageOutcome<String> realmGone(String after) {
         return new PageOutcome<>(after, true, true, new SynchronizationResult(), StopReason.NONE);
-    }
-
-    /**
-     * Closes the page client and keeps any failure out of the transaction. A
-     * throw from close would replace the page outcome and roll back users that
-     * the endpoint has already accepted.
-     */
-    static void closeQuietly(ScimClient client) {
-        try {
-            client.close();
-        } catch (RuntimeException e) {
-            LOGGER.warnf(e, "SCIM sync: the page client did not close cleanly");
-        }
     }
 
     /** Reads up to {@code size} user rows after {@code after}, or from the start when it is null. */

@@ -289,4 +289,80 @@ class PagedSyncRunnerTest {
             .isInstanceOf(IllegalArgumentException.class)
             .hasMessage("page transaction failed");
     }
+
+    // --- what the run reports back ---
+
+    /**
+     * The counters cannot tell a complete run from one that stopped at page 3
+     * of 91, so the caller needs the reason and the cursor.
+     */
+    @Test
+    void aRunThatReachedTheEndReportsNoStopReason() {
+        var step = new ScriptedStep(List.of(page("b", 2), lastPage("e", 1)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.completed()).isTrue();
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(outcome.cursor()).isEqualTo("e");
+    }
+
+    @Test
+    void aPolicyStopIsReportedWithItsCursor() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("c", true, false, updated(1), StopReason.POLICY)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.POLICY);
+        assertThat(outcome.cursor()).isEqualTo("c");
+    }
+
+    @Test
+    void aThrottleStreakIsReportedWithItsCursor() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("c", true, false, updated(1), StopReason.THROTTLE_STREAK)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
+        assertThat(outcome.cursor()).isEqualTo("c");
+    }
+
+    @Test
+    void aFailedPageTransactionIsReportedWithItsCursor() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("c", true, false, new SynchronizationResult(),
+                StopReason.TRANSACTION_FAILED)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.TRANSACTION_FAILED);
+        assertThat(outcome.cursor()).isEqualTo("c");
+    }
+
+    @Test
+    void aBudgetStopBeforeAnyProgressIsReported() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("c", false, false, new SynchronizationResult(), StopReason.PAGE_BUDGET)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.PAGE_BUDGET);
+        assertThat(outcome.cursor()).isEqualTo("c");
+    }
+
+    /** A budget stop that made progress is not terminal; the next page carries on. */
+    @Test
+    void aBudgetStopThatMadeProgressDoesNotEndTheRun() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("b", true, false, updated(1), StopReason.PAGE_BUDGET),
+            lastPage("c", 1)));
+
+        var outcome = PagedSyncRunner.run(step, 2, new SynchronizationResult());
+
+        assertThat(outcome.completed()).isTrue();
+        assertThat(outcome.cursor()).isEqualTo("c");
+    }
 }
