@@ -108,4 +108,41 @@ class ScimClientRetryTest {
             client.close();
         }
     }
+
+    private static ComponentModel componentModel(String id) {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "NONE");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId(id);
+        return model;
+    }
+
+    @Test
+    void defaultClientUsesThirtySecondHttpTimeouts() {
+        var client = new ScimClient(componentModel("comp-default"), mock(KeycloakSession.class));
+        try {
+            var scimClientConfig = client.genScimClientConfig();
+            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(30);
+            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(30);
+            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(30);
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void forSyncPageClientUsesFiveSecondHttpTimeouts() {
+        var client = ScimClient.forSyncPage(componentModel("comp-page-timeouts"), mock(KeycloakSession.class));
+        try {
+            var scimClientConfig = client.genScimClientConfig();
+            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(5);
+            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(5);
+            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(5);
+        } finally {
+            client.close();
+        }
+    }
 }
