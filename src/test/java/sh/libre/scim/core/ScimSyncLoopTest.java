@@ -1,5 +1,6 @@
 package sh.libre.scim.core;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
@@ -20,6 +21,7 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.exceptions.InconsistentScimMappingException;
 import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
+import sh.libre.scim.jpa.ScimResource;
 
 /**
  * Sync batch loop skip/stop behaviour driven by SyncErrorPolicy.
@@ -179,5 +181,57 @@ class ScimSyncLoopTest {
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
         verify(client, times(2)).create(any(), any());
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2 — refreshOne must not count a skipped resource as updated
+    // -----------------------------------------------------------------------
+
+    /** A user excluded by scim-skip or propagation-role is neither pushed nor counted. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedResource_isNotPushedOrCountedAsUpdated() {
+        var client = spy(newClient());
+        TestModel only = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            a.skip = true;
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(null);
+            when(a.getResourceStream()).thenReturn(Stream.of(only));
+            return a;
+        };
+        doNothing().when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        assertThat(syncRes.getUpdated()).isZero();
+        verify(client, never()).create(any(), any());
+    }
+
+    /** A mapped user excluded by scim-skip or propagation-role is not replaced either. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedMappedResource_isNotReplacedOrCountedAsUpdated() {
+        var client = spy(newClient());
+        TestModel only = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            a.skip = true;
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(new ScimResource());
+            when(a.getResourceStream()).thenReturn(Stream.of(only));
+            return a;
+        };
+        doNothing().when(client).replace(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        assertThat(syncRes.getUpdated()).isZero();
+        verify(client, never()).replace(any(), any());
     }
 }
