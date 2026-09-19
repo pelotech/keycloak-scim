@@ -295,6 +295,21 @@ public class ScimClient {
             return;
         }
         ScimClientMetrics.APPLY_MODEL_NANOS.add(System.nanoTime() - t0);
+        createApplied(adapter);
+    }
+
+    /**
+     * Creates the resource that {@code adapter} already holds.
+     *
+     * <p>The caller must have applied the local model to the adapter and must
+     * have honoured {@code adapter.skip}. Applying a model is expensive, so the
+     * sync path applies once and calls this method.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private: the sync path applies the model itself
+    <S extends ResourceNode> boolean createApplied(Adapter<?, S> adapter) {
         // A mapping from a prior import or provision means there is nothing to
         // create. Unless it's a deactivation tombstone: then the user has come
         // back, so replace() pushes active from isEnabled() to the same remote
@@ -303,11 +318,11 @@ public class ScimClient {
         if (!existing.isEmpty()) {
             if (isDeactivatedTombstone(existing)) {
                 LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
-                this.replace(factory, kcModel);
+                return replaceApplied(adapter);
             }
-            return;
+            return false;
         }
-        handleCreateResponse(adapter, postResource(adapter));
+        return handleCreateResponse(adapter, postResource(adapter));
     }
 
     // POSTs the resource to the SCIM target and returns the raw response. Shared
@@ -489,11 +504,39 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
             AdapterFactory<M, S, A> factory, M kcModel) {
         var adapter = getAdapter(factory);
+        // The model is applied inside the span, so a fault there is traced and
+        // handled the way it always has been.
+        replaceApplied(adapter, () -> adapter.apply(kcModel));
+    }
+
+    /**
+     * Replaces the resource that {@code adapter} already holds.
+     *
+     * <p>The caller must have applied the local model to the adapter and must
+     * have honoured {@code adapter.skip}. Applying a model is expensive, so the
+     * sync path applies once and calls this method.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private: the sync path applies the model itself
+    <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter) {
+        return replaceApplied(adapter, () -> {});
+    }
+
+    /**
+     * The body of a replace. {@code applyModel} carries the work the public
+     * entry point must still do, so both entry points share one span and one
+     * set of error handlers.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     */
+    private <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter, Runnable applyModel) {
         try (var span = TRACING.startSpan("scim.replace", adapter.getType(), scimApplicationBaseUrl)) {
             try {
-                adapter.apply(kcModel);
+                applyModel.run();
                 if (adapter.skip) {
-                    return;
+                    return false;
                 }
                 var resource = adapter.query("findById", adapter.getId()).getSingleResult();
                 adapter.apply(resource);
@@ -564,6 +607,7 @@ public class ScimClient {
                     LOGGER.infof("Cleared deactivation flag for %s %s", adapter.getType(), adapter.getId());
                 }
                 span.setHttpStatus(response.getHttpStatus());
+                return true;
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
@@ -577,6 +621,9 @@ public class ScimClient {
             } catch (Exception e) {
                 span.recordError(e);
                 LOGGER.error(e);
+                // The fault is logged and not raised, so only the return value
+                // tells the caller that nothing reached the endpoint.
+                return false;
             }
         }
     }
@@ -915,6 +962,13 @@ public class ScimClient {
      * propagation failure is counted, and returns {@link RefreshOutcome#STOP}
      * when {@code policy} says the run should stop.
      *
+     * <p>Only a push that reached the endpoint counts as updated. A push that
+     * did not happen counts as failed, even when the client logged the cause
+     * and raised nothing.
+     *
+     * <p>The model is applied once, here. The push methods take the adapter
+     * this method already applied, because applying it again is expensive.
+     *
      * @param factory adapter factory for this resource's type
      * @param resource the local resource to reconcile
      * @param syncRes the run's counters; updated in place
@@ -930,7 +984,9 @@ public class ScimClient {
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
         var adapter = getAdapter(factory);
         try {
+            long t0 = System.nanoTime();
             adapter.apply(resource);
+            long applyNanos = System.nanoTime() - t0;
             LOGGER.infof("Reconciling local resource %s", adapter.getId());
             // adapter.skip is a Boolean field; Mockito mocks skip field
             // initializers, so it's null (not the real default of false) on a
@@ -949,12 +1005,23 @@ public class ScimClient {
                 LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
                 return RefreshOutcome.CONTINUE;
             }
+            boolean pushed;
             if (mapping == null) {
                 LOGGER.info("Creating it");
-                this.create(factory, resource);
+                // The meter reports the cost of a create, so only this branch
+                // adds the apply it paid for.
+                ScimClientMetrics.APPLY_MODEL_NANOS.add(applyNanos);
+                pushed = createApplied(adapter);
             } else {
                 LOGGER.info("Replacing it");
-                this.replace(factory, resource);
+                pushed = replaceApplied(adapter);
+            }
+            if (!pushed) {
+                // The push did not happen and raised nothing. Count it as a
+                // failure, or the run reports work the endpoint never saw.
+                LOGGER.warnf("SCIM sync: resource %s was not pushed and reported no error", adapter.getId());
+                syncRes.increaseFailed();
+                return RefreshOutcome.CONTINUE;
             }
             syncRes.increaseUpdated();
             return RefreshOutcome.CONTINUE;
