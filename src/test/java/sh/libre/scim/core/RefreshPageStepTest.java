@@ -1,22 +1,33 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.ConcurrentModificationException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
+import org.keycloak.component.ComponentModel;
+import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.storage.user.SynchronizationResult;
 
 /**
  * Row-loop rules of the refresh page step: the cursor, the exhausted flag, the
- * three stop reasons, and the guard that keeps a raw failure inside the page.
+ * stop reasons, the guard that keeps an isolated fault inside the page, and the
+ * guard that ends a page whose transaction can no longer commit.
  */
 class RefreshPageStepTest {
 
@@ -26,87 +37,95 @@ class RefreshPageStepTest {
         row -> RefreshOutcome.THROTTLED;
     private static final BooleanSupplier WITHIN_BUDGET = () -> false;
     private static final BooleanSupplier OVER_BUDGET = () -> true;
+    /** The page transaction can still commit. */
+    private static final BooleanSupplier HEALTHY = () -> false;
+    /** The page transaction is marked rollback-only. */
+    private static final BooleanSupplier POISONED = () -> true;
 
     private static List<RefreshPageStep.UserRow> rows(String... usernames) {
         return Arrays.stream(usernames).map(u -> new RefreshPageStep.UserRow("id-" + u, u)).toList();
     }
 
-    private static PageOutcome<String> process(String after, int size, List<RefreshPageStep.UserRow> rows,
+    private static RefreshPageStep.Page page(String after, int size, String... usernames) {
+        return new RefreshPageStep.Page(after, size, rows(usernames));
+    }
+
+    private static RefreshPageStep.PageProgress process(RefreshPageStep.Page page,
             Function<RefreshPageStep.UserRow, RefreshOutcome> handle, BooleanSupplier overBudget) {
-        return RefreshPageStep.processRows(after, size, rows, new SynchronizationResult(),
-            new RefreshPageStep.ThrottleStreak(), handle, overBudget);
+        return RefreshPageStep.processRows(page, new RefreshPageStep.ThrottleStreak(), handle,
+            HEALTHY, overBudget);
     }
 
     @Test
     void anEmptyPageIsExhaustedAndKeepsTheCursor() {
-        var outcome = process("m", 2, rows(), PUSHED, WITHIN_BUDGET);
+        var progress = process(page("m", 2), PUSHED, WITHIN_BUDGET);
 
-        assertThat(outcome.exhausted()).isTrue();
-        assertThat(outcome.progressed()).isTrue();
-        assertThat(outcome.next()).isEqualTo("m");
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(progress.exhausted()).isTrue();
+        assertThat(progress.progressed()).isTrue();
+        assertThat(progress.cursor()).isEqualTo("m");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.NONE);
     }
 
     @Test
     void aCompletedShortPageIsExhaustedWithTheCursorAtItsLastUsername() {
-        var outcome = process(null, 3, rows("a", "b"), PUSHED, WITHIN_BUDGET);
+        var progress = process(page(null, 3, "a", "b"), PUSHED, WITHIN_BUDGET);
 
-        assertThat(outcome.exhausted()).isTrue();
-        assertThat(outcome.next()).isEqualTo("b");
+        assertThat(progress.exhausted()).isTrue();
+        assertThat(progress.cursor()).isEqualTo("b");
     }
 
     @Test
     void aCompletedFullPageIsNotExhausted() {
-        var outcome = process(null, 2, rows("a", "b"), PUSHED, WITHIN_BUDGET);
+        var progress = process(page(null, 2, "a", "b"), PUSHED, WITHIN_BUDGET);
 
-        assertThat(outcome.exhausted()).isFalse();
-        assertThat(outcome.progressed()).isTrue();
-        assertThat(outcome.next()).isEqualTo("b");
+        assertThat(progress.exhausted()).isFalse();
+        assertThat(progress.progressed()).isTrue();
+        assertThat(progress.cursor()).isEqualTo("b");
     }
 
     @Test
     void aPageContinuesFromTheCursorItWasGiven() {
-        var outcome = process("b", 2, rows("c", "d"), PUSHED, WITHIN_BUDGET);
+        var progress = process(page("b", 2, "c", "d"), PUSHED, WITHIN_BUDGET);
 
-        assertThat(outcome.next()).isEqualTo("d");
-        assertThat(outcome.progressed()).isTrue();
+        assertThat(progress.cursor()).isEqualTo("d");
+        assertThat(progress.progressed()).isTrue();
     }
 
     @Test
     void aBudgetCutPageIsNotExhaustedEvenWhenShort() {
-        var outcome = process(null, 3, rows("a", "b"), PUSHED, OVER_BUDGET);
+        var progress = process(page(null, 3, "a", "b"), PUSHED, OVER_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.PAGE_BUDGET);
-        assertThat(outcome.exhausted()).isFalse();
-        assertThat(outcome.next()).isEqualTo("a");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.PAGE_BUDGET);
+        assertThat(progress.exhausted()).isFalse();
+        assertThat(progress.cursor()).isEqualTo("a");
     }
 
     @Test
     void aPolicyStopIsNotExhausted() {
-        var outcome = process(null, 3, rows("a", "b"), row -> RefreshOutcome.STOP, WITHIN_BUDGET);
+        var progress = process(page(null, 3, "a", "b"), row -> RefreshOutcome.STOP, WITHIN_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.POLICY);
-        assertThat(outcome.exhausted()).isFalse();
-        assertThat(outcome.next()).isEqualTo("a");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.POLICY);
+        assertThat(progress.exhausted()).isFalse();
+        assertThat(progress.cursor()).isEqualTo("a");
     }
 
     @Test
     void aPolicyStopOutranksTheBudgetStop() {
-        var outcome = process(null, 3, rows("a", "b"), row -> RefreshOutcome.STOP, OVER_BUDGET);
+        var progress = process(page(null, 3, "a", "b"), row -> RefreshOutcome.STOP, OVER_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.POLICY);
+        assertThat(progress.stopReason()).isEqualTo(StopReason.POLICY);
     }
 
     @Test
     void aPageOverBudgetStillHandlesOneRow() {
         var handled = new ArrayList<String>();
 
-        var outcome = process(null, 2, rows("a", "b"),
+        var progress = process(page(null, 2, "a", "b"),
             row -> { handled.add(row.username()); return RefreshOutcome.CONTINUE; }, OVER_BUDGET);
 
         assertThat(handled).containsExactly("a");
-        assertThat(outcome.progressed()).isTrue();
-        assertThat(outcome.next()).isEqualTo("a");
+        assertThat(progress.progressed()).isTrue();
+        assertThat(progress.cursor()).isEqualTo("a");
     }
 
     @Test
@@ -132,13 +151,9 @@ class RefreshPageStepTest {
 
     @Test
     void rowsHandledWithoutAPushStillMoveTheCursor() {
-        var counters = new SynchronizationResult();
+        var progress = process(page(null, 2, "a", "b"), PUSHED, WITHIN_BUDGET);
 
-        var outcome = RefreshPageStep.processRows(null, 2, rows("a", "b"), counters,
-            new RefreshPageStep.ThrottleStreak(), PUSHED, WITHIN_BUDGET);
-
-        assertThat(outcome.next()).isEqualTo("b");
-        assertThat(counters.getUpdated()).isZero();
+        assertThat(progress.cursor()).isEqualTo("b");
     }
 
     @Test
@@ -150,33 +165,70 @@ class RefreshPageStepTest {
         assertThat(RefreshPageStep.overBudget(start, start.plusSeconds(46), budget)).isTrue();
     }
 
+    // --- the budget is a page-level cut, so it is read only when rows remain ---
+
+    @Test
+    void theBudgetIsNotReadAfterTheLastRow() {
+        var checks = new AtomicInteger();
+
+        var progress = process(page(null, 3, "a", "b"), PUSHED,
+            () -> { checks.incrementAndGet(); return false; });
+
+        // One check, between the two rows. None after the last row.
+        assertThat(checks).hasValue(1);
+        assertThat(progress.exhausted()).isTrue();
+    }
+
+    @Test
+    void aShortFinalPagePastTheBudgetIsStillExhausted() {
+        var progress = process(page(null, 3, "a"), PUSHED, OVER_BUDGET);
+
+        // Another transaction would only fetch nothing, so the page must not
+        // ask for one.
+        assertThat(progress.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(progress.exhausted()).isTrue();
+    }
+
+    @Test
+    void aFullPagePastTheBudgetOnItsLastRowJustEnds() {
+        var progress = process(page(null, 1, "a"), PUSHED, OVER_BUDGET);
+
+        assertThat(progress.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(progress.exhausted()).isFalse();
+        assertThat(progress.cursor()).isEqualTo("a");
+    }
+
+    // --- the throttle streak ---
+
     @Test
     void aFullPageOfThrottledUsersStopsTheRun() {
-        var outcome = process(null, 3, rows("a", "b", "c"), THROTTLED, WITHIN_BUDGET);
+        var progress = process(page(null, 3, "a", "b", "c"), THROTTLED, WITHIN_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
-        assertThat(outcome.exhausted()).isFalse();
-        assertThat(outcome.next()).isEqualTo("c");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
+        assertThat(progress.exhausted()).isFalse();
+        assertThat(progress.cursor()).isEqualTo("c");
     }
 
     @Test
     void aThrottleStreakShorterThanThePageDoesNotStopTheRun() {
-        var outcome = process(null, 3, rows("a", "b"), THROTTLED, WITHIN_BUDGET);
+        var progress = process(page(null, 3, "a", "b"), THROTTLED, WITHIN_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.NONE);
-        assertThat(outcome.exhausted()).isTrue();
+        assertThat(progress.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(progress.exhausted()).isTrue();
     }
 
     @Test
     void theThrottleStreakCarriesAcrossPages() {
         var streak = new RefreshPageStep.ThrottleStreak();
 
-        var first = RefreshPageStep.processRows(null, 2, rows("a", "b"), new SynchronizationResult(),
-            streak, THROTTLED, WITHIN_BUDGET);
-        var second = RefreshPageStep.processRows("b", 2, rows("c", "d"), new SynchronizationResult(),
-            streak, THROTTLED, WITHIN_BUDGET);
+        // Two throttles on a short first page. Below the threshold of three.
+        var first = RefreshPageStep.processRows(page(null, 3, "a", "b"), streak, THROTTLED,
+            HEALTHY, WITHIN_BUDGET);
+        // One throttle on the second page. It only reaches three with the carry.
+        var second = RefreshPageStep.processRows(page("b", 3, "c"), streak, THROTTLED,
+            HEALTHY, WITHIN_BUDGET);
 
-        assertThat(first.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
+        assertThat(first.stopReason()).isEqualTo(StopReason.NONE);
         assertThat(second.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
     }
 
@@ -190,6 +242,9 @@ class RefreshPageStepTest {
         // The next throttle is the first in a row again, so it does not stop.
         assertThat(streak.record(RefreshOutcome.THROTTLED, 2)).isFalse();
         assertThat(streak.count()).isEqualTo(1);
+        // A stop outcome also breaks the streak, so the two can never collide.
+        assertThat(streak.record(RefreshOutcome.STOP, 2)).isFalse();
+        assertThat(streak.count()).isZero();
     }
 
     @Test
@@ -197,28 +252,23 @@ class RefreshPageStepTest {
         var streak = new RefreshPageStep.ThrottleStreak();
 
         // Each page throttles its first user and pushes its second one.
-        var first = RefreshPageStep.processRows(null, 2, rows("a", "b"), new SynchronizationResult(),
-            streak, pushOn("b"), WITHIN_BUDGET);
-        var second = RefreshPageStep.processRows("b", 2, rows("c", "d"), new SynchronizationResult(),
-            streak, pushOn("d"), WITHIN_BUDGET);
+        var first = RefreshPageStep.processRows(page(null, 2, "a", "b"), streak, pushOn("b"),
+            HEALTHY, WITHIN_BUDGET);
+        var second = RefreshPageStep.processRows(page("b", 2, "c", "d"), streak, pushOn("d"),
+            HEALTHY, WITHIN_BUDGET);
 
         assertThat(first.stopReason()).isEqualTo(StopReason.NONE);
         assertThat(second.stopReason()).isEqualTo(StopReason.NONE);
     }
 
     @Test
-    void aPolicyStopOutranksTheThrottleStreak() {
-        var outcome = process(null, 1, rows("a"), row -> RefreshOutcome.STOP, WITHIN_BUDGET);
-
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.POLICY);
-    }
-
-    @Test
     void aThrottleStreakOutranksTheBudgetStop() {
-        var outcome = process(null, 1, rows("a"), THROTTLED, OVER_BUDGET);
+        var progress = process(page(null, 1, "a"), THROTTLED, OVER_BUDGET);
 
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
+        assertThat(progress.stopReason()).isEqualTo(StopReason.THROTTLE_STREAK);
     }
+
+    // --- an isolated fault stays inside the page ---
 
     @Test
     void aRawRuntimeFailureIsCountedAndStopsNothing() {
@@ -235,10 +285,10 @@ class RefreshPageStepTest {
     @Test
     void aRawRuntimeFailureLeavesThePageRunningAndResetsTheThrottleStreak() {
         var counters = new SynchronizationResult();
-        var streak = new RefreshPageStep.ThrottleStreak();
         var handled = new ArrayList<String>();
 
-        var outcome = RefreshPageStep.processRows(null, 2, rows("a", "b"), counters, streak,
+        var progress = RefreshPageStep.processRows(page(null, 2, "a", "b"),
+            new RefreshPageStep.ThrottleStreak(),
             row -> {
                 handled.add(row.username());
                 return RefreshPageStep.refreshLoaded(row.id(), row.username(), counters, u -> {
@@ -248,12 +298,106 @@ class RefreshPageStepTest {
                     return RefreshOutcome.THROTTLED;
                 });
             },
-            WITHIN_BUDGET);
+            HEALTHY, WITHIN_BUDGET);
 
         assertThat(handled).containsExactly("a", "b");
-        assertThat(outcome.stopReason()).isEqualTo(StopReason.NONE);
-        assertThat(outcome.next()).isEqualTo("b");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(progress.cursor()).isEqualTo("b");
         assertThat(counters.getFailed()).isEqualTo(1);
+    }
+
+    // --- a page whose transaction can no longer commit ---
+
+    @Test
+    void aPoisonedTransactionEndsThePageAtOnce() {
+        var handled = new ArrayList<String>();
+
+        var progress = RefreshPageStep.processRows(page(null, 3, "a", "b", "c"),
+            new RefreshPageStep.ThrottleStreak(),
+            row -> { handled.add(row.username()); return RefreshOutcome.CONTINUE; },
+            POISONED, WITHIN_BUDGET);
+
+        assertThat(handled).containsExactly("a");
+        assertThat(progress.stopReason()).isEqualTo(StopReason.TRANSACTION_FAILED);
+        assertThat(progress.exhausted()).isFalse();
+    }
+
+    @Test
+    void aSwallowedFailureThatPoisonsTheTransactionStopsThePage() {
+        var counters = new SynchronizationResult();
+        var poisoned = new AtomicBoolean();
+        var handled = new ArrayList<String>();
+
+        var progress = RefreshPageStep.processRows(page(null, 3, "a", "b", "c"),
+            new RefreshPageStep.ThrottleStreak(),
+            row -> {
+                handled.add(row.username());
+                return RefreshPageStep.refreshLoaded(row.id(), row.username(), counters, u -> {
+                    // A duplicate mapping row marks the transaction rollback-only.
+                    poisoned.set(true);
+                    throw new IllegalStateException("constraint violation");
+                });
+            },
+            poisoned::get, WITHIN_BUDGET);
+
+        // The page must not push the other two users into work that cannot commit.
+        assertThat(handled).containsExactly("a");
+        assertThat(counters.getFailed()).isEqualTo(1);
+        assertThat(progress.stopReason()).isEqualTo(StopReason.TRANSACTION_FAILED);
+    }
+
+    @Test
+    void aFailedTransactionOutranksTheBudgetStop() {
+        var progress = RefreshPageStep.processRows(page(null, 3, "a", "b"),
+            new RefreshPageStep.ThrottleStreak(), PUSHED, POISONED, OVER_BUDGET);
+
+        assertThat(progress.stopReason()).isEqualTo(StopReason.TRANSACTION_FAILED);
+    }
+
+    // --- page-level guards ---
+
+    @Test
+    void aPageWhoseRealmIsGoneEndsTheRunCleanly() {
+        var outcome = RefreshPageStep.realmGone("m");
+
+        assertThat(outcome.exhausted()).isTrue();
+        assertThat(outcome.progressed()).isTrue();
+        assertThat(outcome.next()).isEqualTo("m");
+        assertThat(outcome.stopReason()).isEqualTo(StopReason.NONE);
+        assertThat(outcome.counters().getAdded()).isZero();
+        assertThat(outcome.counters().getUpdated()).isZero();
+        assertThat(outcome.counters().getFailed()).isZero();
+    }
+
+    @Test
+    void aFailureToCloseThePageClientStaysOutOfTheTransaction() {
+        var client = mock(ScimClient.class);
+        doThrow(new IllegalStateException("pool already shut down")).when(client).close();
+
+        assertThatCode(() -> RefreshPageStep.closeQuietly(client)).doesNotThrowAnyException();
+        verify(client).close();
+    }
+
+    @Test
+    void aMissingConstructorArgumentFailsAtWiringTime() {
+        var factory = mock(KeycloakSessionFactory.class);
+        var model = new ComponentModel();
+
+        assertThatThrownBy(() -> new RefreshPageStep(null, "realm", model,
+            Duration.ofSeconds(45), Clock.systemUTC()))
+            .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RefreshPageStep(factory, null, model,
+            Duration.ofSeconds(45), Clock.systemUTC()))
+            .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RefreshPageStep(factory, "realm", null,
+            Duration.ofSeconds(45), Clock.systemUTC()))
+            .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RefreshPageStep(factory, "realm", model,
+            null, Clock.systemUTC()))
+            .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new RefreshPageStep(factory, "realm", model,
+            Duration.ofSeconds(45), null))
+            .isInstanceOf(NullPointerException.class);
     }
 
     /** Throttles every row except the named one, which reports a push. */
