@@ -113,6 +113,24 @@ class PagedSyncRunnerTest {
         assertThat(result.getFailed()).isEqualTo(2);
     }
 
+    /**
+     * A page whose transaction can no longer commit ends the run. The page
+     * itself keeps nothing, so the run must not open another one.
+     */
+    @Test
+    void stopsWhenAPageReportsAFailedTransaction() {
+        var step = new ScriptedStep(List.of(
+            page("b", 3),
+            new PageOutcome<>("c", true, false, new SynchronizationResult(),
+                StopReason.TRANSACTION_FAILED)));
+        var result = new SynchronizationResult();
+
+        PagedSyncRunner.run(step, 2, result);
+
+        assertThat(step.cursorsSeen).containsExactly(null, "b");
+        assertThat(result.getUpdated()).isEqualTo(3);
+    }
+
     @Test
     void continuesFromTheCursorAfterABudgetStop() {
         var step = new ScriptedStep(List.of(

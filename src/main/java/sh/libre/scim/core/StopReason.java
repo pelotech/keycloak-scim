@@ -25,5 +25,15 @@ enum StopReason {
      * stopped run when the endpoint throttles a whole page, and the log says
      * why.
      */
-    THROTTLE_STREAK
+    THROTTLE_STREAK,
+    /**
+     * The page transaction is marked rollback-only, so it can no longer commit.
+     * A page reports this as soon as it sees the mark, to stop pushing more
+     * resources to the endpoint that the database will then forget.
+     *
+     * <p>The commit that follows fails as well, so in practice the page throws
+     * and the runner never sees this value. It exists so that the page stops
+     * at the first row instead of at the last one.
+     */
+    TRANSACTION_FAILED
 }

@@ -8,7 +8,8 @@ import org.keycloak.storage.user.SynchronizationResult;
 /**
  * Drives a {@link PageStep} page by page. It passes each outcome's cursor to
  * the next page and merges counters after each page. It stops on a policy stop,
- * on a throttle streak, or when the step reports its source exhausted. It fails
+ * on a throttle streak, on a failed page transaction, or when the step reports
+ * its source exhausted. It fails
  * the run when a page reports no progress and gives no reason for it. It infers
  * nothing about position or completion itself, because only the step knows how
  * its source behaves.
@@ -92,6 +93,13 @@ final class PagedSyncRunner {
             // endpoint throttled the run rather than that a push failed.
             case THROTTLE_STREAK -> {
                 LOGGER.errorf("Paged sync stopped by a throttle streak at cursor %s", outcome.next());
+                yield true;
+            }
+            // The page kept nothing, so another page would only widen the gap
+            // between the endpoint and the database.
+            case TRANSACTION_FAILED -> {
+                LOGGER.errorf("Paged sync stopped: the page transaction at cursor %s cannot commit",
+                    outcome.next());
                 yield true;
             }
         };
