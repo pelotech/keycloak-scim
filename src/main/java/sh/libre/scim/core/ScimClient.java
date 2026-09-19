@@ -892,10 +892,11 @@ public class ScimClient {
         LOGGER.info("Refresh resources");
         SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
-            // Use a plain for-loop (not forEach) so a returned StopReason.POLICY
-            // can stop the whole run instead of just skipping one lambda call.
+            // Use a plain for-loop (not forEach) so a returned
+            // RefreshOutcome.STOP can stop the whole run instead of just
+            // skipping one lambda call.
             for (var resource : getAdapter(factory).getResourceStream().toList()) {
-                if (refreshOne(factory, resource, syncRes, policy) == StopReason.POLICY) {
+                if (refreshOne(factory, resource, syncRes, policy) == RefreshOutcome.STOP) {
                     return;
                 }
             }
@@ -907,20 +908,21 @@ public class ScimClient {
      * replaces it when it does. Resources that are not propagated (the
      * {@code admin} user, {@code scim-skip}, {@code propagation-role}
      * exclusions, deactivated mappings) are left alone and not counted. A
-     * propagation failure is counted, and returns {@link StopReason#POLICY} when
-     * {@code policy} says the run should stop.
+     * propagation failure is counted, and returns {@link RefreshOutcome#STOP}
+     * when {@code policy} says the run should stop.
      *
      * @param factory adapter factory for this resource's type
      * @param resource the local resource to reconcile
      * @param syncRes the run's counters; updated in place
      * @param policy decides whether a propagation failure stops the run
-     * @return {@link StopReason#POLICY} if the caller must stop the run,
-     *     {@link StopReason#NONE} otherwise. Only these two values are
-     *     reachable from this method; a caller that discards the return
-     *     value (e.g. a {@code forEach}) silently drops the policy stop.
+     * @return {@link RefreshOutcome#STOP} if the caller must stop the run,
+     *     {@link RefreshOutcome#THROTTLED} if the endpoint throttled this
+     *     push, {@link RefreshOutcome#CONTINUE} otherwise. A caller that
+     *     discards the return value (e.g. a {@code forEach}) silently drops
+     *     the policy stop and the throttle report.
      */
     // package-private: shared by the paged user path and the unpaged group path
-    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> StopReason refreshOne(
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
         var adapter = getAdapter(factory);
         try {
@@ -932,7 +934,7 @@ public class ScimClient {
             // directly, or a mocked adapter with no explicit skip would NPE.
             if (adapter.skipRefresh() || Boolean.TRUE.equals(adapter.skip)) {
                 LOGGER.debugf("Skipping refresh for excluded resource %s", adapter.getId());
-                return StopReason.NONE;
+                return RefreshOutcome.CONTINUE;
             }
             var mapping = adapter.getMapping();
             if (mapping != null && mapping.getDeactivatedAt() != null) {
@@ -941,7 +943,7 @@ public class ScimClient {
                 // would deactivate it again next pass. Reactivation needs a
                 // re-import or an explicit admin action.
                 LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
-                return StopReason.NONE;
+                return RefreshOutcome.CONTINUE;
             }
             if (mapping == null) {
                 LOGGER.info("Creating it");
@@ -951,17 +953,19 @@ public class ScimClient {
                 this.replace(factory, resource);
             }
             syncRes.increaseUpdated();
-            return StopReason.NONE;
+            return RefreshOutcome.CONTINUE;
         } catch (ScimPropagationException e) {
             LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
                 adapter.getId(), e.getClass().getSimpleName());
             syncRes.increaseFailed();
+            // Test the policy first. Under sync-on-error=stop a throttled push
+            // must also stop the run.
             if (policy.shouldStopRun(e)) {
                 LOGGER.errorf("SCIM sync aborted after %s on resource %s",
                     e.getClass().getSimpleName(), adapter.getId());
-                return StopReason.POLICY;
+                return RefreshOutcome.STOP;
             }
-            return StopReason.NONE;
+            return e.isThrottled() ? RefreshOutcome.THROTTLED : RefreshOutcome.CONTINUE;
         }
     }
 

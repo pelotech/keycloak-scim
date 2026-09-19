@@ -282,4 +282,102 @@ class ScimSyncLoopTest {
         assertThat(syncRes.getUpdated()).isEqualTo(1);
         assertThat(syncRes.getFailed()).isZero();
     }
+
+    // -----------------------------------------------------------------------
+    // refreshOne reports the per-resource outcome
+    // -----------------------------------------------------------------------
+
+    @SuppressWarnings("unchecked")
+    private AdapterFactory<TestModel, User, Adapter<TestModel, User>> oneResourceFactory(boolean skip) {
+        return (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            a.skip = skip;
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(null);
+            return a;
+        };
+    }
+
+    /** A push that works lets the caller go on to the next resource. */
+    @Test
+    void refreshOne_pushedResource_returnsContinue() {
+        var client = spy(newClient());
+        doNothing().when(client).create(any(), any());
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
+    }
+
+    /** An excluded resource is not a throttle and not a stop. */
+    @Test
+    void refreshOne_skippedResource_returnsContinue() {
+        var client = spy(newClient());
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(true), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
+    }
+
+    /** A 429 is reported apart from other failures, so a caller can count streaks. */
+    @Test
+    void refreshOne_throttledFailure_returnsThrottled() {
+        var client = spy(newClient());
+        doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
+            .when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.THROTTLED);
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /** A permanent failure under AUTO is counted, and the caller goes on. */
+    @Test
+    void refreshOne_permanentFailure_returnsContinue() {
+        var client = spy(newClient());
+        doThrow(new InconsistentScimMappingException("bad mapping"))
+            .when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), syncRes, SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.CONTINUE);
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /** A transient failure under AUTO tells the caller to stop the run. */
+    @Test
+    void refreshOne_policyStop_returnsStop() {
+        var client = spy(newClient());
+        doThrow(new InvalidResponseFromScimEndpointException(503, "down"))
+            .when(client).create(any(), any());
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.STOP);
+    }
+
+    /**
+     * The STOP policy outranks the throttle report. A caller that continued on
+     * THROTTLED would ignore the operator's choice to stop on any failure.
+     */
+    @Test
+    void refreshOne_throttledFailureUnderStopPolicy_returnsStop() {
+        var client = spy(newClient("stop"));
+        doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
+            .when(client).create(any(), any());
+
+        var outcome = client.refreshOne(
+            oneResourceFactory(false), mock(TestModel.class), new SynchronizationResult(), SyncErrorPolicy.STOP);
+
+        assertThat(outcome).isEqualTo(RefreshOutcome.STOP);
+    }
 }
