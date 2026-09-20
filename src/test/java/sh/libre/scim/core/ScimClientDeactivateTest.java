@@ -178,13 +178,13 @@ class ScimClientDeactivateTest {
         when(adapter.getMapping()).thenReturn(tombstone);
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory =
             (session, componentId) -> adapter;
-        doReturn(true).when(client).replaceApplied(any());
+        doReturn(true).when(client).replaceApplied(any(), any());
         doReturn(true).when(client).createApplied(any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
-        verify(client, never()).replaceApplied(any());
+        verify(client, never()).replaceApplied(any(), any());
         verify(client, never()).createApplied(any());
         assertThat(syncRes.getUpdated()).isZero();
     }
@@ -200,14 +200,16 @@ class ScimClientDeactivateTest {
         when(adapter.skipRefresh()).thenReturn(false);
         var kcModel = mock(TestModel.class);
         when(adapter.getResourceStream()).thenReturn(Stream.of(kcModel));
-        when(adapter.getMapping()).thenReturn(new ScimResource());
+        var live = new ScimResource();
+        when(adapter.getMapping()).thenReturn(live);
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory =
             (session, componentId) -> adapter;
-        doReturn(true).when(client).replaceApplied(any());
+        doReturn(true).when(client).replaceApplied(any(), any());
 
         client.refreshResources(factory, new SynchronizationResult());
 
-        verify(client).replaceApplied(any());
+        // The replace gets the row the refresh read, so the row is read once.
+        verify(client).replaceApplied(adapter, live);
     }
 
     /**

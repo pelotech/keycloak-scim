@@ -544,8 +544,37 @@ public class ScimClient {
      */
     // package-private: the sync path applies the model itself
     <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter) {
+        return replaceApplied(adapter, null);
+    }
+
+    /**
+     * Replaces the resource that {@code adapter} already holds, with the
+     * mapping row the caller already read.
+     *
+     * <p>A read of that row takes page capacity on the sync path, so a caller
+     * that holds it passes it here.
+     *
+     * @param knownMapping the mapping row for this resource, or null to read
+     *     it here
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it pushed nothing and logged the reason
+     * @throws IllegalStateException if the adapter is flagged to skip
+     * @throws ScimPropagationException if the push failed
+     */
+    <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter, ScimResource knownMapping) {
         requireNotSkipped(adapter, "replace");
-        return replaceBody(adapter, () -> {});
+        return replaceBody(adapter, () -> {}, knownMapping);
+    }
+
+    /**
+     * The body of a replace, which reads the mapping row itself.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private so the membership path and its test can reach it
+    <S extends ResourceNode> boolean replaceBody(Adapter<?, S> adapter, Runnable applyModel) {
+        return replaceBody(adapter, applyModel, null);
     }
 
     /**
@@ -553,11 +582,15 @@ public class ScimClient {
      * entry point must still do, so both entry points share one span and one
      * set of error handlers. An applied adapter passes an empty step.
      *
+     * <p>{@code knownMapping} holds the mapping row when the caller has it. A
+     * caller that applies the model here has no row yet, because the model
+     * carries the id the row is found by, so it passes null.
+     *
      * @return true when this call pushed the resource to the endpoint
      * @throws ScimPropagationException if the push failed
      */
-    // package-private so the membership path and its test can reach it
-    <S extends ResourceNode> boolean replaceBody(Adapter<?, S> adapter, Runnable applyModel) {
+    <S extends ResourceNode> boolean replaceBody(
+            Adapter<?, S> adapter, Runnable applyModel, ScimResource knownMapping) {
         try (var span = TRACING.startSpan("scim.replace", adapter.getType(), scimApplicationBaseUrl)) {
             try {
                 applyModel.run();
@@ -566,7 +599,12 @@ public class ScimClient {
                 if (adapter.skip) {
                     return false;
                 }
-                var resource = adapter.query("findById", adapter.getId()).getSingleResult();
+                // A missing row means the resource is unmapped, so the catch
+                // below turns it into an inconsistent mapping. A caller that
+                // passes a row has already read it and found it.
+                var resource = knownMapping != null
+                    ? knownMapping
+                    : adapter.query("findById", adapter.getId()).getSingleResult();
                 adapter.apply(resource);
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
@@ -1010,6 +1048,8 @@ public class ScimClient {
      *
      * <p>The model is applied once, here. The push methods take the adapter
      * this method already applied, because applying it again is expensive.
+     * The replace path also takes the mapping row read here, so each user
+     * costs one read of it.
      *
      * @param factory adapter factory for this resource's type
      * @param resource the local resource to reconcile
@@ -1062,7 +1102,9 @@ public class ScimClient {
             } else {
                 LOGGER.info("Replacing it");
                 branch = "replace";
-                pushed = replaceApplied(adapter);
+                // Hand over the row read above. A second read of it would take
+                // page capacity and return the same row.
+                pushed = replaceApplied(adapter, mapping);
             }
             if (!pushed) {
                 // The push did not happen and raised nothing. Count it as a

@@ -3,6 +3,7 @@ package sh.libre.scim.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -239,14 +240,14 @@ class ScimSyncLoopTest {
             when(a.getResourceStream()).thenReturn(Stream.of(only));
             return a;
         };
-        doReturn(true).when(client).replaceApplied(any());
+        doReturn(true).when(client).replaceApplied(any(), any());
         var syncRes = new SynchronizationResult();
 
         client.refreshResources(factory, syncRes);
 
         assertThat(syncRes.getUpdated()).isZero();
         assertThat(syncRes.getFailed()).isZero();
-        verify(client, never()).replaceApplied(any());
+        verify(client, never()).replaceApplied(any(), any());
     }
 
     /**
@@ -418,8 +419,8 @@ class ScimSyncLoopTest {
     }
 
     /**
-     * An adapter for the mapped path whose mapping query breaks. The replace
-     * call logs that fault, raises nothing, and pushes nothing.
+     * An adapter for the mapped path that breaks before the request goes out.
+     * The replace call logs that fault, raises nothing, and pushes nothing.
      */
     @SuppressWarnings("unchecked")
     private Adapter<TestModel, User> mappedAdapterThatCannotPush() {
@@ -429,7 +430,7 @@ class ScimSyncLoopTest {
         when(a.getId()).thenReturn("u1");
         when(a.skipRefresh()).thenReturn(false);
         when(a.getMapping()).thenReturn(new ScimResource());
-        when(a.query("findById", "u1")).thenThrow(new IllegalStateException("the mapping query broke"));
+        when(a.getSCIMEndpoint()).thenThrow(new IllegalStateException("the endpoint name broke"));
         return a;
     }
 
@@ -534,6 +535,27 @@ class ScimSyncLoopTest {
 
         verify(adapter, times(1)).apply(any(TestModel.class));
         assertThat(built.get()).isEqualTo(1);
+    }
+
+    // -----------------------------------------------------------------------
+    // refreshOne reads the mapping once
+    // -----------------------------------------------------------------------
+
+    /**
+     * A page of users has a wall clock budget, so every read per user takes
+     * page capacity. The refresh reads the mapping row to pick the branch, and
+     * the replace it calls must reuse that row.
+     */
+    @Test
+    void refreshOne_replaceBranch_readsTheMappingOnce() {
+        var client = newClient();
+        var adapter = mappedAdapterThatCannotPush();
+
+        client.refreshOne((session, componentId) -> adapter, mock(TestModel.class),
+            new SynchronizationResult(), SyncErrorPolicy.AUTO);
+
+        verify(adapter, times(1)).getMapping();
+        verify(adapter, never()).query(eq("findById"), any());
     }
 
     // -----------------------------------------------------------------------
