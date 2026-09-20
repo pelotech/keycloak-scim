@@ -29,13 +29,18 @@ import org.keycloak.representations.idm.RealmRepresentation;
  *
  * <p>This class starts a second Keycloak container. The shared one runs with
  * the default transaction timeout, which no test run can outlast.
+ *
+ * <p>The base class then costs this test two containers it never uses. It
+ * starts the shared Keycloak and the directory server before this class starts
+ * its own. A leaner base, or a class that does not extend it, would drop that
+ * cost.
  */
 class ScimPagedRefreshTimeoutIT extends IntegrationTestBase {
 
     /**
      * The timeout applies to every transaction in the container, including the
      * ones that start it and migrate its schema. Thirty seconds leaves those
-     * room and still sits well below the length of the run under test.
+     * enough room and still sits well below the length of the run under test.
      */
     private static final int TRANSACTION_TIMEOUT_SECONDS = 30;
 
@@ -120,6 +125,14 @@ class ScimPagedRefreshTimeoutIT extends IntegrationTestBase {
 
         // Keycloak wraps the sync in a transaction of its own. The run outlasts
         // the timeout, so the reaper cancels it and the commit fails.
+        //
+        // This call blocks for about 40 seconds, because the admin client sets
+        // no read timeout today. A client that gave up first would fail this
+        // assertion with a client-side error instead.
+        //
+        // The reaper also logs a line of its own. This test does not read it,
+        // because log text breaks on any wording or version change. A spike
+        // checked that line once.
         assertThrows(WebApplicationException.class, () ->
             realm.userStorage().syncUsers(componentId, "triggerFullSync"));
 
