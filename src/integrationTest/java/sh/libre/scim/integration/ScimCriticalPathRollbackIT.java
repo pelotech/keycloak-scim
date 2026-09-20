@@ -29,15 +29,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ScimCriticalPathRollbackIT extends IntegrationTestBase {
 
-    /** POST /Users → HTTP 503 (a transient endpoint failure). */
-    private void stubScimUserCreate503() {
-        wireMock.stubFor(post(urlPathEqualTo("/Users"))
-            .willReturn(aResponse()
-                .withStatus(503)
-                .withHeader("Content-Type", "application/scim+json")
-                .withBody("{\"detail\":\"service unavailable\"}")));
-    }
-
     /** POST /Users → HTTP 400 (a permanent/client-side failure). */
     private void stubScimUserCreate400() {
         wireMock.stubFor(post(urlPathEqualTo("/Users"))
