@@ -553,6 +553,15 @@ public abstract class IntegrationTestBase {
                     }""".formatted(extId))));
     }
 
+    /** POST /Users returns HTTP 503, a transient endpoint failure. */
+    protected void stubScimUserCreate503() {
+        wireMock.stubFor(post(urlPathEqualTo("/Users"))
+            .willReturn(aResponse()
+                .withStatus(503)
+                .withHeader("Content-Type", "application/scim+json")
+                .withBody("{\"detail\":\"service unavailable\"}")));
+    }
+
     protected void stubScimUserDeleteOk() {
         wireMock.stubFor(delete(urlPathMatching("/Users/.*"))
             .willReturn(aResponse().withStatus(204)));

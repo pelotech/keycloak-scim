@@ -53,13 +53,6 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
             .withRequestBody(matchingJsonPath("$.userName", equalTo(userName))).build()).getCount();
     }
 
-    private void stubScimUserCreate503() {
-        wireMock.stubFor(post(urlPathEqualTo("/Users"))
-            .willReturn(aResponse().withStatus(503)
-                .withHeader("Content-Type", "application/scim+json")
-                .withBody("{\"detail\":\"service unavailable\"}")));
-    }
-
     private void stubScimUserCreate429() {
         wireMock.stubFor(post(urlPathEqualTo("/Users"))
             .willReturn(aResponse().withStatus(429)
@@ -158,13 +151,15 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
             createAdminUser(r.realm(), n, n + "@test.local");
         }
 
+        // This test says nothing about where one page ends and the next
+        // begins. aStoppedRunKeepsTheMappingsItCommitted proves that boundary.
         var result = syncScim(r);
 
         for (String n : names) {
             assertEquals(1, postsFor(n), "expected exactly one create for " + n);
         }
-        assertEquals(names.size(), result.getUpdated());
-        assertEquals(0, result.getFailed());
+        assertEquals(names.size(), result.getUpdated(), "every user counts as updated");
+        assertEquals(0, result.getFailed(), "a run that reaches the end reports no failure");
     }
 
     @Test
@@ -188,7 +183,7 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
 
         var result = syncScim(r);
 
-        assertEquals(1, postsFor("zz-eligible"));
+        assertEquals(1, postsFor("zz-eligible"), "the eligible user is created once");
         for (String n : excluded) {
             assertEquals(0, postsFor(n), n + " is excluded by propagation-role");
         }
@@ -256,7 +251,8 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
 
             r.realm().clearUserCache();
             var response = postReconcile(r.name(), scimComponent(r.realm()).getId(), 48);
-            assertEquals(200, response.statusCode());
+            assertEquals(200, response.statusCode(),
+                "the reconciler endpoint should succeed; body was: " + response.body());
             assertEquals(1, userDeleteCount(), "the reconciler deprovisions the user once it is no longer cached");
         } finally {
             deleteLdapEntriesQuietly(uids);
@@ -276,8 +272,8 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
 
         syncScim(r);
 
-        assertEquals(1, postsFor("enabled-user"));
-        assertEquals(0, postsFor("disabled-user"));
+        assertEquals(1, postsFor("enabled-user"), "an enabled user is refreshed");
+        assertEquals(0, postsFor("disabled-user"), "a disabled user is excluded from refresh");
         assertEquals(0, postsFor("service-account-it-sa-client"),
             "service accounts are excluded from refresh");
     }
@@ -325,7 +321,7 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
         syncScim(r);
 
         assertEquals(1, putsFor("keep-a"), "keep-a was mapped by the first run, so it is replaced");
-        assertEquals(1, putsFor("keep-b"));
+        assertEquals(1, putsFor("keep-b"), "keep-b was mapped by the first run, so it is replaced");
         assertEquals(1, postsFor("keep-c"), "keep-c was never mapped, so it is created");
     }
 
@@ -345,9 +341,66 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
 
         assertTrue(postsFor("thr-b") >= 1, "a throttled user does not stop the run on its own");
         assertEquals(0, postsFor("thr-c"), "a full page of throttled users in a row ends the run");
-        assertEquals(0, result.getUpdated());
+        assertEquals(0, result.getUpdated(), "a throttled push is not an update");
         assertEquals(3, result.getFailed(),
             "two throttled pushes and the stopped run are reported");
+    }
+
+    @Test
+    void theThrottleCountCarriesAcrossAPageBoundary() {
+        // Page one holds a push and two throttled users, so it ends with a
+        // count of two. Only a count that survives the page boundary reaches
+        // the limit of three on the first user of page two.
+        stubScimUserCreate429();
+        stubScimUserCreateOkFor("carry-a");
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("sync-refresh", "true");
+            cfg.putSingle("sync-page-size", "3");
+            cfg.putSingle("sync-on-error", "auto");
+        });
+        for (String n : List.of("carry-a", "carry-b", "carry-c", "carry-d", "carry-e", "carry-f")) {
+            createAdminUser(r.realm(), n, n + "@test.local");
+        }
+
+        var result = syncScim(r);
+
+        assertTrue(postsFor("carry-d") >= 1, "the first user of page two is attempted");
+        assertEquals(0, postsFor("carry-e"), "the carried count ends the run at carry-d");
+        assertEquals(0, postsFor("carry-f"), "nothing after the stop is attempted");
+        assertEquals(1, result.getUpdated(), "the one push that worked is reported");
+        assertEquals(4, result.getFailed(),
+            "three throttled pushes and the stopped run are reported");
+    }
+
+    @Test
+    void aPolicyStopKeepsTheSuccessesFromItsOwnPage() {
+        // A page that stops on policy still commits. Only a page that cannot
+        // commit loses its work, so the two outcomes must stay apart.
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("sync-refresh", "true");
+            cfg.putSingle("sync-page-size", "2");
+            cfg.putSingle("sync-on-error", "auto");
+        });
+        for (String n : List.of("halt-a", "halt-b")) {
+            createAdminUser(r.realm(), n, n + "@test.local");
+        }
+        stubScimUserCreate503();
+        stubScimUserCreateOkFor("halt-a");
+
+        var first = syncScim(r);
+
+        assertEquals(1, first.getUpdated(), "the push before the stop is reported");
+        assertEquals(2, first.getFailed(), "the failed push and the stopped run are reported");
+
+        wireMock.resetAll();
+        stubScimUserCreateOk();
+        stubScimUserUpdateOk();
+        syncScim(r);
+
+        assertEquals(1, putsFor("halt-a"),
+            "the stop kept the mapping written earlier in the same page");
+        assertEquals(0, postsFor("halt-a"), "halt-a is replaced, not created again");
+        assertEquals(1, postsFor("halt-b"), "halt-b never got a mapping, so it is created");
     }
 
     @Test
@@ -369,7 +422,7 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
         for (String n : names) {
             assertEquals(1, postsFor(n), "the refresh still pushed " + n);
         }
-        assertEquals(names.size(), result.getUpdated());
+        assertEquals(names.size(), result.getUpdated(), "the refresh counted every user");
         assertEquals(1, result.getFailed(), "the result reports the failed import");
     }
 
@@ -399,7 +452,7 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
         syncScim(r);
 
         assertEquals(1, postsFor("lost-a"), "the rolled-back page kept no mapping for lost-a");
-        assertEquals(0, putsFor("lost-a"));
+        assertEquals(0, putsFor("lost-a"), "a replace would mean the lost mapping survived");
     }
 
     @Test
@@ -423,8 +476,8 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
         var first = syncScim(r);
 
         assertTrue(postsFor("roll-d") >= 1, "the run reached the last user");
-        assertEquals(1, first.getUpdated());
-        assertEquals(3, first.getFailed());
+        assertEquals(1, first.getUpdated(), "the one push that worked is reported");
+        assertEquals(3, first.getFailed(), "each failed push is reported and the run does not stop");
 
         wireMock.resetAll();
         stubScimUserCreateOk();
