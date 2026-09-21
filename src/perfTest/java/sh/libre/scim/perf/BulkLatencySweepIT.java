@@ -34,7 +34,7 @@ import static org.awaitility.Awaitility.await;
  *       fresh realm re-imports the same LDAP users into a new local realm,
  *       producing N fresh creates each time.</li>
  *   <li><b>Stable Keycloak baseline.</b> Each realm is <b>deleted after
- *       measuring it</b> ({@code admin.realm(name).remove()} cascades users +
+ *       measuring it</b> ({@code admin().realm(name).remove()} cascades users +
  *       components + SCIM mappings), so Keycloak's footprint does not drift
  *       run-to-run and confound later repeats.</li>
  *   <li><b>Baseline-corrected memory delta.</b> Per repeat we sample a quiescent
@@ -209,7 +209,7 @@ class BulkLatencySweepIT extends PerfTestBase {
                 Thread.sleep(BASELINE_SETTLE_MS);
                 long baselineBytes = sampleQuiescentMemoryBytes();
 
-                var sampler = new ContainerMemorySampler(keycloak);
+                var sampler = new ContainerMemorySampler(keycloak());
                 sampler.start();
                 long t0 = System.nanoTime();
                 r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
@@ -319,7 +319,7 @@ class BulkLatencySweepIT extends PerfTestBase {
      */
     private long sampleQuiescentMemoryBytes() {
         for (int i = 0; i < 5; i++) {
-            long b = ContainerMemorySampler.readMemoryBytesOnce(keycloak);
+            long b = ContainerMemorySampler.readMemoryBytesOnce(keycloak());
             if (b > 0) {
                 return b;
             }

@@ -18,6 +18,7 @@ import org.testcontainers.Testcontainers;
 import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
 
 import javax.naming.Context;
 import javax.naming.NamingException;
@@ -38,6 +39,7 @@ import java.util.Hashtable;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
@@ -67,12 +69,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Shared scaffolding for end-to-end integration tests against the full stack:
  * Keycloak 25.0.6 + osixia/openldap + an embedded WireMock SCIM sink.
  *
- * <p>Lifecycle: containers + WireMock are started once per test class
- * (forkEvery=1 in the gradle task gives each subclass a fresh JVM, so
- * containers do not leak between classes). WireMock stubs are reset before
- * every test method.
+ * <p>Lifecycle: WireMock starts once per test class. Each container starts on
+ * first use instead, through {@link #keycloak()}, {@link #admin()} and
+ * {@link #openldap()}. A class that never reaches a directory helper never
+ * starts the directory server, and a class that brings its own Keycloak never
+ * starts the shared one. Nothing needs to be declared for this to hold.
+ * WireMock stubs are reset before every test method.
  *
- * <p>Subclasses inherit the container fields, the admin client, and a
+ * <p>Containers stop after the class. The gradle task forks a JVM per class,
+ * so the fields also reset. Teardown clears them anyway, so a shared JVM would
+ * still give each class its own containers.
+ *
+ * <p>Subclasses inherit the container accessors, the admin client, and a
  * library of helpers covering realm/component setup, LDAP manipulation,
  * SCIM stub creation, and convenience assertions.
  *
@@ -95,32 +103,23 @@ public abstract class IntegrationTestBase {
 
     protected static final Network network = Network.newNetwork();
 
-    protected static final GenericContainer<?> openldap =
-        new GenericContainer<>("osixia/openldap:1.5.0")
-            .withEnv("LDAP_ORGANISATION", "Test")
-            .withEnv("LDAP_DOMAIN", "test.local")
-            .withEnv("LDAP_ADMIN_PASSWORD", "adminpassword")
-            .withClasspathResourceMapping(
-                "seed.ldif",
-                "/container/service/slapd/assets/config/bootstrap/ldif/custom/seed.ldif",
-                BindMode.READ_ONLY)
-            .withExposedPorts(389)
-            .withNetwork(network)
-            .withNetworkAliases("openldap");
-
     /** Overrideable via `-Dkeycloak.image=<image:tag>` so CI can run a matrix
      *  across supported Keycloak majors. Default tracks our minimum
      *  supported version. */
     protected static final String KEYCLOAK_IMAGE =
         System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:25.0.6");
 
-    protected static final KeycloakContainer keycloak =
-        new KeycloakContainer(KEYCLOAK_IMAGE)
-            .withProviderLibsFrom(List.of(PLUGIN_JAR))
-            .withNetwork(network);
-
+    /** The SCIM sink. It runs in this JVM, so every class can afford it. */
     protected static WireMockServer wireMock;
-    protected static Keycloak admin;
+
+    private static GenericContainer<?> openldap;
+    private static KeycloakContainer keycloak;
+    private static Keycloak admin;
+
+    // One lock per container, so a caller starting the directory does not
+    // block a caller starting Keycloak. The realm factories rely on that.
+    private static final Object KEYCLOAK_LOCK = new Object();
+    private static final Object OPENLDAP_LOCK = new Object();
 
     @BeforeAll
     static void setUpInfra() {
@@ -131,17 +130,118 @@ public abstract class IntegrationTestBase {
             .dynamicPort()
             .extensions(new ScimBulkResponseTransformer()));
         wireMock.start();
+        // Must run before any container starts, so containers can reach the
+        // sink at host.testcontainers.internal.
         Testcontainers.exposeHostPorts(wireMock.port());
-        openldap.start();
-        keycloak.start();
-        admin = AdminClients.forContainer(keycloak);
     }
 
     @AfterAll
     static void tearDownInfra() {
-        if (keycloak != null) keycloak.stop();
-        if (openldap != null) openldap.stop();
-        if (wireMock != null) wireMock.stop();
+        if (admin != null) {
+            admin.close();
+            admin = null;
+        }
+        if (keycloak != null) {
+            keycloak.stop();
+            keycloak = null;
+        }
+        if (openldap != null) {
+            openldap.stop();
+            openldap = null;
+        }
+        if (wireMock != null) {
+            wireMock.stop();
+            wireMock = null;
+        }
+    }
+
+    // ---------- containers, started on first use ----------
+
+    /**
+     * The shared Keycloak, with the plugin JAR installed. Starts on first call.
+     * A class that runs its own Keycloak never calls this and never pays for
+     * the shared one.
+     */
+    protected static KeycloakContainer keycloak() {
+        synchronized (KEYCLOAK_LOCK) {
+            if (keycloak == null) {
+                keycloak = new KeycloakContainer(KEYCLOAK_IMAGE)
+                    .withProviderLibsFrom(List.of(PLUGIN_JAR))
+                    .withNetwork(network);
+                keycloak.start();
+            }
+            return keycloak;
+        }
+    }
+
+    /** Admin client for the shared Keycloak. Starts that container if needed. */
+    protected static Keycloak admin() {
+        synchronized (KEYCLOAK_LOCK) {
+            if (admin == null) {
+                admin = AdminClients.forContainer(keycloak());
+            }
+            return admin;
+        }
+    }
+
+    /**
+     * The seeded directory server. Starts on first call, which is either a
+     * direct LDAP helper or {@link #addLdapFederation}. A class that touches
+     * neither never pays for it.
+     */
+    protected static GenericContainer<?> openldap() {
+        synchronized (OPENLDAP_LOCK) {
+            if (openldap == null) {
+                openldap = new GenericContainer<>("osixia/openldap:1.5.0")
+                    .withEnv("LDAP_ORGANISATION", "Test")
+                    .withEnv("LDAP_DOMAIN", "test.local")
+                    .withEnv("LDAP_ADMIN_PASSWORD", "adminpassword")
+                    .withClasspathResourceMapping(
+                        "seed.ldif",
+                        "/container/service/slapd/assets/config/bootstrap/ldif/custom/seed.ldif",
+                        BindMode.READ_ONLY)
+                    .withExposedPorts(389)
+                    .withNetwork(network)
+                    .withNetworkAliases("openldap")
+                    // The image serves on port 389 while it loads the seed file,
+                    // then stops that server and starts the one that stays up.
+                    // Waiting on the port alone can therefore return during the
+                    // gap, and the next client gets a refused connection. This
+                    // line appears once, from the server that stays up.
+                    .waitingFor(Wait.forLogMessage(".*slapd starting.*", 1));
+                openldap.start();
+                awaitSeedEntries();
+            }
+            return openldap;
+        }
+    }
+
+    /** Reads a seeded entry, to prove the server answers queries. */
+    private static void awaitSeedEntries() {
+        // The last entry in the seed file, so reading it proves the whole
+        // file loaded.
+        String lastSeeded = "cn=directory-role,ou=roles,dc=test,dc=local";
+        await().atMost(60, SECONDS)
+            .pollInterval(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .ignoreExceptions()
+            .untilAsserted(() -> {
+                var ctx = new InitialDirContext(ldapEnv());
+                try {
+                    assertNotNull(ctx.getAttributes(lastSeeded),
+                        "seeded directory entry should be readable");
+                } finally {
+                    ctx.close();
+                }
+            });
+    }
+
+    /**
+     * Starts the directory on another thread. Callers that also need Keycloak
+     * use this, so the two containers start together and the class waits for
+     * the slower one instead of for both in turn.
+     */
+    private static CompletableFuture<Void> startOpenldapAsync() {
+        return CompletableFuture.runAsync(IntegrationTestBase::openldap);
     }
 
     @BeforeEach
@@ -160,14 +260,18 @@ public abstract class IntegrationTestBase {
 
     protected TestRealm newRealmWithScimAndLdapAndConfig(
             Consumer<MultivaluedHashMap<String, String>> scimCfgCustomizer) {
+        var directory = startOpenldapAsync();
         String realmName = "it-" + UUID.randomUUID().toString().substring(0, 8);
         var realmRep = new RealmRepresentation();
         realmRep.setRealm(realmName);
         realmRep.setEnabled(true);
-        admin.realms().create(realmRep);
-        RealmResource realm = admin.realm(realmName);
+        admin().realms().create(realmRep);
+        RealmResource realm = admin().realm(realmName);
 
         addScimStorageProvider(realm, scimCfgCustomizer);
+        // Fail here, rather than later inside Keycloak, if the directory
+        // did not come up.
+        directory.join();
         String ldapId = addLdapFederation(realm);
         // Order matters: attribute mappers must run before our scim-ldap-sync
         // mapper so the UserModel has email/firstName/lastName set by the
@@ -226,13 +330,15 @@ public abstract class IntegrationTestBase {
      * as a baseline, isolating plugin overhead.
      */
     protected TestRealm newRealmWithLdapOnly() {
+        var directory = startOpenldapAsync();
         String realmName = "it-" + UUID.randomUUID().toString().substring(0, 8);
         var realmRep = new RealmRepresentation();
         realmRep.setRealm(realmName);
         realmRep.setEnabled(true);
-        admin.realms().create(realmRep);
-        RealmResource realm = admin.realm(realmName);
+        admin().realms().create(realmRep);
+        RealmResource realm = admin().realm(realmName);
 
+        directory.join();
         String ldapId = addLdapFederation(realm);
         addLdapAttributeMapper(realm, ldapId, "email", "email", "mail");
         addLdapAttributeMapper(realm, ldapId, "firstName", "firstName", "givenName");
@@ -272,6 +378,9 @@ public abstract class IntegrationTestBase {
     }
 
     protected String addLdapFederation(RealmResource realm) {
+        // Keycloak queries the directory as soon as a test touches the realm,
+        // so the server has to be up before the component exists.
+        openldap();
         var ldap = new ComponentRepresentation();
         ldap.setName("test-ldap");
         ldap.setProviderType("org.keycloak.storage.UserStorageProvider");
@@ -724,7 +833,14 @@ public abstract class IntegrationTestBase {
         return "uid=" + uid + ",ou=users,dc=test,dc=local";
     }
 
+    /** JNDI settings for the directory server. Starts it if it is not up yet. */
     protected Hashtable<String, String> newLdapEnv() {
+        openldap();
+        return ldapEnv();
+    }
+
+    /** Same settings, but for callers that already know the server is up. */
+    private static Hashtable<String, String> ldapEnv() {
         var env = new Hashtable<String, String>();
         env.put(Context.INITIAL_CONTEXT_FACTORY, "com.sun.jndi.ldap.LdapCtxFactory");
         env.put(Context.PROVIDER_URL,
@@ -824,7 +940,7 @@ public abstract class IntegrationTestBase {
             String realmName, String componentId, long thresholdHours, String token) throws Exception {
         var http = HttpClient.newHttpClient();
         var request = HttpRequest.newBuilder(URI.create(
-            keycloak.getAuthServerUrl() + "/realms/" + realmName
+            keycloak().getAuthServerUrl() + "/realms/" + realmName
                 + "/scim-reconcile/" + componentId
                 + "?thresholdHours=" + thresholdHours))
             .POST(HttpRequest.BodyPublishers.noBody());
@@ -860,7 +976,7 @@ public abstract class IntegrationTestBase {
      */
     protected void createServiceAccountClient(
             String realmName, String clientId, boolean grantManageUsers) {
-        RealmResource realm = admin.realm(realmName);
+        RealmResource realm = admin().realm(realmName);
 
         var client = new ClientRepresentation();
         client.setClientId(clientId);
@@ -899,7 +1015,7 @@ public abstract class IntegrationTestBase {
         var http = HttpClient.newHttpClient();
         var response = http.send(
             HttpRequest.newBuilder(URI.create(
-                keycloak.getAuthServerUrl() + "/realms/" + realmName
+                keycloak().getAuthServerUrl() + "/realms/" + realmName
                     + "/protocol/openid-connect/token"))
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .POST(HttpRequest.BodyPublishers.ofString(form))
@@ -914,7 +1030,7 @@ public abstract class IntegrationTestBase {
 
     /** Access token for the container's master-realm admin, via the admin client. */
     protected static String masterAdminToken() {
-        return admin.tokenManager().getAccessTokenString();
+        return admin().tokenManager().getAccessTokenString();
     }
 
     /** Minimal string-field reader, so the ITs don't need a JSON parser on the classpath. */

@@ -75,8 +75,8 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         var realmRep = new RealmRepresentation();
         realmRep.setRealm(realmName);
         realmRep.setEnabled(true);
-        admin.realms().create(realmRep);
-        realm = admin.realm(realmName);
+        admin().realms().create(realmRep);
+        realm = admin().realm(realmName);
 
         createServiceAccountClient(realm);
 
@@ -146,7 +146,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         String jwt = authHeader.substring("Bearer ".length());
 
         // Fetch the realm's JWKS from the external (test-JVM-accessible) URL.
-        // keycloak.getAuthServerUrl() is the externally-mapped URL the test JVM uses.
+        // keycloak().getAuthServerUrl() is the externally-mapped URL the test JVM uses.
         var claims = verifyJwtAgainstRealmJwks(jwt);
 
         // Verify key claims that a downstream receiver would check.
@@ -476,7 +476,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
      */
     private JWTClaimsSet verifyJwtAgainstRealmJwks(String jwt) throws Exception {
         if (cachedJwkSet == null) {
-            String externalBaseUrl = keycloak.getAuthServerUrl();
+            String externalBaseUrl = keycloak().getAuthServerUrl();
             URL jwksUrl = java.net.URI.create(
                 externalBaseUrl + "/realms/" + realmName + "/protocol/openid-connect/certs"
             ).toURL();

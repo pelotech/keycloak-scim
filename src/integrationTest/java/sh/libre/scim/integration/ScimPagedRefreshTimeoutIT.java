@@ -27,13 +27,10 @@ import org.keycloak.representations.idm.RealmRepresentation;
  * own commit. Each page committed on its own before that, so every user was
  * pushed and kept its mapping.
  *
- * <p>This class starts a second Keycloak container. The shared one runs with
- * the default transaction timeout, which no test run can outlast.
- *
- * <p>The base class then costs this test two containers it never uses. It
- * starts the shared Keycloak and the directory server before this class starts
- * its own. A leaner base, or a class that does not extend it, would drop that
- * cost.
+ * <p>This class runs its own Keycloak container, because the shared one uses
+ * the default transaction timeout, which no test run can outlast. It reaches
+ * the base class only for the SCIM sink and the setup helpers, so the shared
+ * Keycloak and the directory server never start here.
  */
 class ScimPagedRefreshTimeoutIT extends IntegrationTestBase {
 
