@@ -51,8 +51,8 @@ class ScimMultiTenancyIT extends IntegrationTestBase {
         var rep = new RealmRepresentation();
         rep.setRealm(realmName);
         rep.setEnabled(true);
-        admin.realms().create(rep);
-        var realm = admin.realm(realmName);
+        admin().realms().create(rep);
+        var realm = admin().realm(realmName);
 
         addScimProviderAt(realm, "scim-a", "/scim-a");
         addScimProviderAt(realm, "scim-b", "/scim-b");
@@ -91,10 +91,10 @@ class ScimMultiTenancyIT extends IntegrationTestBase {
             var rep = new RealmRepresentation();
             rep.setRealm(name);
             rep.setEnabled(true);
-            admin.realms().create(rep);
+            admin().realms().create(rep);
         }
-        var r1 = admin.realm(r1Name);
-        var r2 = admin.realm(r2Name);
+        var r1 = admin().realm(r1Name);
+        var r2 = admin().realm(r2Name);
 
         addScimProviderAt(r1, "scim-r1", "/realm-one");
         addScimProviderAt(r2, "scim-r2", "/realm-two");
