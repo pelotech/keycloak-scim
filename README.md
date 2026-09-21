@@ -1,49 +1,49 @@
 # keycloak-scim
 
-A Keycloak provider that propagates user and group lifecycle events
-out to one or more remote [SCIM 2.0](http://www.simplecloud.info)
-service providers
+A Keycloak provider that sends user and group changes to one or more
+[SCIM 2.0](http://www.simplecloud.info) servers
 ([RFC 7643](https://datatracker.ietf.org/doc/html/rfc7643),
 [RFC 7644](https://datatracker.ietf.org/doc/html/rfc7644)).
-Keycloak stays the source of truth for identity; downstream
-applications get user create / update / delete and group membership
-changes via SCIM, with no need to give them direct access to your
-LDAP / Keycloak.
+Keycloak stays the source of truth for identity. Downstream
+applications get user create, update, and delete events, and group
+membership changes, through SCIM. They do not need direct access to
+your LDAP or Keycloak.
 
 This is a long-lived [pelotech](https://github.com/pelotech) fork of
 [mitodl/keycloak-scim](https://github.com/mitodl/keycloak-scim).
 What's added relative to upstream:
 
-- **LDAP federation support.** Users imported via Keycloak's LDAP
-  User Federation (lazy import, periodic sync, explicit sync) now
-  propagate to SCIM. Upstream's event-listener-only design didn't
-  catch federation imports — see
+- **LDAP federation support.** Users imported through Keycloak's LDAP
+  User Federation now propagate to SCIM. This covers lazy import,
+  periodic sync, and explicit sync. The upstream event-listener design
+  did not catch federation imports. See
   [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
   for the full design.
-- **LDAP-deletion reconciler.** A configurable periodic task
-  closes the gap left by upstream Keycloak issue
-  [#35235](https://github.com/keycloak/keycloak/issues/35235): users
-  deleted from LDAP no longer linger in your SCIM sink.
-- **Performance work for 10k+ user deployments.** Async dispatch on
-  a worker pool brings full-sync throughput from ~22 users/sec to
-  ~245 users/sec; reconciler deletion from ~22 to ~640 deletes/sec.
-  See [`docs/performance.md`](docs/performance.md) for measurements
-  and bottleneck analysis.
-- **OAuth 2.0 client_credentials auth.** Outbound SCIM can mint
-  access tokens via the client_credentials grant and send them as
-  bearer tokens, matching what JWKS-verifying SCIM receivers expect.
-  See [`docs/configuration.md`](docs/configuration.md) for setup.
+- **LDAP-deletion reconciler.** A configurable periodic task closes a
+  gap in upstream Keycloak (issue
+  [#35235](https://github.com/keycloak/keycloak/issues/35235)). Users
+  deleted from LDAP no longer linger on the SCIM server.
+- **Performance work for 10k+ user deployments.** Async dispatch on a
+  worker pool raises full-sync throughput from about 22 users per
+  second to about 245. Reconciler deletion rises from about 22 to
+  about 640 deletes per second. See
+  [`docs/performance.md`](docs/performance.md) for measurements and
+  bottleneck analysis.
+- **OAuth 2.0 client_credentials auth.** Outbound SCIM calls can use an
+  access token from the client_credentials grant, sent as a bearer
+  token. This matches what SCIM servers that verify JWKS expect. See
+  [`docs/configuration.md`](docs/configuration.md) for setup.
 - **OpenTelemetry tracing.** Every outbound SCIM operation emits a
-  `CLIENT` span that nests under the active Keycloak request span.
-  Works automatically on Keycloak 26+ when tracing is enabled; falls
-  back to a no-op on 25.x. See [`docs/tracing.md`](docs/tracing.md)
-  for setup and examples.
-- **OCI image for K8s ImageVolume mounting.** Drop the plugin into
-  a Keycloak pod without baking a custom image — see
+  `CLIENT` span, nested under the active Keycloak request span. This
+  works automatically on Keycloak 26 and later, when tracing is
+  enabled. On Keycloak 25.x, it falls back to a no-op. See
+  [`docs/tracing.md`](docs/tracing.md) for setup and examples.
+- **OCI image for Kubernetes ImageVolume mounting.** Add the plugin to
+  a Keycloak pod without building a custom image. See
   [Quick start](#quick-start) below.
-- **Comprehensive test coverage.** 43 unit + 24 integration tests
-  (Testcontainers-driven against real Keycloak + OpenLDAP +
-  WireMock) plus a perf-test harness for scale work.
+- **Comprehensive test coverage.** 43 unit tests and 24 integration
+  tests, run with Testcontainers against real Keycloak, OpenLDAP, and
+  WireMock. A performance-test harness covers scale work.
 
 ## Compatibility
 
@@ -56,26 +56,27 @@ What's added relative to upstream:
 
 ## Quick start
 
-Four ways to get the plugin loaded into Keycloak, by scenario:
+Four ways to load the plugin into Keycloak, based on your scenario:
 
 ### ImageVolume (single extension)
 
-*Use when keycloak-scim is the only provider extension you're adding.*
+*Use this when keycloak-scim is the only provider extension you add.*
 
 Mount the published OCI image as a Kubernetes
 [`image` volume](https://kubernetes.io/docs/concepts/storage/volumes/#image)
 onto Keycloak's providers directory.
 
-**Providers directory depends on the Keycloak image flavor:**
+**The providers directory depends on the Keycloak image:**
 
 | Image | Providers directory |
 | --- | --- |
 | `quay.io/keycloak/keycloak` (official) | `/opt/keycloak/providers/` |
 | `docker.io/bitnami/keycloak` (and downstream mirrors) | `/opt/bitnami/keycloak/providers/` |
 
-Mount the image's filesystem **onto the providers directory** (no
-`subPath`). The published image is `FROM scratch` containing exactly
-`/keycloak-scim.jar`, so the directory ends up holding just that one JAR:
+Mount the image's filesystem **onto the providers directory**. Do not
+use `subPath`. The published image is `FROM scratch` and contains only
+`/keycloak-scim.jar`, so the directory ends up holding just that one
+JAR:
 
 ```yaml
 apiVersion: v1
@@ -99,29 +100,29 @@ spec:
         pullPolicy: IfNotPresent
 ```
 
-> **Do not try to mount just the JAR via `subPath`.** A Kubernetes
-> `image` volume supports only a **directory** `subPath`, never a single
-> file: `subPath: keycloak-scim.jar` fails the mount outright
-> (`ImageVolumeMountFailed: only directory subpath is supported`) and the
-> container never starts. Mounting the whole image at the providers
-> directory is the supported shape. (Validated on Kubernetes v1.35 /
-> containerd 2.2.)
+> **Do not mount just the JAR with `subPath`.** A Kubernetes `image`
+> volume supports only a **directory** `subPath`, never a single file.
+> `subPath: keycloak-scim.jar` fails the mount
+> (`ImageVolumeMountFailed: only directory subpath is supported`), and
+> the container never starts. Mount the whole image at the providers
+> directory instead. (Validated on Kubernetes v1.35 with containerd
+> 2.2.)
 >
-> **This mount replaces the entire providers directory** with the image's
-> read-only contents, so anything else in that directory is shadowed —
-> and one `image:` volume maps one OCI image to one mount. That's fine
-> for the single-extension case (hence this section). To add keycloak-scim
-> *alongside* other extensions, use
+> **This mount replaces the entire providers directory** with the
+> image's read-only contents. Anything else in that directory is
+> hidden. Also, one `image:` volume maps to one OCI image and one
+> mount. This is fine for the single-extension case in this section.
+> To add keycloak-scim *alongside* other extensions, use
 > [Runtime compose (multiple extensions)](#runtime-compose-multiple-extensions)
 > below.
 
 For Bitnami Keycloak, change `mountPath` to
 `/opt/bitnami/keycloak/providers`.
 
-The image is `FROM scratch` — payload only, no shell, no entrypoint.
-Multi-arch manifest (linux/amd64 + linux/arm64), signed with cosign
-keyless (GitHub OIDC), with SPDX + CycloneDX SBOMs attached as cosign
-attestations.
+The image is `FROM scratch`: it holds only the payload, with no shell
+and no entrypoint. It is a multi-arch manifest (linux/amd64 and
+linux/arm64), signed with cosign keyless through GitHub OIDC. SPDX and
+CycloneDX SBOMs are attached as cosign attestations.
 
 Before deploying, verify the signature:
 
@@ -151,43 +152,45 @@ After deploying, confirm the SCIM provider registered with Keycloak:
 
 curl -sf -H "Authorization: Bearer $TOKEN" "$KC_URL/admin/serverinfo" \
   | jq -r '.componentTypes."org.keycloak.storage.UserStorageProvider"[].id' \
-  | grep -qx scim && echo "scim provider registered" || echo "MISSING — see Troubleshooting"
+  | grep -qx scim && echo "scim provider registered" || echo "MISSING: see Troubleshooting"
 ```
 
-Keycloak's failure mode for a misconfigured providers mount is silent
-— no error log, the SPI just never registers. This recipe
-distinguishes "JAR loaded" from "JAR ignored."
+Keycloak's failure mode for a misconfigured providers mount is
+silent. There is no error log, the SPI just never registers. This
+check tells the difference between "JAR loaded" and "JAR ignored."
 
 ### Runtime compose (multiple extensions)
 
-*Use when you're adding keycloak-scim alongside other provider extensions.*
+*Use this when you add keycloak-scim alongside other provider
+extensions.*
 
-Populate a shared `emptyDir` at startup: mount each extension as a
-read-only `image:` volume, let an init container (the Keycloak image
-itself — it has `cp` and a shell) copy each JAR into the `emptyDir`,
-then boot Keycloak against the populated directory. Composes to any
-number of extensions — one `image:` volume and one copy line each.
+Populate a shared `emptyDir` at startup. Mount each extension as a
+read-only `image:` volume. An init container, which is the Keycloak
+image itself, copies each JAR into the `emptyDir` with `cp`. Keycloak
+then boots against the populated directory. This works for any number
+of extensions: one `image:` volume and one copy line per extension.
 
 A complete, copy-pasteable Deployment is in
 [`examples/kubernetes/keycloak-multi-extension.yaml`](examples/kubernetes/keycloak-multi-extension.yaml).
 
-**Tradeoff:** providers mounted at runtime aren't part of a
-`kc.sh build`-augmented image, so Keycloak augments at pod boot (a
-per-pod startup cost) rather than once at image-build time. For
-build-time augmentation, use
+**Tradeoff.** Providers mounted at runtime are not part of a
+`kc.sh build`-augmented image. So Keycloak augments at pod boot, which
+costs time on every pod start, instead of once at image-build time.
+For build-time augmentation, use
 [Custom image (build-time augmentation)](#custom-image-build-time-augmentation).
 
-*Optional:* because the init container is the Keycloak image, it can
-also run `kc.sh build` to augment once during init instead of every
-boot — this additionally requires sharing the augmentation output
+*Optional.* Because the init container is the Keycloak image, it can
+also run `kc.sh build` to augment once during init, instead of on
+every boot. This also requires sharing the augmentation output
 directory between the init and main containers.
 
 ### Custom image (build-time augmentation)
 
-*Use when you want a baked, pre-augmented image and have a build pipeline.*
+*Use this when you want a baked, pre-augmented image, and you have a
+build pipeline.*
 
-Bake the provider JAR into a Keycloak image and augment with
-`kc.sh build`. The published `FROM scratch` image is an ideal
+Bake the provider JAR into a Keycloak image, and augment it with
+`kc.sh build`. The published `FROM scratch` image works well as a
 `COPY --from` source:
 
 ```dockerfile
@@ -215,8 +218,8 @@ cd keycloak-scim
 cp build/libs/keycloak-scim-*-all.jar /opt/keycloak/providers/
 ```
 
-For local end-to-end testing, `docker-compose.yml` brings up
-Keycloak + Postgres with the freshly-built JAR mounted in:
+For local end-to-end testing, `docker-compose.yml` starts Keycloak and
+Postgres, with the freshly built JAR mounted in:
 
 ```sh
 ./gradlew prepareDockerContext
@@ -227,97 +230,97 @@ docker compose up
 
 After the plugin is loaded:
 
-1. **Enable the event listener** *(if you want admin-REST and
-   self-service events to propagate; LDAP-import propagation is
-   handled separately by the LDAP mapper below)*:
-   *Admin Console → Realm Settings → Events → Config* — add
-   `scim` to *Event Listeners*.
+1. **Enable the event listener.** Do this if you want admin-REST and
+   self-service events to propagate. LDAP-import propagation is
+   separate; see the LDAP mapper step below. Go to
+   *Admin Console → Realm Settings → Events → Config* and add `scim`
+   to *Event Listeners*.
 
-2. **Add a SCIM provider component:**
-   *Admin Console → User Federation → Add provider → scim*. Set
-   `endpoint`, `auth-mode`, `auth-pass` (token) at minimum.
-   Every config knob is documented in
+2. **Add a SCIM provider component.** Go to
+   *Admin Console → User Federation → Add provider → scim*. Set at
+   least `endpoint`, `auth-mode`, and `auth-pass` (the token). Every
+   setting is documented in
    [`docs/configuration.md`](docs/configuration.md).
 
-3. **Attach the LDAP mapper** *(only if you have LDAP federation
-   and want LDAP-imported users to propagate)*:
-   *Admin Console → User Federation → (your LDAP provider) →
-   Mappers → Add → scim-ldap-sync*. No config required; presence
-   is the configuration.
+3. **Attach the LDAP mapper.** Do this only if you have LDAP
+   federation and want LDAP-imported users to propagate. Go to
+   *Admin Console → User Federation → (your LDAP provider) → Mappers →
+   Add → scim-ldap-sync*. It needs no settings. Attaching it is the
+   configuration.
 
-The plugin will now fan out user/group changes from each path
-(admin REST, self-service, LDAP federation) to every configured
-SCIM provider component in the realm.
+The plugin now sends user and group changes from each path (admin
+REST, self-service, LDAP federation) to every configured SCIM provider
+component in the realm.
 
-**Automating this (realm import JSON, `kcadm`, or the admin REST
-API)?** All three steps are scriptable — see
+**To automate this**, use realm import JSON, `kcadm`, or the admin
+REST API. All three steps are scriptable. See
 [Headless / automated provisioning](docs/configuration.md#headless--automated-provisioning)
-for copy-paste examples, including the multivalued-mapping gotcha and
-the Keycloak 25+ user-profile prerequisite.
+for examples, the multivalued-mapping gotcha, and the Keycloak 25+
+user-profile prerequisite.
 
 ## Performance: SCIM `/Bulk` batching (opt-in)
 
-By default the plugin issues one HTTP request per resource change,
-dispatched asynchronously over a **bounded, back-pressured** worker
-pool — so a large federation sync or a slow SCIM sink paces the
-producer instead of growing Keycloak's heap without bound. For
-**federation-sync user creates**, you can additionally coalesce many
-`POST /Users` into a single SCIM `/Bulk` request.
+By default, the plugin sends one HTTP request per resource change. It
+dispatches these asynchronously over a bounded, back-pressured worker
+pool. So a large federation sync, or a slow SCIM server, paces the
+producer instead of growing Keycloak's heap without limit. For
+federation-sync user creates, you can also combine many `POST /Users`
+calls into one SCIM `/Bulk` request.
 
-**Turning it on/off — off by default.** Per SCIM provider component,
-set `bulk-enabled = true` (*Admin Console → your SCIM provider →
-config*, or via the component API). Tune the batch size with
-`-Dscim.dispatch.bulkBatchSize=<K>` on the Keycloak process (default
-`20`; set it **≤ your SCIM server's advertised `maxOperations`**).
-Only the LDAP-import **create** path is batched — replace, delete, and
-group-membership stay one-request-each. Requires a SCIM server that
-supports `/Bulk`.
+**Turning it on or off.** This is off by default. Per SCIM provider
+component, set `bulk-enabled = true` (*Admin Console → your SCIM
+provider → config*, or the component API). Tune the batch size with
+`-Dscim.dispatch.bulkBatchSize=<K>` on the Keycloak process. The
+default is `20`. Set it to at most your SCIM server's advertised
+`maxOperations`. Only the LDAP-import **create** path is batched.
+Replace, delete, and group-membership calls still go one at a time.
+This requires a SCIM server that supports `/Bulk`.
 
-**Does it pay off? Measured, not assumed.** `BulkLatencySweepIT`
+**Measured, not assumed.** `BulkLatencySweepIT`
 (`./gradlew performanceTest --tests 'sh.libre.scim.perf.BulkLatencySweepIT'`)
-sweeps bulk {on, off} × sink round-trip {5, 50, 200 ms} over a
-2000-user sync, 5 runs per cell:
+tests bulk on and off, at sink round-trip times of 5, 50, and 200 ms,
+over a 2000-user sync. It runs 5 times per combination:
 
 | Sink round-trip | per-op sync | `/Bulk` sync | Result |
 | ---: | ---: | ---: | --- |
 | 200 ms | 53.4 s | 7.5 s | **~7× faster** |
 | 50 ms | 14.1 s | 5.8 s | **~2.4× faster** |
-| 5 ms | 2.6 s | 6.1 s | **slower** — batching overhead exceeds the round-trips it saves |
+| 5 ms | 2.6 s | 6.1 s | **slower**: batching overhead costs more than the round-trips it saves |
 
-The payoff scales with **network distance to your SCIM sink**: enable
-`/Bulk` for remote / high-latency targets; for local or very-low-latency
-sinks the per-op lane is already faster, which is why it stays off by
-default. Peak memory is **not** a differentiator between the two lanes
-(both add only single- to low-double-digit MiB per sync, dwarfed by
-Keycloak's own footprint).
+The payoff scales with **network distance to your SCIM server**.
+Enable `/Bulk` for remote or high-latency targets. For local or
+very-low-latency servers, the per-op lane is already faster. This is
+why it stays off by default. Peak memory does **not** differ much
+between the two lanes. Both add only single-digit to low-double-digit
+MiB per sync, small compared to Keycloak's own footprint.
 
-> These wins are a **lower bound**: the test harness (WireMock) models
-> the network round-trip only, not a real SCIM server's per-request
-> processing overhead, which `/Bulk` also amortizes. Full methodology,
-> the run-to-run variance, the memory analysis, and the bounded-queue
-> back-pressure design are in
+> These wins are a **lower bound**. The test harness (WireMock) models
+> only the network round-trip. It does not model a real SCIM server's
+> per-request processing time, which `/Bulk` also reduces. Full
+> methodology, run-to-run variance, the memory analysis, and the
+> bounded-queue back-pressure design are in
 > [`docs/performance.md`](docs/performance.md).
 
 ## SCIM extension attributes (opt-in)
 
-Map Keycloak user attributes to SCIM extension-schema attributes and
-push them outbound on every user create, update, refresh, and bulk
-sync — no code changes required.
+Map Keycloak user attributes to SCIM extension-schema attributes. The
+plugin sends them outbound on every user create, update, refresh, and
+bulk sync. No code changes are required.
 
 **Configuring mappings.** Per SCIM provider component, add one or more
 rows to `user-extension-mappings` (*Admin Console → your SCIM provider
-→ config*, or via the component API). Each row uses the grammar:
+→ config*, or the component API). Each row uses this grammar:
 
 ```
 <keycloakAttr> = <scimSchemaUrn>:<attr> [; type=<t>] [; multi]
 ```
 
-`type` coerces the raw string value before serialising — supported
-values: `string` (default), `boolean`, `integer`, `decimal`,
-`dateTime`, `reference`. Add `; multi` for multivalued attributes (emits
-a JSON array from all values of that Keycloak attribute). Both the IETF
-Enterprise User extension and arbitrary custom URN schemas are
-supported.
+`type` converts the raw string value before serializing. Supported
+values are `string` (default), `boolean`, `integer`, `decimal`,
+`dateTime`, and `reference`. Add `; multi` for multivalued attributes.
+It emits a JSON array from all values of that Keycloak attribute. The
+plugin supports both the IETF Enterprise User extension and custom URN
+schemas.
 
 **Example rows:**
 
@@ -325,59 +328,62 @@ supported.
 # IETF Enterprise User extension
 kcDept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department
 
-# Custom schema — boolean
+# Custom schema, boolean
 kcActive = urn:example:custom:2.0:User:active ; type=boolean
 
-# Custom schema — multivalued string
+# Custom schema, multivalued string
 kcLabels = urn:example:custom:2.0:User:labels ; multi
 ```
 
-A malformed row is rejected at component save time with a validation
-error. Leave the property empty (the default) to send no extension
-attributes. The full grammar, all type tokens, and Enterprise User
-field constraints are documented in
+The plugin rejects a malformed row at component save time, with a
+validation error. Leave the setting empty (the default) to send no
+extension attributes. The full grammar, all type tokens, and the
+Enterprise User field constraints are in
 [`docs/configuration.md`](docs/configuration.md#user-extension-attributes).
 
 ## Documentation
 
-- [`docs/configuration.md`](docs/configuration.md) — every
-  config knob, attribute, endpoint, and JVM property.
-- [`docs/tracing.md`](docs/tracing.md) — OpenTelemetry tracing:
-  what's instrumented, how to enable it, Jaeger and Tempo examples.
-- [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md)
-  — design doc for LDAP federation propagation and the reconciler.
-- [`docs/performance.md`](docs/performance.md) — scale measurements,
-  bottleneck analysis, async dispatch + bounded-queue back-pressure
-  design, and the SCIM `/Bulk` latency-sweep characterization.
-- [`docs/releasing.md`](docs/releasing.md) — release runbook
-  (release-please flow, OCI image publication, RC dry-runs).
+- [`docs/configuration.md`](docs/configuration.md): every setting,
+  attribute, endpoint, and JVM property.
+- [`docs/tracing.md`](docs/tracing.md): OpenTelemetry tracing. What is
+  instrumented, how to enable it, and examples for Jaeger and Tempo.
+- [`docs/ldap-federation-support.md`](docs/ldap-federation-support.md):
+  design for LDAP federation propagation and the reconciler.
+- [`docs/performance.md`](docs/performance.md): scale measurements,
+  bottleneck analysis, the async dispatch and bounded-queue
+  back-pressure design, and the SCIM `/Bulk` latency-sweep results.
+- [`docs/releasing.md`](docs/releasing.md): release runbook. Covers
+  the release-please flow, OCI image publication, and RC dry-runs.
 
 ## Status
 
-`1.0.x` is released and stable; versioning follows
+`1.0.x` is released and stable. Versioning follows
 [SemVer](https://semver.org/) and is driven by release-please from
-conventional commits. Pin production deployments to a released tag (or
-digest). Post-1.0 work — known gaps and refinements, none of which
-block normal operation — is tracked in [`docs/roadmap.md`](docs/roadmap.md).
+conventional commits. Pin production deployments to a released tag or
+digest. Post-1.0 work is tracked in
+[`docs/roadmap.md`](docs/roadmap.md). This work covers known gaps and
+refinements. None of them block normal operation.
 
 ## Troubleshooting
 
-**The JAR is on disk but the SCIM provider isn't visible in the admin
-console or in `/admin/serverinfo`.** Almost always one of:
+**The JAR is on disk, but the SCIM provider is not visible in the
+admin console or in `/admin/serverinfo`.** This is almost always one
+of these causes:
 
-- **Wrong providers directory** for the Keycloak image flavor in use.
-  Vanilla `quay.io/keycloak/keycloak` uses `/opt/keycloak/providers/`;
-  Bitnami uses `/opt/bitnami/keycloak/providers/`. See [Quick
-  start](#quick-start) for the mount-path table.
-- **JAR was unpacked and repacked** without preserving the
-  `META-INF/services/*` files. Keycloak's provider discovery is
-  SPI-based and reads those service descriptors at boot; without
-  them, the factory classes won't be loaded even though they're on
-  the classpath.
+- **Wrong providers directory** for the Keycloak image in use. The
+  official `quay.io/keycloak/keycloak` image uses
+  `/opt/keycloak/providers/`. Bitnami uses
+  `/opt/bitnami/keycloak/providers/`. See
+  [Quick start](#quick-start) for the mount-path table.
+- **The JAR was unpacked and repacked** without keeping the
+  `META-INF/services/*` files. Keycloak's provider discovery uses SPI,
+  and reads those service descriptors at boot. Without them, Keycloak
+  does not load the factory classes, even though they are on the
+  classpath.
 
-The verification recipe in [Quick start](#quick-start) surfaces
-either failure mode immediately — if `scim` isn't in the
-`/admin/serverinfo` provider list, the JAR didn't register.
+The check in [Quick start](#quick-start) shows either failure right
+away. If `scim` is not in the `/admin/serverinfo` provider list, the
+JAR did not register.
 
 ## License
 
