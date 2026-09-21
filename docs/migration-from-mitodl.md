@@ -67,8 +67,9 @@ a setting you can toggle:
 
 - **Async SCIM dispatch on the LDAP-import path.** Per-user SCIM HTTP
   calls no longer block the LDAP federation sync thread. With 8
-  worker threads, full-sync throughput is roughly 8–10× higher
-  (~245 users/sec versus ~22 users/sec). See
+  worker threads, full-sync throughput is about 8 times higher: 186
+  users per second, against 22 without async dispatch, measured at
+  1,000 users. See
   [`docs/performance.md`](performance.md).
 
   The trade-off: SCIM operations run *after* the caller's Keycloak
