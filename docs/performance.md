@@ -1,15 +1,17 @@
 # Performance and scale
 
-A working notes document for the perf characterization and optimization
-work. Updated as measurements land. The corresponding test scaffolding
-is in `src/perfTest/`; reports land in `build/reports/perf/`.
+This is a working notes document for performance characterization and
+optimization. It is updated as new measurements land. The test
+scaffolding is in `src/perfTest/`. Reports land in
+`build/reports/perf/`.
 
 ## Measurement environment
 
-Local Docker Desktop on a developer machine. Each run boots Keycloak
-25.0.6, osixia/openldap 1.5.0, and an embedded WireMock SCIM sink with
-0 ms simulated latency. Numbers reported below are from `1000`-user
-runs unless noted. Throughput scales linearly to 10k.
+Measurements run on local Docker Desktop, on a developer machine.
+Each run boots Keycloak 25.0.6, osixia/openldap 1.5.0, and an embedded
+WireMock SCIM server with 0 ms simulated latency. Numbers below are
+from `1000`-user runs, unless noted. Throughput scales linearly to
+10k.
 
 Run with `./gradlew performanceTest -Dperf.userCount=N`.
 
@@ -17,7 +19,7 @@ Run with `./gradlew performanceTest -Dperf.userCount=N`.
 
 ### Plugin overhead vs Keycloak alone
 
-Same federation sync, same dataset, same backing LDAP — measured with
+Same federation sync, same dataset, same backing LDAP, measured with
 and without the plugin attached:
 
 | Configuration | Time (1000 users) | Throughput |
@@ -25,29 +27,31 @@ and without the plugin attached:
 | Keycloak alone (no plugin) | 568 ms | 1760 users/sec |
 | With plugin (event listener + scim-ldap-sync mapper) | 46 s | 22 users/sec |
 
-The plugin contributes ~80× overhead. At 10k users this is ~6 s vs
-~7.6 minutes. **The plugin, not Keycloak's federation layer, is the
-limiter.**
+The plugin adds about 80 times overhead. At 10k users, this is about
+6 seconds versus about 7.6 minutes. **The plugin, not Keycloak's
+federation layer, is the limiter.**
 
 ### What's NOT the bottleneck
 
-Cheap operations stripped one at a time, no measurable improvement:
+These cheap operations were removed one at a time. Removing them made
+no measurable difference:
 
-- ScimClient construction per call. We cache one client per
-  (dispatcher, component); pre-cache and post-cache numbers are
-  inside measurement noise (~22 users/sec both ways). Apache
-  HttpClient setup isn't the dominant cost.
+- ScimClient construction per call. The plugin caches one client per
+  (dispatcher, component). The pre-cache and post-cache numbers are
+  within measurement noise, about 22 users per second either way.
+  Apache HttpClient setup is not the main cost.
 - The per-user `LOGGER.infof` call.
 - The per-user `setSingleAttribute(LAST_SEEN_ATTRIBUTE, ...)` call.
 
-The cache change is correct architecturally (bounded HTTP-client
-count, bounded resilience4j Retry registry size) and is kept; it just
-doesn't move the throughput needle at this scale.
+The cache change is still correct architecturally: it bounds the
+HTTP-client count and the resilience4j Retry registry size. The
+plugin keeps it, but it does not move the throughput needle at this
+scale.
 
 ### What IS the bottleneck
 
-Per-phase timing inside `ScimClient.create` for a 1000-user
-triggerFullSync (instrumented via `ScimClientMetrics`):
+Per-phase timing inside `ScimClient.create`, for a 1000-user
+`triggerFullSync`, instrumented with `ScimClientMetrics`:
 
 ```
 ScimClient create: count=1002 total=43941ms (avg 43.85ms)
@@ -58,21 +62,19 @@ ScimClient create: count=1002 total=43941ms (avg 43.85ms)
   saveMapping:    0.08ms avg  (0.2%)
 ```
 
-**98% of per-user cost is the SCIM HTTP send.** JPA + adapter cost
-combined is under 1ms. Implication: optimizing JPA, serialization,
-or model traversal would be rounding-error work; only the HTTP path
-matters.
+**98% of per-user cost is the SCIM HTTP send.** JPA and adapter cost
+combined is under 1 ms. So optimizing JPA, serialization, or model
+traversal would be rounding-error work. Only the HTTP path matters.
 
-That 43ms-per-localhost-request is itself surprisingly high. For now
-treat it as the floor and parallelize around it; a follow-up may dig
-into Apache HttpClient connection pool / keepalive tuning inside the
-SCIM SDK.
+That 43 ms per localhost request is itself surprisingly high. For
+now, treat it as the floor, and parallelize around it. A follow-up
+may look into Apache HttpClient connection pool and keepalive tuning
+inside the SCIM SDK.
 
 ### Async dispatch: ~9× throughput
 
-Pulling SCIM HTTP off the user-import thread onto a worker pool
-(default 8 threads) collapses synchronous serialization on HTTP
-latency:
+Moving SCIM HTTP off the user-import thread, onto a worker pool
+(default 8 threads), removes the serial wait on HTTP latency:
 
 | Configuration | triggerFullSync (1000 users) | Throughput |
 | --- | ---: | ---: |
@@ -91,50 +93,51 @@ Verified at full 10k scale (`./gradlew performanceTest -Dperf.userCount=10000`):
 | Lazy-import via admin REST search | 1m 21.78s | 122.3 users/sec |
 | Reconciler deletion (parallel) | 15.70 s | 636.9 deletes/sec |
 
-Throughput holds (and slightly improves) at scale — JIT compilation
+Throughput holds, and slightly improves, at scale. JIT compilation
 has more time to take effect, the worker pool reaches steady state,
-and HTTP keepalive amortizes per-request setup. Lazy-import is
-slower than triggerFullSync because each `users().search()` is a
-separate admin REST round-trip serialized on the test side.
+and HTTP keepalive spreads out per-request setup cost. Lazy import is
+slower than `triggerFullSync`, because each `users().search()` is a
+separate admin REST round-trip, run one at a time on the test side.
 
-The remaining gap to no-plugin (~245 vs ~3636/sec) is the 8-worker
-concurrency cap on a ~43 ms/request HTTP path: 8/0.043 ≈ 186 —
-close to what we observe. To push further: raise pool size
-(`scim.dispatch.threads` system property) or fix the per-request
+The remaining gap to no-plugin throughput (about 245 versus about
+3636 per second) comes from the 8-worker concurrency cap on a roughly
+43 ms/request HTTP path: 8 / 0.043 is about 186, close to what we
+observe. To push further, raise the pool size (the
+`scim.dispatch.threads` system property), or lower the per-request
 HTTP cost.
 
-Correctness: workers run in their own Keycloak sessions opened via
-`runJobInTransaction`, so they re-fetch model objects by id rather
-than capturing references from the caller's session. Submission is
-deferred until the caller's transaction commits via
-`enlistAfterCompletion` — without this, workers open sessions before
-the caller's writes are committed and `getUserById` returns null.
-On caller rollback, no SCIM op fires (consistent with fail-open
-semantics).
+Correctness note: workers run in their own Keycloak sessions, opened
+through `runJobInTransaction`. So they re-fetch model objects by ID,
+instead of capturing references from the caller's session. Submission
+waits until the caller's transaction commits, through
+`enlistAfterCompletion`. Without this, workers would open sessions
+before the caller's writes commit, and `getUserById` would return
+null. On a caller rollback, no SCIM operation fires. This matches
+fail-open behavior.
 
 ### HTTP keepalive override: per-request cost down ~25%
 
-The 43 ms/localhost-request floor turned out to come from a hardcoded
-line in the SCIM SDK's HTTP layer:
+The 43 ms/localhost-request floor turned out to come from a
+hardcoded line in the SCIM SDK's HTTP layer:
 
 ```java
 // Captain Goldfish scim-sdk-client 1.25.1, ScimHttpClient.getHttpClient()
 clientBuilder.setConnectionReuseStrategy((response, context) -> false);
 ```
 
-That forces a new TCP connection per request — full handshake +
-teardown each call, paying the 30+ ms TCP cost on every operation.
+That forces a new TCP connection per request: a full handshake and
+teardown on every call, paying the 30+ ms TCP cost each time.
 
-The SDK invokes a registered `ConfigManipulator`'s
-`modifyHttpClientConfig` *after* that line, so we can flip it back.
-Implementation in `KeepAliveConfigManipulator`:
+The SDK calls a registered `ConfigManipulator`'s
+`modifyHttpClientConfig` *after* that line, so the plugin can flip it
+back. This is implemented in `KeepAliveConfigManipulator`:
 
-- Restore `DefaultConnectionReuseStrategy.INSTANCE` (honor server
-  Keep-Alive headers, default-keepalive HTTP/1.1).
-- Apply `DefaultConnectionKeepAliveStrategy.INSTANCE` (Apache's
-  reasonable default).
-- Raise the connection pool: `maxPerRoute=32`, `maxTotal=64`.
-  Apache HttpClient defaults to 2/route, 20 total — way below 8
+- Restore `DefaultConnectionReuseStrategy.INSTANCE`. This honors
+  server Keep-Alive headers, with default-keepalive HTTP/1.1.
+- Apply `DefaultConnectionKeepAliveStrategy.INSTANCE`, Apache's
+  reasonable default.
+- Raise the connection pool: `maxPerRoute=32`, `maxTotal=64`. Apache
+  HttpClient defaults to 2 per route and 20 total, well below the 8
   worker threads talking to one SCIM endpoint.
 
 **Per-request HTTP cost (10k-user run, ScimClientMetrics):**
@@ -143,29 +146,29 @@ Implementation in `KeepAliveConfigManipulator`:
 | --- | ---: | ---: | ---: |
 | triggerFullSync | 43.04 ms | 33.97 ms | −21% |
 | lazyImport | 38.56 ms | 24.15 ms | −37% |
-| reconcilerDeletion | (not measured) | 25.23 ms | — |
+| reconcilerDeletion | (not measured) | 25.23 ms | n/a |
 
-Wall-clock at 10k users is **within run-to-run noise** of the
-pre-keepalive numbers, though, because at 8 workers × 34 ms/req we
-saturate at ~235 req/sec — the worker-pool ceiling, not the HTTP
-ceiling. To capitalize on the per-request reduction, raise
+Wall-clock time at 10k users is **within run-to-run noise** of the
+pre-keepalive numbers, though. At 8 workers times 34 ms per request,
+the run saturates at about 235 req/sec: the worker-pool ceiling, not
+the HTTP ceiling. To use the per-request reduction, raise
 `scim.dispatch.threads` (default 8).
 
-Lazy-import sees a bigger per-request improvement (−37%) because
-its concurrent request count is lower (each `users().search()` is
-a separate admin REST round-trip), giving keepalive more time to
-amortize between calls.
+Lazy import sees a bigger per-request improvement (−37%), because its
+concurrent request count is lower. Each `users().search()` is a
+separate admin REST round-trip, which gives keepalive more time to
+pay off between calls.
 
 ### Where the residual ~30 ms comes from: it's the test rig
 
 After the keepalive override, per-request HTTP cost reported by
-`ScimClientMetrics` was still ~25–34 ms, even on "localhost." That
-number turned out to be a property of the test rig, not the
+`ScimClientMetrics` was still about 25 to 34 ms, even on "localhost."
+That number turned out to be a property of the test rig, not the
 plugin or the SCIM SDK.
 
-`HttpLayerBenchmark` (in `src/perfTest/`) strips the test rig away
-and times the HTTP stack end-to-end against an in-process WireMock
-on a loopback port. Three paths, 1000 sequential POSTs each:
+`HttpLayerBenchmark` (in `src/perfTest/`) removes the test rig, and
+times the HTTP stack end to end against an in-process WireMock on a
+loopback port. It tests three paths, 1000 sequential POSTs each:
 
 | Path | Avg per-request |
 | --- | ---: |
@@ -173,15 +176,15 @@ on a loopback port. Three paths, 1000 sequential POSTs each:
 | Apache HttpClient + our keepalive config | 0.22 ms |
 | SCIM SDK `ScimRequestBuilder.create(User).sendRequest()` | 0.17 ms |
 
-All three are within measurement noise of each other; the SDK adds
-nothing meaningful over raw Apache HttpClient. The HTTP stack on
-this hardware sustains ~5000+ req/sec/connection.
+All three are within measurement noise of each other. The SDK adds
+nothing meaningful over raw Apache HttpClient. The HTTP stack on this
+hardware sustains over 5000 req/sec per connection.
 
-**The 30 ms in the perf test is the Testcontainers SSH tunnel.**
-The integration / perf rig configures Keycloak (containerized) to
-reach WireMock (in-process on the host) via
-`host.testcontainers.internal:<port>`. Testcontainers implements
-that hostname by spinning up an SSHD container and routing every
+**The 30 ms in the perf test is the Testcontainers SSH tunnel.** The
+integration and perf rig configures Keycloak, which is containerized,
+to reach WireMock, which runs in-process on the host, through
+`host.testcontainers.internal:<port>`. Testcontainers implements that
+hostname by starting an SSHD container, and routing every
 container-to-host packet through it:
 
 ```
@@ -189,9 +192,10 @@ keycloak-container → docker bridge → ssh-tunnel container →
 docker bridge → host loopback → WireMock
 ```
 
-Each round-trip pays the bridge hop both directions plus the SSH
-relay's per-packet handling. On this hardware that's ~25–30 ms,
-even though the underlying TCP loopback is ~200 µs.
+Each round trip pays the bridge hop in both directions, plus the SSH
+relay's per-packet handling. On this hardware that adds about 25 to
+30 ms, even though the underlying TCP loopback takes about
+200 microseconds.
 
 Run it yourself:
 
@@ -201,117 +205,120 @@ Run it yourself:
 
 #### What this means for production
 
-- The plugin's HTTP layer is **not** the per-request bottleneck.
-  In production, per-request cost is whatever the network path to
-  the SCIM sink actually is — usually the dominant term — plus a
-  sub-millisecond layer cost from us.
-- The "8 workers × 34 ms ≈ 235 req/sec ceiling" we extrapolated
+- The plugin's HTTP layer is **not** the per-request bottleneck. In
+  production, per-request cost is whatever the network path to the
+  SCIM server actually costs, usually the dominant term, plus a
+  sub-millisecond layer cost from the plugin.
+- The "8 workers times 34 ms, about 235 req/sec ceiling" extrapolated
   from the test rig was inflated by tunnel latency. In a deployment
-  where the SCIM sink is reachable on a real network at, say,
-  10 ms RTT, 8 workers ≈ 800 req/sec ceiling; on a fast LAN with
-  1–2 ms RTT, the worker pool is wildly over-provisioned for
-  realistic propagation volumes.
-- `scim.dispatch.threads` should still be raised when targeting
-  a high-latency SCIM sink (the per-worker rate is `1 / RTT`),
-  but not because of overhead the plugin is adding.
+  where the SCIM server is reachable on a real network at, say,
+  10 ms round-trip time, 8 workers give about an 800 req/sec
+  ceiling. On a fast LAN with 1 to 2 ms round-trip time, the worker
+  pool is far more than realistic propagation volumes need.
+- Raise `scim.dispatch.threads` when targeting a high-latency SCIM
+  server, since the per-worker rate is `1 / RTT`. This is not to
+  compensate for overhead the plugin adds.
 
 #### Why we didn't fix the test rig (yet)
 
 The fix is to put WireMock in a sibling Docker container on
-Keycloak's network rather than on the host (no SSH tunnel needed).
-That's a worthwhile follow-up but doesn't change any production
-behavior — only the perf-test numbers — so we've kept the existing
-rig and documented the gap. Tracked as a follow-up; not a 1.0.0
-blocker.
+Keycloak's network, instead of on the host, which needs no SSH
+tunnel. This is a worthwhile follow-up, but it changes only the
+perf-test numbers, not production behavior. So the existing rig
+stays, and this gap is documented instead. This is tracked as a
+follow-up, and is not a 1.0.0 blocker.
 
 ### Reconciler deletion: ~100× throughput
 
 Same async-pool pattern applied to the deletion path. The reconciler
 now runs in two phases:
 
-1. **Identify candidates** (sequential, in caller's session): one
-   JPA query for the mapping list, then one `getUserById` +
-   witness-evaluate per mapping. For 10k mappings this is ~10s of
-   JPA-dominated work.
-2. **Issue DELETEs** (parallel, on the shared worker pool): each
-   delete runs in its own worker session via `runJobInTransaction`.
-   `CompletableFuture.allOf(...).join()` gives the endpoint a
-   synchronous "all deletes complete" return semantics so the
-   `{"deleted": N}` response is meaningful.
+1. **Identify candidates.** This runs sequentially, in the caller's
+   session: one JPA query for the mapping list, then one
+   `getUserById` call and one witness check per mapping. For 10k
+   mappings, this is about 10 seconds of JPA-dominated work.
+2. **Send DELETEs.** This runs in parallel, on the shared worker
+   pool. Each delete runs in its own worker session, through
+   `runJobInTransaction`. `CompletableFuture.allOf(...).join()` makes
+   the endpoint wait for "all deletes complete" before returning, so
+   the `{"deleted": N}` response is accurate.
 
 | Configuration | 1000 deletes | 10k deletes | Throughput (10k) |
 | --- | ---: | ---: | ---: |
 | Synchronous (before) | 46.25 s | (extrapolated ~7.5 min) | ~22/sec |
 | **Parallel (after)** | **0.46 s** | **15.70 s** | **636.9/sec** |
 
-The deletion path is now actually faster than the import path
-(15.7 s vs 46.2 s for the same 10k users). DELETEs have no body to
+The deletion path is now actually faster than the import path, 15.7 s
+versus 46.2 s for the same 10k users. DELETEs have no body to
 serialize, no SCIM response to parse beyond the status line, and
-pool-saturation effects (HTTP keepalive, JIT warmup) appear earlier.
+pool-saturation effects, such as HTTP keepalive and JIT warmup, appear
+earlier.
 
-For 10k mappings with the typical realistic case of "100s of
-deletions, not 10k," the wall-clock is dominated by the Phase 1
-mapping walk (~10s for 10k entries) rather than the deletes
-themselves. Parallelizing Phase 1 is a follow-up if the operator
-shape calls for it; the current behavior is fine for the deletion
-volumes most deployments will see.
+For 10k mappings, in the typical realistic case of hundreds of
+deletions rather than 10,000, wall-clock time is dominated by the
+Phase 1 mapping walk, about 10 seconds for 10k entries, not by the
+deletes themselves. Parallelizing Phase 1 is a follow-up if an
+operator's needs call for it. The current behavior is fine for the
+deletion volumes most deployments see.
 
 ## Remaining headroom and follow-ups
 
 1. **Perf-test rig fidelity**. The Testcontainers SSH tunnel adds
-   ~25–30 ms per request, which dominates the `ScimClientMetrics`
-   numbers in our perf reports. Putting WireMock in a sibling
-   container on Keycloak's Docker network would eliminate the
-   tunnel and give realistic per-request numbers. Doesn't affect
-   production behavior — only test-rig measurements.
-2. **SCIM `/Bulk` batching** where the remote supports it. Collapses
-   N requests into one. Reduces per-request fixed cost but only
-   useful where the remote implements `/Bulk` (many do not).
+   about 25 to 30 ms per request, which dominates the
+   `ScimClientMetrics` numbers in the perf reports. Putting WireMock
+   in a sibling container on Keycloak's Docker network would remove
+   the tunnel, and give realistic per-request numbers. This affects
+   only test-rig measurements, not production behavior.
+2. **SCIM `/Bulk` batching**, where the remote supports it. This
+   collapses N requests into one. It reduces per-request fixed cost,
+   but only where the remote implements `/Bulk`; many do not.
 3. **Group membership at scale**. `GroupAdapter.apply(GroupModel)`
-   eagerly loads ALL members on every group event, and a 10k-member
-   group's PUT carries 10k Member objects each requiring a JPA
-   findById. Even a single membership change re-sends the full
-   membership list. Incremental PATCH (op=ADD / op=REMOVE on
-   `members`) instead of full replace is the right shape — exists as
-   a config flag (`group-patchOp`), but the client-side code still
-   rebuilds the full member list rather than patching the delta.
-4. **LDAP-group-membership-from-LDAP gap**: our scim-ldap-sync mapper
-   has no `onImportGroupFromLDAP` hook. Groups federated from LDAP
-   don't propagate. Architectural gap to address separately.
+   loads all members on every group event, and a 10k-member group's
+   PUT carries 10k Member objects, each needing a JPA `findById`.
+   Even a single membership change re-sends the full membership list.
+   Incremental PATCH (`op=ADD` or `op=REMOVE` on `members`), instead
+   of a full replace, is the right shape. This exists as a config
+   setting (`group-patchOp`), but the client-side code still rebuilds
+   the full member list instead of patching only the change.
+4. **LDAP-group-membership-from-LDAP gap.** The scim-ldap-sync mapper
+   has no `onImportGroupFromLDAP` hook. Groups federated from LDAP do
+   not propagate. This is an architectural gap, to address
+   separately.
 
 ## Why async dispatch is the eventual answer
 
 Even after every plugin-side micro-optimization, the user-import path
-remains synchronous w.r.t. the SCIM POST. In production with realistic
-SCIM sink latency (50–200 ms per request), this caps throughput at
-1000/latency_ms users/sec — purely network-bound. At 100 ms latency,
-that's 10 users/sec.
+stays synchronous with respect to the SCIM POST. In production, with
+realistic SCIM server latency of 50 to 200 ms per request, this caps
+throughput at `1000 / latency_ms` users per second, purely
+network-bound. At 100 ms latency, that is 10 users per second.
 
 To exceed that, we need parallelism or batching:
 
-- **Async dispatch**: queue SCIM operations on a background worker
-  pool; return immediately from the import path. The federation sync
-  is no longer slowed by SCIM latency.
-- **Batching via SCIM /Bulk**: collect N operations and submit as one
-  HTTP request. Only useful where the remote SCIM server implements
-  /Bulk (many do not).
+- **Async dispatch.** Queue SCIM operations on a background worker
+  pool, and return right away from the import path. SCIM latency no
+  longer slows the federation sync.
+- **Batching with SCIM `/Bulk`.** Collect N operations, and submit
+  them as one HTTP request. This is useful only where the remote SCIM
+  server implements `/Bulk`; many do not.
 
-Async is the more universally-applicable lever. Trade-off is on
-failure semantics — currently fail-open with the operation discarded
-on error; with a queue, we want at-least-once delivery and
-back-pressure handling. Some of the design considerations from the
-LDAP-deletion reconciler (idempotency, threshold-based correctness)
-carry over.
+Async is the lever that applies more universally. The trade-off is in
+failure handling. Today the plugin is fail-open, and discards the
+operation on error. With a queue, the goal is at-least-once delivery
+and back-pressure handling. Some design ideas from the LDAP-deletion
+reconciler, such as idempotency and threshold-based correctness, carry
+over.
 
 ## Memory & worst-case under load (dispatch queue)
 
-Throughput is not the only axis: predictable memory and bounded
-worst-case matter at least as much. The async dispatch worker pool is
-`Executors.newFixedThreadPool(8)` — an **unbounded `LinkedBlockingQueue`**.
-Keycloak imports federation users one-per-transaction and enlists a SCIM
-op at each commit; it races far ahead of the 8 SCIM workers, so the queue
-absorbs the whole sync with **no back-pressure**. Measured by
-`DispatchMemoryWorstCaseIT` (KC container memory sampled via cgroup):
+Throughput is not the only axis. Predictable memory and a bounded
+worst case matter at least as much. The async dispatch worker pool is
+`Executors.newFixedThreadPool(8)`, backed by an **unbounded
+`LinkedBlockingQueue`**. Keycloak imports federation users one per
+transaction, and enlists a SCIM operation at each commit. This races
+far ahead of the 8 SCIM workers, so the queue absorbs the whole sync
+with **no back-pressure**. Measured by `DispatchMemoryWorstCaseIT`
+(Keycloak container memory sampled through cgroup):
 
 | Scenario | Peak KC mem | Notes |
 | --- | ---: | --- |
@@ -320,40 +327,46 @@ absorbs the whole sync with **no back-pressure**. Measured by
 | **no plugin**, 10k users | 1038 MiB | Keycloak-only baseline |
 | slow sink (200ms), 10k users | 1219 MiB | elevated for the full 264s drain |
 
-**The decisive finding (slow 200ms sink, 10k):** the sync trigger
-**returned in 4.9 s with only 176 of 10,000 SCIM POSTs done — 9,824 ops
-still queued.** Keycloak finished importing all 10k users while ~98% of
-the SCIM work sat in the unbounded queue; it then drained over 264 s at
-~38/sec (the 8-worker / 200ms ceiling). The import is **not** throttled
-by the downstream — there is **zero back-pressure**.
+**The decisive finding (slow 200 ms server, 10k users):** the sync
+trigger **returned in 4.9 s with only 176 of 10,000 SCIM POSTs done,
+and 9,824 operations still queued.** Keycloak finished importing all
+10k users while about 98% of the SCIM work sat in the unbounded
+queue. That backlog then drained over 264 s, at about 38 per second
+(the 8-worker, 200 ms ceiling). The import is **not** throttled by
+the downstream server. There is **zero back-pressure**.
 
 Implications:
-- **Memory is not bounded.** The queue holds the full sync's backlog; the
-  plugin delta over Keycloak-alone is ~105 MiB (fast) to ~181 MiB (slow)
-  at 10k, and **scales with N** — at 100k the queue would hold ~98k task
-  closures. A slow/unavailable SCIM provider turns a sync into a heap
-  spike proportional to the user count.
-- **`/Bulk` does not address this** — it reduces request *count*, not queue
-  depth, and *adds* a buffer. The high-value fix for predictable memory +
-  worst-case is to **bound the dispatch queue and apply back-pressure**
-  (block the import producer when the queue is full), so a slow sink slows
-  the sync instead of ballooning the heap.
+- **Memory is not bounded.** The queue holds the full sync's backlog.
+  The plugin's memory delta over Keycloak-alone is about 105 MiB
+  (fast) to about 181 MiB (slow) at 10k users, and it **scales with
+  N**: at 100k users the queue would hold about 98k task closures. A
+  slow or unavailable SCIM provider turns a sync into a heap spike
+  sized to the user count.
+- **`/Bulk` does not fix this.** It reduces request *count*, not
+  queue depth, and it *adds* a buffer. The high-value fix for
+  predictable memory and worst-case behavior is to **bound the
+  dispatch queue and apply back-pressure**: block the import producer
+  when the queue is full. This way, a slow SCIM server slows the sync
+  instead of growing the heap without limit.
 
-## SCIM /Bulk — latency-swept characterization
+## SCIM /Bulk: latency-swept characterization
 
-Once the dispatch queue is bounded and back-pressured (above), the open
-question for `/Bulk` is no longer memory — it's **wall-time payoff**: does
-coalescing K user-creates into one `POST /Bulk` actually speed a sync, and
-where? `BulkLatencySweepIT` sweeps **bulk {on, off} × sink latency {fast 5ms,
-medium 50ms, slow 200ms}** at a fixed `N = -Dperf.userCount` (default 2000),
-timing the full sync + async drain and counting HTTP requests the sink saw.
+Once the dispatch queue is bounded and back-pressured (above), the
+open question for `/Bulk` is no longer memory. It is **wall-time
+payoff**: does coalescing K user-creates into one `POST /Bulk`
+actually speed up a sync, and where? `BulkLatencySweepIT` sweeps
+**bulk {on, off} times sink latency {fast 5 ms, medium 50 ms, slow
+200 ms}**, at a fixed `N = -Dperf.userCount` (default 2000). It times
+the full sync plus async drain, and counts the HTTP requests the SCIM
+server saw.
 
-Measured (N = 2000, batch size K = 20, 8 workers; **each cell run 5×** with a
-fresh realm per repeat — realm deleted between repeats so Keycloak's own
-footprint doesn't drift into the next — and memory reported as a
-**baseline-corrected delta**: container RSS peak during the sync minus a
-quiescent sample taken just before it, which isolates the sync's cost from
-Keycloak's ~1 GB absolute baseline):
+Measured with N = 2000, batch size K = 20, and 8 workers. **Each cell
+ran 5 times**, with a fresh realm per repeat. The realm was deleted
+between repeats, so Keycloak's own footprint did not drift into the
+next run. Memory is reported as a **baseline-corrected delta**: the
+container RSS peak during the sync, minus a quiescent sample taken
+just before it. This isolates the sync's cost from Keycloak's roughly
+1 GB absolute baseline:
 
 | Lane | Sink | HTTP req | Ratio (N/req) | Wall (s) mean [min–max] | Mem Δ MiB mean [min–max] |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -364,81 +377,101 @@ Keycloak's ~1 GB absolute baseline):
 | bulk-off | 50 ms | 2002 | 1.00 | 14.1 [14.0–14.4] | 17 [7–23] |
 | bulk-off | 200 ms | 2002 | 1.00 | 53.4 [52.4–53.8] | 10 [2–19] |
 
-† bulk-on at 5 ms is the one non-deterministic throughput cell: the request
-count varied 160–360 across the 5 repeats (ratio 5.6–12.5) because at a fast
-sink the queue drains as fast as it fills, so each `drainTo` grabs an erratic
-handful well under K. All other cells are rock-steady (wall-time sd ≤ 0.6 s).
+† Bulk-on at 5 ms is the one non-deterministic throughput cell. The
+request count varied from 160 to 360 across the 5 repeats (ratio 5.6
+to 12.5), because at a fast SCIM server the queue drains as fast as
+it fills. So each `drainTo` grabs an erratic handful, well under K.
+All other cells are steady, with wall-time standard deviation of
+0.6 s or less.
 
-The **request ratio** is the load-bearing column: it proves batching engaged
-and separates "fewer requests" from "shorter wall-time". Bulk-off is flat at
-1.00 (one `POST /Users` per user); bulk-on rises from 4.2 toward K (≈18) as the
-sink gets slower. The lane coalesces by draining whatever is already queued
-(`take()` one, then `drainTo` up to K−1 more) — there is no flush timer. At 5 ms
-the sink drains about as fast as the import enqueues, so a worker's `drainTo`
-usually finds the queue nearly empty and batches only a few ops (well under
-K=20), making amortization weak; at ≥50 ms ops accumulate in the queue between
-drains, so each `drainTo` grabs ~K and each `POST /Bulk` covers ~K ops. Batch
-fill is thus latency-driven — the amortization mechanism self-engages exactly on
-the slow sinks where it matters.
+The **request ratio** column matters most here. It proves batching
+engaged, and it separates "fewer requests" from "shorter wall-time."
+Bulk-off stays flat at 1.00, one `POST /Users` per user. Bulk-on
+rises from 4.2 toward K (about 18) as the SCIM server gets slower.
+The bulk lane coalesces by draining whatever is already queued: it
+takes one item, then drains up to K−1 more. There is no flush timer.
+At 5 ms, the SCIM server drains about as fast as the import enqueues
+work, so a worker's drain usually finds the queue nearly empty, and
+batches only a few operations, well under K=20. This makes
+amortization weak. At 50 ms or slower, operations build up in the
+queue between drains, so each drain grabs about K, and each
+`POST /Bulk` covers about K operations. Batch fill is latency-driven:
+the amortization effect kicks in exactly on the slow SCIM servers
+where it matters.
 
-### Memory — no real bulk-vs-per-op difference (the apparent gap was baseline drift)
+### Memory: no real bulk-vs-per-op difference (the apparent gap was baseline drift)
 
-A first single-sample pass reported *absolute* peak RSS of 733–894 MiB and
-looked like bulk used ~100 MiB less at 50/200 ms. That was a measurement
-artifact. Over a run, Keycloak's own footprint drifts substantially — the
-quiescent baseline climbed from ~644 MiB to ~1200 MiB across the 30 syncs as the
-JVM warmed and caches filled, independent of which lane was active — and a single
-absolute-peak sample was mostly reading that drift, not the sync.
+A first single-sample pass reported *absolute* peak RSS of 733 to
+894 MiB, and looked like bulk used about 100 MiB less at 50 and
+200 ms. That was a measurement artifact. Over a run, Keycloak's own
+footprint drifts a lot. The quiescent baseline climbed from about
+644 MiB to about 1200 MiB across the 30 syncs, as the JVM warmed up
+and caches filled, regardless of which lane was active. A single
+absolute-peak sample was mostly reading that drift, not the sync
+itself.
 
-Baseline-corrected over 5 repeats, the sync's actual memory cost is **small for
-both lanes** — single- to low-double-digit MiB on top of Keycloak's ~1 GB
-baseline — and the lanes are comparable, not "bulk crushes per-op":
+Baseline-corrected over 5 repeats, the sync's actual memory cost is
+**small for both lanes**: single-digit to low-double-digit MiB on top
+of Keycloak's roughly 1 GB baseline. The lanes are comparable; it is
+not a case of "bulk crushes per-op":
 
-- **50 ms:** per-op 17 [7–23] vs bulk 3 [2–6] MiB — ranges don't overlap, so a
-  real but tiny (~14 MiB, ≈1% of footprint) edge to bulk.
-- **200 ms:** bulk 9 [0–12] vs per-op 10 [2–19] MiB — overlapping, indistinguishable.
-- **5 ms:** bulk 59 [22–121] vs per-op 2 [0–6] MiB — here bulk is clearly
-  *higher* and noisy, the transient churn of erratic batch assembly at a fast sink.
+- **50 ms:** per-op 17 [7–23] versus bulk 3 [2–6] MiB. The ranges do
+  not overlap, so bulk has a real but tiny edge, about 14 MiB, about
+  1% of footprint.
+- **200 ms:** bulk 9 [0–12] versus per-op 10 [2–19] MiB. These ranges
+  overlap, so they are indistinguishable.
+- **5 ms:** bulk 59 [22–121] versus per-op 2 [0–6] MiB. Here bulk is
+  clearly *higher* and noisy. This is the transient churn of erratic
+  batch assembly at a fast SCIM server.
 
-Net: **memory is not a `/Bulk` differentiator.** Bulk neither crushes nor is
-crushed on memory; the per-sync deltas are small, mixed in sign, and dwarfed by
-Keycloak's own footprint and its run-to-run drift. The throughput numbers
-(wall-time, request ratio) are the real and only robust story.
+Net result: **memory is not a `/Bulk` differentiator.** Bulk neither
+wins nor loses clearly on memory. The per-sync deltas are small,
+mixed in sign, and small next to Keycloak's own footprint and its
+run-to-run drift. The throughput numbers, wall-time and request
+ratio, tell the real and only reliable story.
 
-### Honesty caveat — what this measures (and does not)
+### Honesty caveat: what this measures (and does not)
 
-WireMock applies a per-**REQUEST** fixed delay only (the round-trip component)
-and models **NO** per-op server processing cost. So this IT measures bulk's
-**round-trip amortization only** — saving (K−1) round-trips per batch of K. It
-is a **lower bound** on real-world benefit: a real SCIM server also amortizes
-per-request parse/auth/dispatch/framework overhead WireMock can't represent.
-Read the table as "**at least** this much" payoff, **not** "exactly this much";
-it explicitly does **not** assert any server-side amortization.
+WireMock applies only a per-**REQUEST** fixed delay, the round-trip
+component, and models **NO** per-operation server processing cost. So
+this test measures bulk's **round-trip amortization only**: saving
+(K−1) round trips per batch of K. It is a **lower bound** on
+real-world benefit. A real SCIM server also amortizes per-request
+parse, auth, dispatch, and framework overhead, which WireMock cannot
+represent. Read the table as "**at least** this much" payoff, **not**
+"exactly this much." It makes **no** claim about server-side
+amortization.
 
 ### K-sensitivity (analytic)
 
-`scim.dispatch.bulkBatchSize` (K) is read in the Keycloak **container** JVM, and
-the shared perf container starts once, so K can't be varied per-cell on it. The
-K effect is therefore reported **analytically**: bulk request count scales as
-**⌈N/K⌉**, so the measured request ratio at K=20 (≈18 once batches fill)
-demonstrates the mechanism — halving K doubles requests, doubling K halves them,
-all else equal. A dedicated container started with
-`JAVA_OPTS_APPEND=-Dscim.dispatch.bulkBatchSize=<k>` could measure other K
-values directly later.
+`scim.dispatch.bulkBatchSize` (K) is read in the Keycloak
+**container** JVM, and the shared perf container starts once. So K
+cannot vary per cell on it. The effect of K is therefore reported
+**analytically**: bulk request count scales as **⌈N/K⌉**. The
+measured request ratio at K=20 (about 18, once batches fill) shows
+the mechanism at work: halving K doubles requests, and doubling K
+halves them, all else equal. A dedicated container, started with
+`JAVA_OPTS_APPEND=-Dscim.dispatch.bulkBatchSize=<k>`, could measure
+other K values directly later.
 
-### Takeaway — where /Bulk pays off
+### Takeaway: where /Bulk pays off
 
-`/Bulk` pays off **most on high-RTT / slow sinks and least (in fact, it loses)
-on fast/local sinks.** At 200 ms, bulk drains 2000 users in **7.5 s vs 53.4 s**
-per-op — a **~7× wall-time win** — and at 50 ms it's **5.8 s vs 14.1 s** (~2.4×).
-But at 5 ms, bulk is **slower** (6.1 s vs 2.6 s): when a round-trip is cheap,
-the batching lane's coalescing and small-partial-batch overhead (a fast sink
-keeps the queue near-empty, so `drainTo` rarely fills a batch) costs more than
-the round-trips it saves, and the per-op lane's raw 8-worker concurrency wins. The crossover sits at a low single-digit-ms RTT, so the payoff
-is governed almost entirely by network distance to the SCIM sink. **Decision
-input for further /Bulk investment (replace / delete / membership):** prioritize
-it for deployments whose SCIM target is remote/high-latency; for local or
-very-low-latency sinks, the per-op lane is already faster and `/Bulk` should
-stay opt-in (it remains off by default). Because WireMock models round-trips
-only, these wins are a floor — a real server's per-request overhead pushes the
-crossover lower and widens the slow-sink advantage.
+`/Bulk` pays off **most on high-RTT or slow SCIM servers, and least
+(it actually loses) on fast or local ones.** At 200 ms, bulk drains
+2000 users in **7.5 s versus 53.4 s** for per-op, a **roughly 7×
+wall-time win**. At 50 ms, it is **5.8 s versus 14.1 s** (about
+2.4×). But at 5 ms, bulk is **slower** (6.1 s versus 2.6 s). When a
+round trip is cheap, the batching lane's coalescing and
+small-partial-batch overhead cost more than the round trips they
+save. A fast SCIM server keeps the queue near empty, so `drainTo`
+rarely fills a batch, and the per-op lane's raw 8-worker concurrency
+wins instead. The crossover sits at a low single-digit-millisecond
+round-trip time, so network distance to the SCIM server governs the
+payoff almost entirely. **Decision input for further `/Bulk`
+investment (replace, delete, membership):** prioritize it for
+deployments whose SCIM target is remote or high-latency. For local or
+very-low-latency servers, the per-op lane is already faster, so
+`/Bulk` should stay opt-in; it remains off by default. Because
+WireMock models round trips only, these wins are a floor. A real
+server's per-request overhead would push the crossover lower, and
+widen the slow-server advantage.
