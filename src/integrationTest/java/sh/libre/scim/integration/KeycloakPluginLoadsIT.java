@@ -34,7 +34,7 @@ class KeycloakPluginLoadsIT {
 
     @Container
     static final KeycloakContainer keycloak =
-        new KeycloakContainer(System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:25.0.6"))
+        new KeycloakContainer(IntegrationTestBase.KEYCLOAK_IMAGE)
             .withProviderLibsFrom(List.of(PLUGIN_JAR));
 
     @Test
