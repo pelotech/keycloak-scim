@@ -1,11 +1,11 @@
 # Tracing
 
 keycloak-scim emits [OpenTelemetry](https://opentelemetry.io/) spans for
-every outbound SCIM operation. On Keycloak 26+, where Quarkus bundles the
-OTel SDK, these spans appear automatically in whatever tracing backend you
-have configured — no additional plugin configuration required. On
-Keycloak 25.x, the plugin detects that OTel is absent and falls back to a
-no-op; tracing is silently disabled.
+every outbound SCIM operation. On Keycloak 26 and later, Quarkus bundles
+the OTel SDK. These spans appear automatically in whatever tracing
+backend you have configured. The plugin needs no extra configuration for
+this. On Keycloak 25.x, OTel is absent. The plugin detects this and falls
+back to a no-op. Tracing stays silently disabled on 25.x.
 
 ## Requirements
 
@@ -17,10 +17,13 @@ no-op; tracing is silently disabled.
 
 ## What gets traced
 
-Each SCIM operation becomes a `CLIENT` span that is a child of whatever
-Keycloak span is active on the calling thread (e.g. the admin-REST handler
-that triggered the propagation). Sync operations produce one outer span
-wrapping all per-resource create/replace calls.
+Each SCIM operation becomes a `CLIENT` span. It is a child of whatever
+Keycloak span is active on the calling thread, for example the
+admin-REST handler that triggered the propagation. A sync produces one
+outer span, wrapping every per-resource create or replace call inside
+it. For users, a `sync-refresh` run pages through the population, one
+page per transaction. All of those page transactions run inside that
+same outer `scim.sync.refresh` span.
 
 | Span name | Triggered by |
 | --- | --- |
@@ -31,20 +34,22 @@ wrapping all per-resource create/replace calls.
 | `scim.group.member.remove` | Single user removed from a group (`group-patchOp=true`) |
 | `scim.sync.refresh` | `refreshResources` (outbound triggerFullSync) |
 | `scim.sync.import` | `importResources` (inbound sync) |
+| `scim.deactivate` | User deprovisioning propagation, when `delete-mode=deactivate` |
+| `scim.bulkCreate` | Batched user-create propagation on the LDAP-import path, when `bulk-enabled=true` |
 
 ### Span attributes
 
 | Attribute | Value |
 | --- | --- |
 | `scim.resource_type` | `User` or `Group` |
-| `server.address` | Base URL of the SCIM endpoint |
+| `server.address` | Base URL of the SCIM server |
 | `http.response.status_code` | HTTP status returned by the SCIM server |
-| `error.type` | Set on non-2xx responses (`HTTP_4xx`/`HTTP_5xx`) or exceptions |
+| `error.type` | `HTTP_<code>` on a response of 400 or higher, or the exception's class name when the operation recorded an error |
 
 ## Enabling tracing in Keycloak
 
-Keycloak 26 ships OpenTelemetry support via Quarkus. Enable it with two
-flags and point it at an OTLP collector:
+Keycloak 26 ships OpenTelemetry support through Quarkus. Enable it with
+two flags, and point it at an OTLP collector:
 
 ```sh
 kc.sh start \
@@ -52,21 +57,24 @@ kc.sh start \
   --tracing-endpoint=http://otel-collector:4317
 ```
 
-Or via environment variables (useful in container deployments):
+Or set environment variables instead. This is useful for container
+deployments:
 
 ```sh
 KC_TRACING_ENABLED=true
 KC_TRACING_ENDPOINT=http://otel-collector:4317
 ```
 
-The OTLP exporter sends over gRPC by default (port 4317). For HTTP/protobuf
-export use port 4318 and set `--tracing-endpoint-type=http/protobuf`.
+The OTLP exporter sends over gRPC by default, on port 4317. For
+HTTP/protobuf export, use port 4318 and set
+`--tracing-endpoint-type=http/protobuf`.
 
 ### Sampler
 
-Keycloak defaults to `parent_based_always_on` — requests that arrive with
-an incoming trace context are sampled; standalone requests are sampled
-100%. For high-traffic environments use a ratio sampler:
+Keycloak defaults to `parent_based_always_on`. A request that arrives
+with an incoming trace context is sampled. A standalone request is
+sampled at 100%. For high-traffic environments, use a ratio sampler
+instead:
 
 ```sh
 KC_TRACING_SAMPLER_TYPE=ratio
@@ -75,8 +83,8 @@ KC_TRACING_SAMPLER_RATIO=0.1   # 10 %
 
 ## Example: Jaeger via Docker Compose
 
-A minimal setup that boots Keycloak 26 with tracing enabled alongside a
-Jaeger all-in-one backend and a local SCIM sink:
+This is a minimal setup. It boots Keycloak 26 with tracing enabled,
+alongside a Jaeger all-in-one backend and a local SCIM sink:
 
 ```yaml
 services:
@@ -112,15 +120,16 @@ cp build/libs/keycloak-scim-*-all.jar .
 docker compose up
 ```
 
-Open the Jaeger UI at `http://localhost:16686`, select the `keycloak`
-service, and trigger a SCIM operation (create a user, run a sync). You
-should see `scim.create` / `scim.replace` spans nested under the
-Keycloak request span that initiated them.
+Open the Jaeger UI at `http://localhost:16686`. Select the `keycloak`
+service. Trigger a SCIM operation, for example create a user or run a
+sync. You should see `scim.create` and `scim.replace` spans nested
+under the Keycloak request span that started them.
 
 ## Example: Kubernetes with Grafana Tempo
 
-Add the tracing env vars to your Keycloak Deployment alongside the plugin
-mount from the [Quick start](../README.md#quick-start):
+Add the tracing environment variables to your Keycloak Deployment,
+alongside the plugin mount from the
+[Quick start](../README.md#quick-start):
 
 ```yaml
 env:
@@ -135,6 +144,6 @@ env:
     value: "0.1"
 ```
 
-keycloak-scim spans will appear in Tempo (or any other OTLP-compatible
-backend) under the service name `keycloak`, linked to the Keycloak request
-spans that triggered them.
+keycloak-scim spans appear in Tempo, or any other OTLP-compatible
+backend, under the service name `keycloak`. They link to the Keycloak
+request spans that triggered them.
