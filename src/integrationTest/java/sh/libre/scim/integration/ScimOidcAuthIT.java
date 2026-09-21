@@ -216,7 +216,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         attachScimMapper(realm, ldapId);
 
         // Trigger full sync; the async dispatcher fans out one task per user.
-        realm.userStorage().syncUsers(ldapId, "triggerFullSync");
+        triggerFullSync(realm, ldapId);
 
         // Wait for both SCIM POSTs.
         awaitScimPostCount(2);

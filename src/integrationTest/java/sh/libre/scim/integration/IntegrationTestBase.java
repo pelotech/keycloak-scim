@@ -1045,10 +1045,19 @@ public abstract class IntegrationTestBase {
      * Retries with a generous backoff window.
      */
     protected void triggerFullSync(TestRealm r) {
+        triggerFullSync(r.realm(), r.ldapId());
+    }
+
+    /**
+     * Same tolerant retry as {@link #triggerFullSync(TestRealm)}, for a caller
+     * that already holds a {@link RealmResource} and LDAP component id instead
+     * of a {@link TestRealm}.
+     */
+    protected void triggerFullSync(RealmResource realm, String ldapId) {
         RuntimeException last = null;
         for (int attempt = 0; attempt < 15; attempt++) {
             try {
-                r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
+                realm.userStorage().syncUsers(ldapId, "triggerFullSync");
                 return;
             } catch (RuntimeException e) {
                 last = e;
