@@ -9,7 +9,9 @@ to `main`. It does two things in one job:
    release and keeps an open release PR.
 2. **OCI build + publish** builds a multi-arch image. It pushes the
    image to `ghcr.io/pelotech/keycloak-scim`, signs it with cosign
-   keyless, and attaches SPDX and CycloneDX SBOMs.
+   keyless. It builds an SPDX SBOM and a CycloneDX SBOM, attaches the
+   SPDX one to the image as a cosign attestation, and uploads both as
+   workflow artifacts.
 
 The image tag depends on what happened in the run:
 
@@ -21,7 +23,7 @@ The image tag depends on what happened in the run:
   commit against a cluster without cutting a tag.
 
 Operators consume the image through the Kubernetes `image` volume type
-(Kubernetes 1.36+, see the README's ImageVolume section).
+(Kubernetes 1.33+, see the README's ImageVolume section).
 
 ## Conventional commits
 
