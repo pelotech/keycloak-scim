@@ -379,10 +379,10 @@ RFC 7643 §4.3.
 # Enterprise User extension (field must be type=string; no 'multi')
 kcDept = urn:ietf:params:scim:schemas:extension:enterprise:2.0:User:department
 
-# Custom schema — boolean attribute
+# Custom schema: boolean attribute
 kcActive = urn:example:custom:2.0:User:active ; type=boolean
 
-# Custom schema — multivalued string attribute
+# Custom schema: multivalued string attribute
 kcLabels = urn:example:custom:2.0:User:labels ; multi
 ```
 
