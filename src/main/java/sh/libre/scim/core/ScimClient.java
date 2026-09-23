@@ -62,8 +62,8 @@ public class ScimClient {
     // TCP connect. A same-region connect takes under 50ms, so 3 seconds
     // leaves wide margin.
     private static final int SYNC_PAGE_CONNECT_TIMEOUT_SECONDS = 3;
-    // Read: must hold one real SCIM write. The measured push takes 0.23s,
-    // so 10 seconds is about 40 times that.
+    // Read: must hold one real SCIM write. A normal push takes well under
+    // a second, so 10 seconds leaves a wide margin.
     private static final int SYNC_PAGE_SOCKET_TIMEOUT_SECONDS = 10;
 
     final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
