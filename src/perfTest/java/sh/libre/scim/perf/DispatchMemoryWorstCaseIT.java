@@ -86,7 +86,7 @@ class DispatchMemoryWorstCaseIT extends PerfTestBase {
         var r = newRealmWithScimAndLdap();
         seeded.addAll(seedLdapUsers("perfm" + users, users));
 
-        var sampler = new ContainerMemorySampler(keycloak);
+        var sampler = new ContainerMemorySampler(keycloak());
         var notes = new LinkedHashMap<String, String>();
         notes.put("users", String.valueOf(users));
         notes.put("sinkDelayMs", "0");
@@ -121,7 +121,7 @@ class DispatchMemoryWorstCaseIT extends PerfTestBase {
         var r = newRealmWithLdapOnly();
         seeded.addAll(seedLdapUsers("perfb", users));
 
-        var sampler = new ContainerMemorySampler(keycloak);
+        var sampler = new ContainerMemorySampler(keycloak());
         var notes = new LinkedHashMap<String, String>();
         notes.put("users", String.valueOf(users));
         notes.put("sinkDelayMs", "n/a");
@@ -162,7 +162,7 @@ class DispatchMemoryWorstCaseIT extends PerfTestBase {
         var r = newRealmWithScimAndLdap();
         seeded.addAll(seedLdapUsers("perfs", users));
 
-        var sampler = new ContainerMemorySampler(keycloak);
+        var sampler = new ContainerMemorySampler(keycloak());
         var notes = new LinkedHashMap<String, String>();
         notes.put("users", String.valueOf(users));
         notes.put("sinkDelayMs", String.valueOf(delayMs));

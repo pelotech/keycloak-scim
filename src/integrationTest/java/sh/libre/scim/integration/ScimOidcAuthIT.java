@@ -46,14 +46,14 @@ import static org.awaitility.Awaitility.await;
  * endpoint. WireMock acts as the SCIM sink and captures outbound
  * requests including the Authorization header.
  *
- * <p>Task 18: scaffold + sanity test ({@link #harnessLoadsAndComponentConfiguresCleanly}).
- * <p>Task 19: JWT verification happy path ({@link #clientCredentialsHappyPath_jwtMintedAndVerifiable}).
- * <p>Task 20: token cache reused across subsequent events ({@link #cachedAcrossSubsequentEvents}).
- * <p>Task 21: bulk-import workers share the token cache ({@link #cachedAcrossAsyncWorkers}).
- * <p>Task 22: token re-minted after expires_in elapses ({@link #expiryTriggersRefresh}).
- * <p>Task 23: SCIM 401 triggers cache invalidation and retry ({@link #scim401TriggersRefreshAndRetry}).
- * <p>Task 24: token endpoint outage fails op fail-open, plugin survives ({@link #tokenEndpointDown_eventFailsButPluginSurvives}).
- * <p>Task 25: oauth-scope round-trips into JWT scope claim end-to-end ({@link #scopeForwardedToTokenEndpoint}).
+ * <p>Scaffold and sanity check: {@link #harnessLoadsAndComponentConfiguresCleanly}.
+ * <p>JWT verification happy path: {@link #clientCredentialsHappyPath_jwtMintedAndVerifiable}.
+ * <p>Token cache reused across subsequent events: {@link #cachedAcrossSubsequentEvents}.
+ * <p>Bulk-import workers share the token cache: {@link #cachedAcrossAsyncWorkers}.
+ * <p>Token re-minted after expires_in elapses: {@link #expiryTriggersRefresh}.
+ * <p>SCIM 401 triggers cache invalidation and retry: {@link #scim401TriggersRefreshAndRetry}.
+ * <p>Token endpoint outage fails the operation, plugin survives: {@link #tokenEndpointDown_eventFailsButPluginSurvives}.
+ * <p>oauth-scope round-trips into the JWT scope claim: {@link #scopeForwardedToTokenEndpoint}.
  */
 class ScimOidcAuthIT extends IntegrationTestBase {
 
@@ -75,8 +75,8 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         var realmRep = new RealmRepresentation();
         realmRep.setRealm(realmName);
         realmRep.setEnabled(true);
-        admin.realms().create(realmRep);
-        realm = admin.realm(realmName);
+        admin().realms().create(realmRep);
+        realm = admin().realm(realmName);
 
         createServiceAccountClient(realm);
 
@@ -146,7 +146,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         String jwt = authHeader.substring("Bearer ".length());
 
         // Fetch the realm's JWKS from the external (test-JVM-accessible) URL.
-        // keycloak.getAuthServerUrl() is the externally-mapped URL the test JVM uses.
+        // keycloak().getAuthServerUrl() is the externally-mapped URL the test JVM uses.
         var claims = verifyJwtAgainstRealmJwks(jwt);
 
         // Verify key claims that a downstream receiver would check.
@@ -163,7 +163,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 20: Token cache is reused across subsequent SCIM events.
+     * Token cache is reused across subsequent SCIM events.
      *
      * <p>With a WireMock token endpoint returning a long-lived token,
      * two sequential admin-user creates must share the same bearer —
@@ -191,7 +191,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 21: Concurrent async workers from LDAP full sync share the token cache.
+     * Concurrent async workers from LDAP full sync share the token cache.
      *
      * <p>With N=2 LDAP users (the seed file has alice + bob), triggering a full
      * sync fans out via {@code ScimDispatcher.runAsync}. Despite concurrent dispatch,
@@ -216,7 +216,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
         attachScimMapper(realm, ldapId);
 
         // Trigger full sync; the async dispatcher fans out one task per user.
-        realm.userStorage().syncUsers(ldapId, "triggerFullSync");
+        triggerFullSync(realm, ldapId);
 
         // Wait for both SCIM POSTs.
         awaitScimPostCount(2);
@@ -228,7 +228,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 22: Token is re-minted after {@code expires_in} elapses.
+     * Token is re-minted after {@code expires_in} elapses.
      *
      * <p>With {@code expires_in=1}, the skew logic computes
      * {@code refreshAt = now + max(0, 1 - 30) = now}, so every call to
@@ -267,7 +267,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 23: SCIM 401 triggers cache invalidation and a retry with a re-minted token.
+     * SCIM 401 triggers cache invalidation and a retry with a re-minted token.
      *
      * <p>The WireMock SCIM sink returns 401 on the first POST and 201 on the second.
      * {@code sendWithAuthRefresh} in {@code ScimClient} calls {@code invalidate()} on
@@ -323,7 +323,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 24: A token endpoint outage causes the operation to fail fail-open,
+     * A token endpoint outage causes the operation to fail fail-open,
      * but the plugin survives and processes subsequent events once the endpoint recovers.
      */
     @Test
@@ -403,7 +403,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
     }
 
     /**
-     * Task 25: The {@code oauth-scope} component config is forwarded to the token
+     * The {@code oauth-scope} component config is forwarded to the token
      * endpoint and round-trips into the JWT's {@code scope} claim.
      *
      * <p>A {@code scim:write} client scope is created in the realm, attached as
@@ -476,7 +476,7 @@ class ScimOidcAuthIT extends IntegrationTestBase {
      */
     private JWTClaimsSet verifyJwtAgainstRealmJwks(String jwt) throws Exception {
         if (cachedJwkSet == null) {
-            String externalBaseUrl = keycloak.getAuthServerUrl();
+            String externalBaseUrl = keycloak().getAuthServerUrl();
             URL jwksUrl = java.net.URI.create(
                 externalBaseUrl + "/realms/" + realmName + "/protocol/openid-connect/certs"
             ).toURL();

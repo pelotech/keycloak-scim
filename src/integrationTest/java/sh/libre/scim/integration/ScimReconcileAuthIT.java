@@ -170,7 +170,7 @@ class ScimReconcileAuthIT extends IntegrationTestBase {
     private HttpResponse<String> sendToMetrics(
             String method, String path, String realmName, String token) throws Exception {
         var request = HttpRequest.newBuilder(URI.create(
-            keycloak.getAuthServerUrl() + "/realms/" + realmName + "/scim-reconcile/" + path));
+            keycloak().getAuthServerUrl() + "/realms/" + realmName + "/scim-reconcile/" + path));
         if ("POST".equals(method)) {
             request.POST(HttpRequest.BodyPublishers.noBody());
         } else {
