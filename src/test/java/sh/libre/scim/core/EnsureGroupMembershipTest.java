@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
@@ -11,7 +12,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
+import org.keycloak.connections.jpa.JpaConnectionProvider;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.keycloak.common.util.MultivaluedHashMap;
@@ -43,6 +46,11 @@ class EnsureGroupMembershipTest {
         when(context.getRealm()).thenReturn(realm);
         when(session.groups()).thenReturn(groups);
         when(groups.getGroupById(realm, "grp-1")).thenReturn(group);
+        // The fallback replace builds its own adapter, and an adapter reads the
+        // entity manager from the session.
+        var jpa = mock(JpaConnectionProvider.class);
+        when(session.getProvider(JpaConnectionProvider.class)).thenReturn(jpa);
+        when(jpa.getEntityManager()).thenReturn(mock(EntityManager.class));
 
         // ScimClient ctor does not touch the session; the spy stubs the public methods under test
         return new ScimClient(model, session);
@@ -95,12 +103,12 @@ class EnsureGroupMembershipTest {
         var group = mock(GroupModel.class);
         when(group.getId()).thenReturn("f:ldap-component:cn=engineers,ou=groups");
         var client = spy(newClient(false, group));
-        doNothing().when(client).replace(any(), any());
+        doReturn(true).when(client).replaceBody(any(), any());
 
         boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
 
         assertTrue(applied);
-        verify(client, never()).replace(any(), any());
+        verify(client, never()).replaceBody(any(), any());
     }
 
     @Test
@@ -109,10 +117,50 @@ class EnsureGroupMembershipTest {
         var group = mock(GroupModel.class);
         when(group.getId()).thenReturn("grp-1");
         var client = spy(newClient(false, group));
-        doNothing().when(client).replace(any(), any());
+        doReturn(true).when(client).replaceBody(any(), any());
 
-        client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
 
-        verify(client).replace(any(), any());
+        assertTrue(applied);
+        verify(client).replaceBody(any(), any());
+    }
+
+    /**
+     * An excluded group has nothing to push and nothing to retry, so the
+     * membership counts as handled. The replace reports false for the same
+     * adapter, because it answers whether it pushed.
+     */
+    @Test
+    void groupPatchOpOff_excludedGroup_reportsHandled() {
+        var group = mock(GroupModel.class);
+        when(group.getId()).thenReturn("grp-1");
+        var client = spy(newClient(false, group));
+        doAnswer(invocation -> {
+            // The replace applies the model, finds the exclusion, and pushes
+            // nothing. This stub stands in for that.
+            Adapter<?, ?> adapter = invocation.getArgument(0);
+            adapter.skip = true;
+            return false;
+        }).when(client).replaceBody(any(), any());
+
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+
+        assertTrue(applied);
+    }
+
+    /**
+     * The replace pushed nothing and raised nothing, so the membership is not
+     * propagated. The caller must retry on a later import.
+     */
+    @Test
+    void groupPatchOpOff_replaceThatPushedNothing_reportsNotApplied() {
+        var group = mock(GroupModel.class);
+        when(group.getId()).thenReturn("grp-1");
+        var client = spy(newClient(false, group));
+        doReturn(false).when(client).replaceBody(any(), any());
+
+        boolean applied = client.patchGroupMembership(GroupAdapter::new, "grp-1", "user-1", false);
+
+        assertFalse(applied);
     }
 }

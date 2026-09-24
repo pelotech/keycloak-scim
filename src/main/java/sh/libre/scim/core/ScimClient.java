@@ -5,6 +5,7 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.NoResultException;
 import jakarta.ws.rs.ProcessingException;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -49,6 +50,22 @@ public class ScimClient {
     private static final String USER_PATCH_OP_KEY = "user-patchOp";
     private static final String DELETE_MODE_KEY = ScimStorageProviderFactory.DELETE_MODE;
 
+    // Every other caller uses these. They have no page to fit inside, and a
+    // slow endpoint should not fail a user's login.
+    private static final int DEFAULT_REQUEST_TIMEOUT_SECONDS = 30;
+    private static final int DEFAULT_CONNECT_TIMEOUT_SECONDS = 30;
+    private static final int DEFAULT_SOCKET_TIMEOUT_SECONDS = 30;
+
+    // Pool lease wait: time to get a free pooled connection. This never
+    // touches the network, so 1 second is ample.
+    private static final int SYNC_PAGE_REQUEST_TIMEOUT_SECONDS = 1;
+    // TCP connect. A same-region connect takes under 50ms, so 3 seconds
+    // leaves wide margin.
+    private static final int SYNC_PAGE_CONNECT_TIMEOUT_SECONDS = 3;
+    // Read: must hold one real SCIM write. A normal push takes well under
+    // a second, so 10 seconds leaves a wide margin.
+    private static final int SYNC_PAGE_SOCKET_TIMEOUT_SECONDS = 10;
+
     final protected Logger LOGGER = Logger.getLogger(ScimClient.class);
     final protected ScimRequestBuilder scimRequestBuilder;
     final protected RetryRegistry registry;
@@ -57,26 +74,94 @@ public class ScimClient {
     final protected String scimApplicationBaseUrl;
     final protected ScimAuthHeaders auth;
 
+    private final int requestTimeoutSeconds;
+    private final int connectTimeoutSeconds;
+    private final int socketTimeoutSeconds;
+
     public ScimClient(ComponentModel model, KeycloakSession session) {
-        this(model, session, new ScimAuthHeaders(model));
+        this(model, session, new ScimAuthHeaders(model), defaultRetryConfig(),
+            DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_SOCKET_TIMEOUT_SECONDS);
     }
 
     // package-private for tests: inject an explicit token source.
     ScimClient(ComponentModel model, KeycloakSession session, OAuthClientCredentialsTokenSource tokenSource) {
-        this(model, session, new ScimAuthHeaders(model, tokenSource));
+        this(model, session, new ScimAuthHeaders(model, tokenSource), defaultRetryConfig(),
+            DEFAULT_REQUEST_TIMEOUT_SECONDS, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_SOCKET_TIMEOUT_SECONDS);
     }
 
-    private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth) {
+    private ScimClient(ComponentModel model, KeycloakSession session, ScimAuthHeaders auth,
+                       RetryConfig retryConfig, int requestTimeoutSeconds, int connectTimeoutSeconds,
+                       int socketTimeoutSeconds) {
         this.model = model;
         this.session = session;
         this.scimApplicationBaseUrl = model.get("endpoint");
         this.auth = auth;
+        this.requestTimeoutSeconds = requestTimeoutSeconds;
+        this.connectTimeoutSeconds = connectTimeoutSeconds;
+        this.socketTimeoutSeconds = socketTimeoutSeconds;
 
         scimRequestBuilder = new ScimRequestBuilder(scimApplicationBaseUrl, genScimClientConfig());
+        registry = RetryRegistry.of(retryConfig);
+    }
 
-        RetryConfig retryConfig = RetryConfig.custom()
-            .maxAttempts(10)
-            .intervalFunction(IntervalFunction.ofExponentialBackoff())
+    /**
+     * A client for one page of a sync run. It uses {@link #syncPageRetryConfig()}:
+     * three attempts, each with a 1-second pool-lease wait, a 3-second connect,
+     * and a 10-second read.
+     *
+     * <p>Three components (1 + 3 + 10 = 14 seconds) times three attempts is 42
+     * seconds. Two backoff waits (500ms + 750ms) add 1.25 seconds. The total is
+     * about 43.25 seconds. A later change adds a 45-second sync-page budget.
+     * This value is meant to fit inside it.
+     *
+     * <p>This is the normal worst case, not a guarantee. Several things can
+     * push one page past it:
+     * <ul>
+     * <li>The read timeout applies per read. A server that sends one byte
+     * every 9 seconds holds an attempt open.</li>
+     * <li>The TLS handshake and the DNS lookup are not covered by any of the
+     * three timeouts.</li>
+     * <li>The connect timeout applies per resolved address. A dual-stack
+     * endpoint can pay it twice.</li>
+     * <li>A 401 or 403 re-mints the token. It then runs the whole retry loop
+     * again. That doubles the figure.</li>
+     * <li>The token minter uses its own HTTP client with no timeouts. A
+     * {@code CLIENT_CREDENTIALS} deployment is not bounded by this change.
+     * That gap is tracked separately.</li>
+     * <li>A failed {@code replace} can fall back to a PATCH and then to a
+     * create. Both sit outside the retry loop and add about 14 seconds
+     * each.</li>
+     * </ul>
+     */
+    static ScimClient forSyncPage(ComponentModel model, KeycloakSession session) {
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncPageRetryConfig(),
+            SYNC_PAGE_REQUEST_TIMEOUT_SECONDS, SYNC_PAGE_CONNECT_TIMEOUT_SECONDS,
+            SYNC_PAGE_SOCKET_TIMEOUT_SECONDS);
+    }
+
+    /** Retry policy for interactive and event-driven calls. */
+    static RetryConfig defaultRetryConfig() {
+        return retryConfig(10, IntervalFunction.ofExponentialBackoff());
+    }
+
+    /** Retry policy for a sync page: three attempts instead of the default ten. */
+    static RetryConfig syncPageRetryConfig() {
+        return retryConfig(3, syncPageInterval());
+    }
+
+    // package-private for tests
+    static IntervalFunction syncPageInterval() {
+        // Backoff starts at 500ms and multiplies by 1.5, capped at 5s. At
+        // three attempts there are two waits: 500ms and 750ms. Neither
+        // reaches the cap. The cap stays as a ceiling in case the attempt
+        // count rises later.
+        return IntervalFunction.ofExponentialBackoff(Duration.ofMillis(500), 1.5, Duration.ofSeconds(5));
+    }
+
+    private static RetryConfig retryConfig(int maxAttempts, IntervalFunction interval) {
+        return RetryConfig.custom()
+            .maxAttempts(maxAttempts)
+            .intervalFunction(interval)
             // Retry on both JAX-RS-level network errors (ProcessingException)
             // and the SCIM SDK's own network-error wrapper (IORuntimeException
             // — what Captain Goldfish throws when Apache HttpClient surfaces
@@ -93,8 +178,6 @@ public class ScimClient {
             .retryOnResult(result ->
                 result instanceof ServerResponse<?> resp && isRetryableStatus(resp.getHttpStatus()))
             .build();
-
-        registry = RetryRegistry.of(retryConfig);
     }
 
     /** The SCIM provider component id — stable across syncs/restarts. */
@@ -117,9 +200,9 @@ public class ScimClient {
     protected ScimClientConfig genScimClientConfig() {
         var builder = ScimClientConfig.builder()
         .httpHeaders(auth.headers())
-        .connectTimeout(30)
-        .requestTimeout(30)
-        .socketTimeout(30)
+        .connectTimeout(connectTimeoutSeconds)
+        .requestTimeout(requestTimeoutSeconds)
+        .socketTimeout(socketTimeoutSeconds)
         .expectedHttpResponseHeaders(auth.expectedResponseHeaders())
         // Override the SDK's hardcoded "no TCP connection reuse" + tiny
         // default pool. See KeepAliveConfigManipulator's javadoc for the
@@ -205,6 +288,9 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void create(
             AdapterFactory<M, S, A> factory, M kcModel) {
+        // This timing covers the adapter build and the apply. The sync path
+        // times the apply alone, in refreshOne, because it builds the adapter
+        // before it knows which push it needs.
         long t0 = System.nanoTime();
         var adapter = getAdapter(factory);
         adapter.apply(kcModel);
@@ -212,6 +298,39 @@ public class ScimClient {
             return;
         }
         ScimClientMetrics.APPLY_MODEL_NANOS.add(System.nanoTime() - t0);
+        createApplied(adapter);
+    }
+
+    /**
+     * Fails when the caller asks to push a resource the operator excluded.
+     *
+     * <p>A push cannot be undone at the endpoint, so a caller that forgets the
+     * flag leaks data. It must fail before the request, not after it.
+     *
+     * @throws IllegalStateException if the adapter is flagged to skip
+     */
+    private static void requireNotSkipped(Adapter<?, ?> adapter, String op) {
+        if (Boolean.TRUE.equals(adapter.skip)) {
+            throw new IllegalStateException(
+                op + " of " + adapter.getId() + ": this resource is excluded and must not be pushed");
+        }
+    }
+
+    /**
+     * Creates the resource that {@code adapter} already holds.
+     *
+     * <p>The caller must have applied the local model to the adapter. Applying
+     * a model is expensive, so the sync path applies once and calls this
+     * method.
+     *
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it found nothing to push
+     * @throws IllegalStateException if the adapter is flagged to skip
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private: the sync path applies the model itself
+    <S extends ResourceNode> boolean createApplied(Adapter<?, S> adapter) {
+        requireNotSkipped(adapter, "create");
         // A mapping from a prior import or provision means there is nothing to
         // create. Unless it's a deactivation tombstone: then the user has come
         // back, so replace() pushes active from isEnabled() to the same remote
@@ -220,11 +339,11 @@ public class ScimClient {
         if (!existing.isEmpty()) {
             if (isDeactivatedTombstone(existing)) {
                 LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
-                this.replace(factory, kcModel);
+                return replaceApplied(adapter);
             }
-            return;
+            return false;
         }
-        handleCreateResponse(adapter, postResource(adapter));
+        return handleCreateResponse(adapter, postResource(adapter));
     }
 
     // POSTs the resource to the SCIM target and returns the raw response. Shared
@@ -406,13 +525,86 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
             AdapterFactory<M, S, A> factory, M kcModel) {
         var adapter = getAdapter(factory);
+        // The model is applied inside the span, so a fault there is traced and
+        // handled the way it always has been.
+        replaceBody(adapter, () -> adapter.apply(kcModel));
+    }
+
+    /**
+     * Replaces the resource that {@code adapter} already holds.
+     *
+     * <p>The caller must have applied the local model to the adapter. Applying
+     * a model is expensive, so the sync path applies once and calls this
+     * method.
+     *
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it pushed nothing and logged the reason
+     * @throws IllegalStateException if the adapter is flagged to skip
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private: the sync path applies the model itself
+    <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter) {
+        return replaceApplied(adapter, null);
+    }
+
+    /**
+     * Replaces the resource that {@code adapter} already holds, with the
+     * mapping row the caller already read.
+     *
+     * <p>A read of that row takes page capacity on the sync path, so a caller
+     * that holds it passes it here.
+     *
+     * @param knownMapping the mapping row for this resource, or null to read
+     *     it here
+     * @return true when this call pushed the resource to the endpoint, false
+     *     when it pushed nothing and logged the reason
+     * @throws IllegalStateException if the adapter is flagged to skip
+     * @throws ScimPropagationException if the push failed
+     */
+    <S extends ResourceNode> boolean replaceApplied(Adapter<?, S> adapter, ScimResource knownMapping) {
+        requireNotSkipped(adapter, "replace");
+        return replaceBody(adapter, () -> {}, knownMapping);
+    }
+
+    /**
+     * The body of a replace, which reads the mapping row itself.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
+     */
+    // package-private so the membership path and its test can reach it
+    <S extends ResourceNode> boolean replaceBody(Adapter<?, S> adapter, Runnable applyModel) {
+        return replaceBody(adapter, applyModel, null);
+    }
+
+    /**
+     * The body of a replace. {@code applyModel} carries the work the public
+     * entry point must still do, so both entry points share one span and one
+     * set of error handlers. An applied adapter passes an empty step.
+     *
+     * <p>{@code knownMapping} holds the mapping row when the caller has it. A
+     * caller that applies the model here has no row yet, because the model
+     * carries the id the row is found by, so it passes null.
+     *
+     * @return true when this call pushed the resource to the endpoint
+     * @throws ScimPropagationException if the push failed
+     */
+    <S extends ResourceNode> boolean replaceBody(
+            Adapter<?, S> adapter, Runnable applyModel, ScimResource knownMapping) {
         try (var span = TRACING.startSpan("scim.replace", adapter.getType(), scimApplicationBaseUrl)) {
             try {
-                adapter.apply(kcModel);
+                applyModel.run();
+                // Only a caller that applies the model here can find this flag.
+                // A caller with an applied adapter is stopped before this point.
                 if (adapter.skip) {
-                    return;
+                    return false;
                 }
-                var resource = adapter.query("findById", adapter.getId()).getSingleResult();
+                // A missing row means the resource is unmapped, so the catch
+                // below turns it into an inconsistent mapping. A caller that
+                // passes a row has already read it and found it.
+                var resource = knownMapping != null
+                    ? knownMapping
+                    : adapter.query("findById", adapter.getId()).getSingleResult();
                 adapter.apply(resource);
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
@@ -481,6 +673,7 @@ public class ScimClient {
                     LOGGER.infof("Cleared deactivation flag for %s %s", adapter.getType(), adapter.getId());
                 }
                 span.setHttpStatus(response.getHttpStatus());
+                return true;
             } catch (NoResultException e) {
                 span.recordError(e);
                 LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
@@ -494,6 +687,9 @@ public class ScimClient {
             } catch (Exception e) {
                 span.recordError(e);
                 LOGGER.error(e);
+                // The fault is logged and not raised, so only the return value
+                // tells the caller that nothing reached the endpoint.
+                return false;
             }
         }
     }
@@ -667,7 +863,9 @@ public class ScimClient {
      *
      * @return {@code true} if applied; {@code false} if it couldn't be applied this
      *     import because the group or user mapping isn't committed yet (lazy-import
-     *     lag). {@code false} is the self-heal signal — the caller retries next
+     *     lag), or because the fallback replace pushed nothing. An excluded group
+     *     counts as applied: there is nothing to push and nothing to retry.
+     *     {@code false} is the self-heal signal — the caller retries next
      *     import — so hard failures throw rather than return it.
      * @throws ScimPropagationException on a hard failure (non-2xx after retries, or
      *     a transport-level failure, both transient).
@@ -694,8 +892,18 @@ public class ScimClient {
                 }
                 return true;
             }
-            this.replace(factory, group);
-            return true;
+            var groupAdapter = getAdapter(factory);
+            boolean pushed = replaceBody(groupAdapter, () -> groupAdapter.apply(group));
+            // The two results answer different questions. The replace says
+            // whether it pushed. This method says whether the membership is
+            // handled, and the caller retries when it is not. An excluded
+            // group has nothing to push and nothing to retry, so it is
+            // handled. Any other empty push leaves the membership behind, and
+            // the next import must try again.
+            if (!pushed && Boolean.TRUE.equals(groupAdapter.skip)) {
+                return true;
+            }
+            return pushed;
         }
 
         var adapter = getAdapter(factory);
@@ -809,10 +1017,15 @@ public class ScimClient {
         LOGGER.info("Refresh resources");
         SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
-            // Use a plain for-loop (not forEach) so a returned StopReason.POLICY
-            // can stop the whole run instead of just skipping one lambda call.
+            // Use a plain for-loop (not forEach) so a returned
+            // RefreshOutcome.STOP can stop the whole run instead of just
+            // skipping one lambda call.
+            // This path drops RefreshOutcome.THROTTLED, so a throttling
+            // endpoint makes it walk the whole tree. Groups accept that,
+            // because a realm holds few groups. The throttle-streak guard
+            // protects the user population, which is large.
             for (var resource : getAdapter(factory).getResourceStream().toList()) {
-                if (refreshOne(factory, resource, syncRes, policy) == StopReason.POLICY) {
+                if (refreshOne(factory, resource, syncRes, policy) == RefreshOutcome.STOP) {
                     return;
                 }
             }
@@ -824,24 +1037,41 @@ public class ScimClient {
      * replaces it when it does. Resources that are not propagated (the
      * {@code admin} user, {@code scim-skip}, {@code propagation-role}
      * exclusions, deactivated mappings) are left alone and not counted. A
-     * propagation failure is counted, and returns {@link StopReason#POLICY} when
-     * {@code policy} says the run should stop.
+     * propagation failure is counted, and returns {@link RefreshOutcome#STOP}
+     * when {@code policy} says the run should stop.
+     *
+     * <p>Only a push that reached the endpoint counts as updated. A push that
+     * did not happen counts as failed, even when the client logged the cause
+     * and raised nothing. Such a failure has no exception to classify, so the
+     * policy decides on it through
+     * {@link SyncErrorPolicy#shouldStopRunOnSilentFailure()}.
+     *
+     * <p>The model is applied once, here. The push methods take the adapter
+     * this method already applied, because applying it again is expensive.
+     * The replace path also takes the mapping row read here, so each user
+     * costs one read of it.
      *
      * @param factory adapter factory for this resource's type
      * @param resource the local resource to reconcile
      * @param syncRes the run's counters; updated in place
      * @param policy decides whether a propagation failure stops the run
-     * @return {@link StopReason#POLICY} if the caller must stop the run,
-     *     {@link StopReason#NONE} otherwise. Only these two values are
-     *     reachable from this method; a caller that discards the return
-     *     value (e.g. a {@code forEach}) silently drops the policy stop.
+     * @return {@link RefreshOutcome#STOP} if the caller must stop the run,
+     *     {@link RefreshOutcome#THROTTLED} if the endpoint throttled this
+     *     push, {@link RefreshOutcome#CONTINUE} otherwise. A caller that
+     *     discards the return value (e.g. a {@code forEach}) silently drops
+     *     the policy stop and the throttle report.
      */
     // package-private: shared by the paged user path and the unpaged group path
-    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> StopReason refreshOne(
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
         var adapter = getAdapter(factory);
         try {
+            // This timing covers the apply alone. The create entry point times
+            // the adapter build with it, so the two figures are close but not
+            // the same span of work.
+            long t0 = System.nanoTime();
             adapter.apply(resource);
+            long applyNanos = System.nanoTime() - t0;
             LOGGER.infof("Reconciling local resource %s", adapter.getId());
             // adapter.skip is a Boolean field; Mockito mocks skip field
             // initializers, so it's null (not the real default of false) on a
@@ -849,7 +1079,7 @@ public class ScimClient {
             // directly, or a mocked adapter with no explicit skip would NPE.
             if (adapter.skipRefresh() || Boolean.TRUE.equals(adapter.skip)) {
                 LOGGER.debugf("Skipping refresh for excluded resource %s", adapter.getId());
-                return StopReason.NONE;
+                return RefreshOutcome.CONTINUE;
             }
             var mapping = adapter.getMapping();
             if (mapping != null && mapping.getDeactivatedAt() != null) {
@@ -858,27 +1088,54 @@ public class ScimClient {
                 // would deactivate it again next pass. Reactivation needs a
                 // re-import or an explicit admin action.
                 LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
-                return StopReason.NONE;
+                return RefreshOutcome.CONTINUE;
             }
+            boolean pushed;
+            String branch;
             if (mapping == null) {
                 LOGGER.info("Creating it");
-                this.create(factory, resource);
+                // The meter reports the cost of a create, so only this branch
+                // adds the apply it paid for.
+                ScimClientMetrics.APPLY_MODEL_NANOS.add(applyNanos);
+                branch = "create";
+                pushed = createApplied(adapter);
             } else {
                 LOGGER.info("Replacing it");
-                this.replace(factory, resource);
+                branch = "replace";
+                // Hand over the row read above. A second read of it would take
+                // page capacity and return the same row.
+                pushed = replaceApplied(adapter, mapping);
+            }
+            if (!pushed) {
+                // The push did not happen and raised nothing. Count it as a
+                // failure, or the run reports work the endpoint never saw.
+                // Name the branch, because its own error line carries no
+                // resource id.
+                LOGGER.warnf("SCIM sync: the %s of resource %s pushed nothing and reported no error",
+                    branch, adapter.getId());
+                syncRes.increaseFailed();
+                // There is no exception to classify, so ask the policy about a
+                // failure of this kind.
+                if (policy.shouldStopRunOnSilentFailure()) {
+                    LOGGER.errorf("SCIM sync aborted after resource %s pushed nothing", adapter.getId());
+                    return RefreshOutcome.STOP;
+                }
+                return RefreshOutcome.CONTINUE;
             }
             syncRes.increaseUpdated();
-            return StopReason.NONE;
+            return RefreshOutcome.CONTINUE;
         } catch (ScimPropagationException e) {
             LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
                 adapter.getId(), e.getClass().getSimpleName());
             syncRes.increaseFailed();
+            // Test the policy first. Under sync-on-error=stop a throttled push
+            // must also stop the run.
             if (policy.shouldStopRun(e)) {
                 LOGGER.errorf("SCIM sync aborted after %s on resource %s",
                     e.getClass().getSimpleName(), adapter.getId());
-                return StopReason.POLICY;
+                return RefreshOutcome.STOP;
             }
-            return StopReason.NONE;
+            return e.isThrottled() ? RefreshOutcome.THROTTLED : RefreshOutcome.CONTINUE;
         }
     }
 
