@@ -3,7 +3,7 @@ package sh.libre.scim.core.exceptions;
 /**
  * A non-2xx HTTP response (after retries) or a transport-level failure.
  * Transient iff the status is 429 or 5xx, or the failure is transport-level
- * (httpStatus == 0).
+ * (httpStatus == 0). Throttled iff the status is exactly 429.
  */
 public class InvalidResponseFromScimEndpointException extends ScimPropagationException {
 
@@ -29,5 +29,10 @@ public class InvalidResponseFromScimEndpointException extends ScimPropagationExc
     @Override
     public boolean isTransient() {
         return httpStatus == 0 || httpStatus == 429 || httpStatus >= 500;
+    }
+
+    @Override
+    public boolean isThrottled() {
+        return httpStatus == 429;
     }
 }

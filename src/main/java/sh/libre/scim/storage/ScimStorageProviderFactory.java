@@ -177,9 +177,9 @@ public class ScimStorageProviderFactory
                 .name("sync-on-error")
                 .type(ProviderConfigProperty.LIST_TYPE)
                 .label("On batch-sync failure")
-                .helpText("auto = skip a record that fails for a permanent reason, stop the run "
-                    + "if the endpoint is unreachable (default). continue = always skip and keep going. "
-                    + "stop = abort the run on the first failure.")
+                .helpText("auto (default) = skip a record that fails for a permanent reason or is throttled "
+                    + "(429), stop the run if the endpoint is unreachable or returns a 5xx. continue = always "
+                    + "skip and keep going. stop = abort the run on the first failure.")
                 .options("auto", "continue", "stop")
                 .defaultValue("auto")
                 .add()

@@ -809,45 +809,76 @@ public class ScimClient {
         LOGGER.info("Refresh resources");
         SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
-            // Use a plain for-loop (not forEach) so return can stop the whole run,
-            // not just skip a single lambda invocation.
+            // Use a plain for-loop (not forEach) so a returned StopReason.POLICY
+            // can stop the whole run instead of just skipping one lambda call.
             for (var resource : getAdapter(factory).getResourceStream().toList()) {
-                var adapter = getAdapter(factory);
-                try {
-                    adapter.apply(resource);
-                    LOGGER.infof("Reconciling local resource %s", adapter.getId());
-                    if (!adapter.skipRefresh()) {
-                        var mapping = adapter.getMapping();
-                        if (mapping != null && mapping.getDeactivatedAt() != null) {
-                            // Don't re-push a deactivated user just because a
-                            // stale local copy still exists; that would fight
-                            // the reconciler, which would deactivate it again
-                            // next pass. Reactivation needs a re-import or an
-                            // explicit admin action.
-                            LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
-                        } else {
-                            if (mapping == null) {
-                                LOGGER.info("Creating it");
-                                this.create(factory, resource);
-                            } else {
-                                LOGGER.info("Replacing it");
-                                this.replace(factory, resource);
-                            }
-                            syncRes.increaseUpdated();
-                        }
-                    }
-                } catch (ScimPropagationException e) {
-                    LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
-                        adapter.getId(), e.getClass().getSimpleName());
-                    syncRes.increaseFailed();
-                    if (policy.shouldStopRun(e)) {
-                        LOGGER.errorf("SCIM sync aborted after %s on resource %s",
-                            e.getClass().getSimpleName(), adapter.getId());
-                        return; // stop the whole run
-                    }
-                    // else continue
+                if (refreshOne(factory, resource, syncRes, policy) == StopReason.POLICY) {
+                    return;
                 }
             }
+        }
+    }
+
+    /**
+     * Refreshes one local resource: creates it remotely when it has no mapping,
+     * replaces it when it does. Resources that are not propagated (the
+     * {@code admin} user, {@code scim-skip}, {@code propagation-role}
+     * exclusions, deactivated mappings) are left alone and not counted. A
+     * propagation failure is counted, and returns {@link StopReason#POLICY} when
+     * {@code policy} says the run should stop.
+     *
+     * @param factory adapter factory for this resource's type
+     * @param resource the local resource to reconcile
+     * @param syncRes the run's counters; updated in place
+     * @param policy decides whether a propagation failure stops the run
+     * @return {@link StopReason#POLICY} if the caller must stop the run,
+     *     {@link StopReason#NONE} otherwise. Only these two values are
+     *     reachable from this method; a caller that discards the return
+     *     value (e.g. a {@code forEach}) silently drops the policy stop.
+     */
+    // package-private: shared by the paged user path and the unpaged group path
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> StopReason refreshOne(
+            AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
+        var adapter = getAdapter(factory);
+        try {
+            adapter.apply(resource);
+            LOGGER.infof("Reconciling local resource %s", adapter.getId());
+            // adapter.skip is a Boolean field; Mockito mocks skip field
+            // initializers, so it's null (not the real default of false) on a
+            // mock. Read it via Boolean.TRUE.equals rather than unboxing it
+            // directly, or a mocked adapter with no explicit skip would NPE.
+            if (adapter.skipRefresh() || Boolean.TRUE.equals(adapter.skip)) {
+                LOGGER.debugf("Skipping refresh for excluded resource %s", adapter.getId());
+                return StopReason.NONE;
+            }
+            var mapping = adapter.getMapping();
+            if (mapping != null && mapping.getDeactivatedAt() != null) {
+                // Don't re-push a deactivated user just because a stale local
+                // copy still exists; that would fight the reconciler, which
+                // would deactivate it again next pass. Reactivation needs a
+                // re-import or an explicit admin action.
+                LOGGER.debugf("Skipping refresh for deactivated mapping %s", adapter.getId());
+                return StopReason.NONE;
+            }
+            if (mapping == null) {
+                LOGGER.info("Creating it");
+                this.create(factory, resource);
+            } else {
+                LOGGER.info("Replacing it");
+                this.replace(factory, resource);
+            }
+            syncRes.increaseUpdated();
+            return StopReason.NONE;
+        } catch (ScimPropagationException e) {
+            LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
+                adapter.getId(), e.getClass().getSimpleName());
+            syncRes.increaseFailed();
+            if (policy.shouldStopRun(e)) {
+                LOGGER.errorf("SCIM sync aborted after %s on resource %s",
+                    e.getClass().getSimpleName(), adapter.getId());
+                return StopReason.POLICY;
+            }
+            return StopReason.NONE;
         }
     }
 

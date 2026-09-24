@@ -1,6 +1,8 @@
 package sh.libre.scim.core;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -20,12 +22,14 @@ import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.exceptions.InconsistentScimMappingException;
 import sh.libre.scim.core.exceptions.InvalidResponseFromScimEndpointException;
+import sh.libre.scim.jpa.ScimResource;
 
 /**
  * Sync batch loop skip/stop behaviour driven by SyncErrorPolicy.
  *
- * <p>Under {@code sync-on-error=auto}: transient failure stops the run; permanent
- * failure skips and continues. Under {@code sync-on-error=continue} a transient
+ * <p>Under {@code sync-on-error=auto}: a transient failure other than throttling
+ * stops the run; a permanent failure, or a 429 throttling response, skips the
+ * record and the run continues. Under {@code sync-on-error=continue} a transient
  * failure still continues.
  */
 class ScimSyncLoopTest {
@@ -96,6 +100,26 @@ class ScimSyncLoopTest {
         doThrow(new InconsistentScimMappingException("bad mapping"))
             .doNothing()
             .when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(twoResourceFactory(first, second), syncRes);
+
+        verify(client, times(2)).create(any(), any());
+        assertThat(syncRes.getFailed()).isEqualTo(1);
+    }
+
+    /** AUTO policy: 429 throttled failure on resource 1 → skip, resource 2 still attempted. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void autoPolicy_throttleFailure_continuesRun() {
+        var client = spy(newClient()); // default sync-on-error=auto
+
+        TestModel first = mock(TestModel.class);
+        TestModel second = mock(TestModel.class);
+
+        doThrow(new InvalidResponseFromScimEndpointException(429, "slow down"))
+            .doNothing()
+            .when(client).create(any(), any());
 
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
@@ -160,5 +184,102 @@ class ScimSyncLoopTest {
         client.refreshResources(twoResourceFactory(first, second), new SynchronizationResult());
 
         verify(client, times(2)).create(any(), any());
+    }
+
+    // -----------------------------------------------------------------------
+    // refreshOne must not count a skipped resource as updated
+    // -----------------------------------------------------------------------
+
+    /** A user excluded by scim-skip or propagation-role is neither pushed nor counted. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedResource_isNotPushedOrCountedAsUpdated() {
+        var client = spy(newClient());
+        TestModel only = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            a.skip = true;
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(null);
+            when(a.getResourceStream()).thenReturn(Stream.of(only));
+            return a;
+        };
+        doNothing().when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isZero();
+        verify(client, never()).create(any(), any());
+    }
+
+    /**
+     * A mapped user excluded by scim-skip or propagation-role is not replaced
+     * either. The skip check in refreshOne returns before getMapping() is
+     * consulted, so this stubs a mapping precisely to guard against that check
+     * ever moving below the mapping branch.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedMappedResource_isNotReplacedOrCountedAsUpdated() {
+        var client = spy(newClient());
+        TestModel only = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            a.skip = true;
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(new ScimResource());
+            when(a.getResourceStream()).thenReturn(Stream.of(only));
+            return a;
+        };
+        doNothing().when(client).replace(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        assertThat(syncRes.getUpdated()).isZero();
+        assertThat(syncRes.getFailed()).isZero();
+        verify(client, never()).replace(any(), any());
+    }
+
+    /**
+     * A skipped resource must not stop the loop or swallow the next one: the
+     * first of two resources is excluded, and the second is still pushed and
+     * counted. This is the contract the paged refresh runner depends on.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void skippedResource_doesNotBlockSubsequentPush() {
+        var client = spy(newClient());
+        TestModel skipped = mock(TestModel.class);
+        TestModel pushed = mock(TestModel.class);
+        AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
+            Adapter<TestModel, User> a = mock(Adapter.class);
+            when(a.getType()).thenReturn("User");
+            when(a.skipRefresh()).thenReturn(false);
+            when(a.getMapping()).thenReturn(null);
+            when(a.getResourceStream()).thenReturn(Stream.of(skipped, pushed));
+            // refreshOne calls apply(resource) before checking adapter.skip, so
+            // derive skip from the resource actually applied rather than from
+            // which factory.create() call this is — the factory is also invoked
+            // for bookkeeping (getType/getResourceStream) before either resource
+            // is processed.
+            doAnswer(inv -> {
+                a.skip = inv.getArgument(0) == skipped;
+                return null;
+            }).when(a).apply(any(TestModel.class));
+            return a;
+        };
+        doNothing().when(client).create(any(), any());
+        var syncRes = new SynchronizationResult();
+
+        client.refreshResources(factory, syncRes);
+
+        verify(client, times(1)).create(any(), any());
+        assertThat(syncRes.getUpdated()).isEqualTo(1);
+        assertThat(syncRes.getFailed()).isZero();
     }
 }
