@@ -8,7 +8,7 @@ public class ScimResourceProvider implements JpaEntityProvider {
 
     @Override
     public List<Class<?>> getEntities() {
-        return List.of(ScimResource.class, ScimProvisionLock.class);
+        return List.of(ScimResource.class, ScimProvisionLock.class, ScimSyncLease.class);
     }
 
     @Override
