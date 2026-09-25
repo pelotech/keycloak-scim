@@ -26,7 +26,7 @@ you already rely on.
   mapping persistence, is the same.
 - **Java / Keycloak versions.** Both forks target Keycloak 25.x, on
   Java 21. This fork's CI matrix runs the full integration suite
-  against Keycloak 25.0.6 and 26.6.2 on every push. It verifies 26.x
+  against Keycloak 25.0.6 and 26.7.4 on every push. It verifies 26.x
   compatibility instead of merely claiming it.
 
 ## What's added
