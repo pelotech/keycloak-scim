@@ -1,6 +1,8 @@
 package sh.libre.scim.storage;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.component.ComponentValidationException;
@@ -10,6 +12,7 @@ import org.keycloak.models.RealmModel;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -102,5 +105,121 @@ class ScimStorageProviderFactoryValidationTest {
     void rollbackAlways_withBulkDisabled_passes() {
         assertThatCode(() -> validate(modelWithRollbackAndBulk("always", false)))
             .doesNotThrowAnyException();
+    }
+
+    // --- sync-page-size + sync-page-max-seconds ---
+
+    private ComponentModel modelWithPaging(String pageSize, String pageMaxSeconds) {
+        var model = modelWith(List.of());
+        if (pageSize != null) {
+            model.getConfig().putSingle("sync-page-size", pageSize);
+        }
+        if (pageMaxSeconds != null) {
+            model.getConfig().putSingle("sync-page-max-seconds", pageMaxSeconds);
+        }
+        return model;
+    }
+
+    @Test
+    void pagingUnset_passes() {
+        assertThatCode(() -> validate(modelWithPaging(null, null))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void pagingPositive_passes() {
+        assertThatCode(() -> validate(modelWithPaging("50", "45"))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void pagingPositive_leavesConfigValuesUnchanged() {
+        var model = modelWithPaging("50", "45");
+
+        validate(model);
+
+        assertThat(model.getConfig().getFirst("sync-page-size")).isEqualTo("50");
+        assertThat(model.getConfig().getFirst("sync-page-max-seconds")).isEqualTo("45");
+    }
+
+    @Test
+    void pageSize_leadingPlus_isAccepted() {
+        assertThatCode(() -> validate(modelWithPaging("+5", null))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void pageMaxSeconds_leadingPlus_isAccepted() {
+        assertThatCode(() -> validate(modelWithPaging(null, "+5"))).doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
+    void pageSize_notAPositiveWholeNumber_isRejected(String value) {
+        assertThatThrownBy(() -> validate(modelWithPaging(value, null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("sync-page-size");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
+    void pageMaxSeconds_notAPositiveWholeNumber_isRejected(String value) {
+        assertThatThrownBy(() -> validate(modelWithPaging(null, value)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("sync-page-max-seconds");
+    }
+
+    @Test
+    void pageSize_controlCharacterInValue_isNotInMessage() {
+        assertThatThrownBy(() -> validate(modelWithPaging("50\n", null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageNotContaining("\n");
+    }
+
+    @Test
+    void pageSize_longValue_isTruncatedInMessage() {
+        String longValue = "x".repeat(200);
+
+        assertThatThrownBy(() -> validate(modelWithPaging(longValue, null)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("x".repeat(40) + "...")
+            .hasMessageNotContaining("x".repeat(41));
+    }
+
+    // --- reading a page setting, which validation cannot guarantee ---
+
+    @Test
+    void anUnsetPageSettingReadsAsItsDefault() {
+        var model = modelWithPaging(null, null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(50);
+    }
+
+    @Test
+    void aStoredPageSettingIsRead() {
+        var model = modelWithPaging("200", null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(200);
+    }
+
+    /**
+     * The same values the validator rejects. A value that cannot be saved must
+     * not be usable either, or a realm import would run with a setting the
+     * admin console refuses.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "0", "-1", "abc", " 5", "2.5", "1_000", "50\n", "99999999999999999999"})
+    void aPageSettingTheValidatorRejectsReadsAsItsDefault(String value) {
+        var model = modelWithPaging(value, null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(50);
+    }
+
+    @Test
+    void aPageSettingWithALeadingPlusIsRead() {
+        var model = modelWithPaging("+5", null);
+
+        assertThat(ScimStorageProviderFactory.positiveIntSetting(
+            model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(5);
     }
 }

@@ -39,9 +39,8 @@ public class ScimDispatcher implements AutoCloseable {
      * to one client per (dispatcher, component) pair.
      *
      * <p>Lifetime: the dispatcher is owned by an {@link sh.libre.scim.event.ScimEventListenerProvider}
-     * (one per Keycloak session), an {@link sh.libre.scim.ldap.ScimLdapStorageMapper}
-     * (one per LDAP-mapper instance, also per-session), or a one-off block
-     * in {@link sh.libre.scim.storage.ScimStorageProviderFactory#sync}.
+     * (one per Keycloak session), or an {@link sh.libre.scim.ldap.ScimLdapStorageMapper}
+     * (one per LDAP-mapper instance, also per-session).
      * Each owner must call {@link #close()} when done so the HTTP clients
      * are released.
      */

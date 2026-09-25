@@ -23,6 +23,10 @@ admin-REST handler that triggered the propagation. A sync produces one
 outer span, wrapping every per-resource create or replace call inside
 it.
 
+For users, a `sync-refresh` run pages through the population, one page
+per transaction. All of those page transactions run inside the same
+outer `scim.sync.refresh` span.
+
 | Span name | Triggered by |
 | --- | --- |
 | `scim.create` | User or group creation propagation |

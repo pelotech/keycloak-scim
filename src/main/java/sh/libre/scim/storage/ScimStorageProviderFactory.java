@@ -11,7 +11,6 @@ import org.keycloak.component.ComponentModel;
 import org.keycloak.component.ComponentValidationException;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
-import org.keycloak.models.KeycloakSessionTask;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.PostMigrationEvent;
 import org.keycloak.provider.ProviderConfigProperty;
@@ -22,10 +21,8 @@ import org.keycloak.storage.user.ImportSynchronization;
 import org.keycloak.storage.user.SynchronizationResult;
 
 import sh.libre.scim.core.ExtensionAttributeMappings;
-import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.OAuthClientCredentialsTokenSource;
-import sh.libre.scim.core.ScimDispatcher;
-import sh.libre.scim.core.UserAdapter;
+import sh.libre.scim.core.ScimSync;
 import sh.libre.scim.reconcile.ReconcilerConfigValidator;
 import sh.libre.scim.reconcile.ReconcilerScheduler;
 
@@ -33,13 +30,46 @@ import de.captaingoldfish.scim.sdk.common.constants.HttpHeader;
 
 public class ScimStorageProviderFactory
         implements UserStorageProviderFactory<ScimStorageProvider>, ImportSynchronization {
-    final private Logger LOGGER = Logger.getLogger(ScimStorageProviderFactory.class);
+    private static final Logger LOGGER = Logger.getLogger(ScimStorageProviderFactory.class);
     public final static String ID = "scim";
 
     public static final String RECONCILER_ENABLED = "reconciler-enabled";
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
     public static final String DELETE_MODE = "delete-mode";
+    public static final String SYNC_PAGE_SIZE = "sync-page-size";
+    public static final String SYNC_PAGE_MAX_SECONDS = "sync-page-max-seconds";
+    public static final int DEFAULT_SYNC_PAGE_SIZE = 50;
+    public static final int DEFAULT_SYNC_PAGE_MAX_SECONDS = 45;
+
+    /**
+     * Reads a whole-number setting that must be greater than zero, and falls
+     * back to {@code fallback} when the stored value cannot serve.
+     *
+     * <p>{@link #validateConfiguration} rejects a bad value on the admin
+     * console and REST paths, but a realm import creates a component without
+     * calling it. A stored value can therefore be anything, and a running sync
+     * must not fail on it.
+     */
+    public static int positiveIntSetting(ComponentModel model, String name, int fallback) {
+        String value = model.get(name);
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            // No trim, so this accepts exactly what the validator accepts. A
+            // value the admin console refuses to save must not work either.
+            int parsed = Integer.parseInt(value);
+            if (parsed > 0) {
+                return parsed;
+            }
+        } catch (NumberFormatException e) {
+            // The warning below reports it; the cause adds nothing.
+        }
+        LOGGER.warnf("Component %s has an unusable %s of '%s'; using %d instead",
+            model.getId(), name, forMessage(value), fallback);
+        return fallback;
+    }
 
     public static String reconcilerTaskName(String componentId) {
         return "scim-reconciler-" + componentId;
@@ -184,6 +214,25 @@ public class ScimStorageProviderFactory
                 .defaultValue("auto")
                 .add()
                 .property()
+                .name(SYNC_PAGE_SIZE)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Sync page size")
+                .helpText("Users examined per transaction during sync-refresh, and how many throttled "
+                    + "users in a row will stop the run. Each page commits on its own, so a failure "
+                    + "costs one page rather than the whole run. Default " + DEFAULT_SYNC_PAGE_SIZE + ".")
+                .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_SIZE))
+                .add()
+                .property()
+                .name(SYNC_PAGE_MAX_SECONDS)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Sync page time limit (seconds)")
+                .helpText("Wall-clock limit for one sync-refresh page, checked between users. A page "
+                    + "that exceeds it commits what it has done and the next page carries on. Keep it "
+                    + "well under Keycloak's default transaction timeout of 300 seconds. Default "
+                    + DEFAULT_SYNC_PAGE_MAX_SECONDS + ".")
+                .defaultValue(String.valueOf(DEFAULT_SYNC_PAGE_MAX_SECONDS))
+                .add()
+                .property()
                 .name("group-patchOp")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Use PATCH for groups")
@@ -283,6 +332,9 @@ public class ScimStorageProviderFactory
             .toList();
         ReconcilerConfigValidator.validate(model, ldapFederations);
 
+        requirePositiveIntIfSet(model, SYNC_PAGE_SIZE);
+        requirePositiveIntIfSet(model, SYNC_PAGE_MAX_SECONDS);
+
         try {
             // Map.get rather than MultivaluedMap.getList — see UserAdapter.apply.
             var rows = model.getConfig().get("user-extension-mappings");
@@ -333,6 +385,42 @@ public class ScimStorageProviderFactory
         return v.trim();
     }
 
+    /** Throws unless {@code name} is absent or a whole number greater than zero. */
+    private static void requirePositiveIntIfSet(ComponentModel m, String name) {
+        String value = m.get(name);
+        if (value == null) {
+            return;
+        }
+        int parsed;
+        try {
+            parsed = Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new ComponentValidationException(
+                name + " must be a whole number greater than zero (got '" + forMessage(value) + "')");
+        }
+        if (parsed <= 0) {
+            throw new ComponentValidationException(
+                name + " must be a whole number greater than zero (got " + parsed + ")");
+        }
+    }
+
+    /** Longest value {@link #forMessage} will show before it cuts the rest. */
+    private static final int MAX_MESSAGE_VALUE_LENGTH = 40;
+
+    /**
+     * Cleans a value before it goes into an exception message. The value came
+     * from an operator and is shown as typed in the admin console and the log,
+     * so a control character (a stray newline, say) must not break the line
+     * and a long paste must not blow up the message.
+     */
+    private static String forMessage(String value) {
+        String cleaned = value.replaceAll("\\p{Cntrl}", "?");
+        if (cleaned.length() <= MAX_MESSAGE_VALUE_LENGTH) {
+            return cleaned;
+        }
+        return cleaned.substring(0, MAX_MESSAGE_VALUE_LENGTH) + "...";
+    }
+
     @Override
     public String getId() {
         return ID;
@@ -346,28 +434,9 @@ public class ScimStorageProviderFactory
     @Override
     public SynchronizationResult sync(KeycloakSessionFactory sessionFactory, String realmId,
             UserStorageProviderModel model) {
-        LOGGER.info("sync");
-        var result = new SynchronizationResult();
-        KeycloakModelUtils.runJobInTransaction(sessionFactory, new KeycloakSessionTask() {
-
-            @Override
-            public void run(KeycloakSession session) {
-                var realm = session.realms().getRealm(realmId);
-                session.getContext().setRealm(realm);
-                try (var dispatcher = new ScimDispatcher(session)) {
-                    if ("true".equals(model.get("propagation-user"))) {
-                        dispatcher.runOne(model, client -> client.sync(UserAdapter::new, result));
-                    }
-                    if ("true".equals(model.get("propagation-group"))) {
-                        dispatcher.runOne(model, client -> client.sync(GroupAdapter::new, result));
-                    }
-                }
-            }
-
-        });
-
-        return result;
-
+        LOGGER.infof("SCIM sync requested for component %s (%s) in realm %s",
+            model.getId(), model.getName(), realmId);
+        return ScimSync.run(sessionFactory, realmId, model);
     }
 
     @Override

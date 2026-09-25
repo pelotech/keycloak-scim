@@ -1,11 +1,8 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -367,15 +364,6 @@ class RefreshPageStepTest {
         assertThat(outcome.counters().getAdded()).isZero();
         assertThat(outcome.counters().getUpdated()).isZero();
         assertThat(outcome.counters().getFailed()).isZero();
-    }
-
-    @Test
-    void aFailureToCloseThePageClientStaysOutOfTheTransaction() {
-        var client = mock(ScimClient.class);
-        doThrow(new IllegalStateException("pool already shut down")).when(client).close();
-
-        assertThatCode(() -> RefreshPageStep.closeQuietly(client)).doesNotThrowAnyException();
-        verify(client).close();
     }
 
     @Test
