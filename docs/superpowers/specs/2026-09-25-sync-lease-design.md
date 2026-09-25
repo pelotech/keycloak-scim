@@ -245,8 +245,9 @@ no manual override is needed, and none is provided.
 `RENEWED_AT` is written by one node and compared with `now` on another.
 The tolerance for skew is the stale threshold minus the heartbeat
 interval, about 90 seconds. A node ahead by more than that judges a live
-holder stale and takes over; the holder then self-fences at its next
-check, so the result is a wasted run, not a corrupted one. A node behind
+holder stale and takes over; the holder sees a matched-nothing renewal at
+its next tick and stops, so the result is a wasted run, not a corrupted
+one. A node behind
 delays a takeover by the skew, which is harmless. Nodes disciplined by NTP
 are within a second. `SyncLease` takes an injected `Clock`, as
 `RefreshPageStep` does, so the unit tests control time.
