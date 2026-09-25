@@ -94,11 +94,12 @@ final class SyncLease {
      * Takes the lease or refuses it. Two short transactions: first ensure the
      * row exists, then lock it and decide.
      *
-     * <p>The ensure step is lenient. A duplicate row is the common case, and
-     * the failure surfaces at commit, wrapped, so it cannot be told apart
-     * from a real fault. The lock step reads the row under a lock. A row
-     * still absent after both steps means the insert failed for a reason
-     * other than a duplicate, and that failure is what this method reports.
+     * <p>The ensure step reads before it inserts, so a duplicate can surface
+     * at commit only in the first-acquisition race. The failure is wrapped,
+     * so it cannot be told apart from a real fault. The lock step reads the
+     * row under a lock. A row still absent after both steps means the insert
+     * failed for a reason other than a duplicate, and that failure is what
+     * this method reports.
      * Whatever the lock transaction itself throws also propagates from this
      * method, for example a failure to reach the database.
      *

@@ -62,7 +62,7 @@ class SyncLeaseTest {
         assertThat(store.rows.get("comp-1").holder).isEqualTo(lease.token());
     }
 
-    /** The row exists, so the ensure step fails on a duplicate. That is the common case and not fatal. */
+    /** The row exists, so the ensure step fails on a duplicate. This is not fatal; the test proves the lenient path. */
     @Test
     void aFailedEnsureStepStillAcquiresWhenTheRowExists() {
         store.ensureRow("comp-1");

@@ -35,8 +35,9 @@ final class FakeLeaseStore implements LeaseStore {
     @Override
     public void ensureRow(String componentId) {
         if (ensureFailure != null) FakeLeaseStore.<RuntimeException>sneaky(ensureFailure);
-        // A real database refuses a duplicate key; the fake does too, so the
-        // lenient ensure path is exercised by every refuse and takeover test.
+        // The fake throws on an existing row on purpose, so every refuse and
+        // takeover test exercises the lenient path that the real store takes
+        // only in the first-acquisition race.
         if (rows.containsKey(componentId)) {
             throw new IllegalStateException("duplicate key: " + componentId);
         }

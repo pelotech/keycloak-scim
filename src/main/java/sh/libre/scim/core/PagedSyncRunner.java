@@ -126,6 +126,11 @@ final class PagedSyncRunner {
                     outcome.next());
                 yield true;
             }
+            case LEASE_LOST -> {
+                LOGGER.errorf("Paged sync stopped: this run no longer holds the component's lease, at cursor %s",
+                    outcome.next());
+                yield true;
+            }
         };
     }
 }

@@ -107,7 +107,10 @@ public final class ScimSync {
         var pageBudget = Duration.ofSeconds(ScimStorageProviderFactory.positiveIntSetting(model,
             ScimStorageProviderFactory.SYNC_PAGE_MAX_SECONDS,
             ScimStorageProviderFactory.DEFAULT_SYNC_PAGE_MAX_SECONDS));
-        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, Clock.systemUTC());
+        // The lease check and the progress report are not wired to a real
+        // lease yet; a later change supplies them.
+        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, Clock.systemUTC(),
+            () -> false, () -> {});
         try (var ignored = TRACING.startSpan("scim.sync.refresh", "User", model.get("endpoint"))) {
             var outcome = PagedSyncRunner.run(step, pageSize, result);
             if (!outcome.completed()) {
