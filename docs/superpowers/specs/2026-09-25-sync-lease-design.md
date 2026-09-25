@@ -102,8 +102,11 @@ would fail at commit, after it had already decided to take the lease.
 
 **Lock and decide.** Load the row with `PESSIMISTIC_WRITE`, as the group
 provisioning lock does. If the row is still absent, the database refused
-the insert for a reason other than a duplicate; count one failure, log it,
-and return. The row lock makes the decision atomic across nodes. Then
+the insert for a reason other than a duplicate; count one failure, log the
+ensure step's failure message at error level, and return. The ensure step
+never writes a holder and never reads, so a lenient ensure cannot produce
+a wrong decision, only a less specific one, which the carried message
+repairs. The row lock makes the decision atomic across nodes. Then
 apply the decision function:
 
     decide(holder, renewedAt, now) -> TAKE | REFUSE
@@ -160,8 +163,13 @@ Renewal is gated on progress. The run reports progress for every
 resource it examines, whatever the outcome: pushed, skipped, throttled,
 failed or missing. A run that fails users is still alive, and the cursor
 moves for all of them. The page step reports after each row. The unpaged
-loops in the client, `importResources` and `refreshResources`, report after
-each resource through a progress callback that the sync client carries.
+loops in the client, `importResources` and `refreshResources`, take a
+progress callback as an argument beside the result they count into, and
+call it at the top of every iteration, before any branch. The import loop
+leaves most iterations through `continue`, on a valid mapping, a
+tombstone, or an inactive remote user, and a report at the end of the body
+would be skipped on all of them. The steady state of an import is a valid
+mapping on every resource, so a report at the end would never fire.
 `ScimSync` also reports at the start and end of each stage. When the last
 progress is older than the progress window, the tick stops renewing and
 logs why. A run that is hung in a call that never returns then loses its
@@ -186,7 +194,7 @@ So the run thread also treats the lease as lost when the last successful
 renewal is older than the self-fence threshold, whether or not the lost
 flag is set. `SyncLease.lost()` answers true in either case. With this rule
 the overlap after a takeover is bounded in every scenario by one heartbeat
-interval plus one in-flight user.
+interval plus one resource in flight.
 
 ## Lost lease
 
@@ -206,7 +214,7 @@ interval plus one in-flight user.
   incomplete run rather than a clean one.
 
 After a takeover the old holder can still push for up to one heartbeat
-interval plus one in-flight user, which with retries can be minutes. A
+interval plus one resource in flight, which with retries can be minutes. A
 collision inside that window falls back to today's mapping-row race
 handling, which is safe.
 
@@ -254,10 +262,11 @@ are within a second. `SyncLease` takes an injected `Clock`, as
 - `sh.libre.scim.core.ScimSync.run`: acquires after the early returns,
   releases in a `finally`, reports progress at stage boundaries, checks
   `lost()` between stages, and passes `lost()` and `reportProgress()` to
-  the page step and to the sync client.
-- `sh.libre.scim.core.ScimClient`: the sync client carries an optional
-  progress callback, invoked once per resource in `importResources` and
-  `refreshResources`. Every other client has none.
+  the page step and to the two unpaged loops.
+- `sh.libre.scim.core.ScimClient`: `importResources` and
+  `refreshResources` take a progress callback as an argument, invoked at the
+  top of every iteration. The callback is run state, not client state, so it
+  is not stored on the client and no constructor changes.
 - `sh.libre.scim.core.StopReason.LEASE_LOST`, and one more case in the
   runner's exhaustive switch.
 - A system property, `scim.sync.lease.simulateCrash`, default `false`. Set
@@ -306,7 +315,8 @@ Unit tests, no database:
   throw, survives a throw and runs again, and stops renewing after the
   progress window.
 - Progress: a failed, skipped, throttled or missing user counts, and the
-  unpaged loops report once per resource.
+  unpaged loops report once per resource. An import where every resource
+  is skipped by a valid mapping still reports once per resource.
 - Self-fence: `lost()` is true when the last success is older than the
   threshold, with no flag set.
 - Release that matches none after a takeover.
@@ -327,9 +337,11 @@ Integration tests:
   container with `-Dscim.sync.lease.simulateCrash=true`, following the
   `JAVA_OPTS_APPEND` precedent of the timeout test. Run one short sync; it
   leaves a row with its token and an ageing `RENEWED_AT`. A second sync
-  started before 120 seconds is refused, which proves the stale judgement
-  and not a null holder. A third sync started after 120 seconds runs. The
-  test needs about 2.5 minutes of wall time and says so.
+  started between 30 and 120 seconds after the first ends is refused,
+  which proves the stale judgement and not a null holder, and sits past
+  Keycloak's own 30 second lock so the refusal can only be the lease's. A
+  third sync started after 120 seconds runs. The test needs about 2.5
+  minutes of wall time and says so.
 - In the two-syncs test the first call blocks, so the second must come
   from another thread, and the assertion is `isIgnored()` on the returned
   representation.
