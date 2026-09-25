@@ -18,7 +18,7 @@ class SyncLeaseTest {
     private final FakeLeaseStore store = new FakeLeaseStore();
     private final MutableClock clock = new MutableClock(NOW);
 
-    /** A clock the tests move by hand. Volatile, because the next task reads it from a scheduler thread. */
+    /** A clock the tests move by hand. Volatile, because a heartbeat thread may read it while a test advances it. */
     static final class MutableClock extends Clock {
         private volatile long millis;
         MutableClock(long millis) { this.millis = millis; }
@@ -160,5 +160,120 @@ class SyncLeaseTest {
     @Test
     void aHolderWithNoRenewalTimeIsTaken() {
         assertThat(SyncLease.decide("other", null, NOW)).isEqualTo(SyncLease.Decision.TAKE);
+    }
+
+    @Test
+    void aTickRenewsAndRecordsTheSuccess() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(clock.millis());
+        assertThat(lease.lost()).isFalse();
+    }
+
+    @Test
+    void aTickThatMatchesNothingMarksTheLeaseLost() {
+        var lease = lease();
+        lease.acquire();
+        store.rows.get("comp-1").holder = "other";
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(lease.lost()).isTrue();
+    }
+
+    @Test
+    void aTickThatThrowsIsNotALoss() {
+        var lease = lease();
+        lease.acquire();
+        store.renewFailure = new IllegalStateException("db away");
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(lease.lost()).isFalse();
+    }
+
+    @Test
+    void aTickSurvivesAThrowAndRenewsNextTime() {
+        var lease = lease();
+        lease.acquire();
+        store.renewFailure = new IllegalStateException("db away");
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        store.renewFailure = null;
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(clock.millis());
+        assertThat(store.renewCalls).isEqualTo(2);
+    }
+
+    /** The holder cannot see a matched-nothing update if it cannot reach the database. */
+    @Test
+    void selfFenceTripsWhenTheLastSuccessIsOld() {
+        var lease = lease();
+        lease.acquire();
+        store.renewFailure = new IllegalStateException("db away");
+        clock.advance(SyncLease.SELF_FENCE_THRESHOLD.plusMillis(1));
+        lease.tick();
+        assertThat(lease.lost()).isTrue();
+    }
+
+    @Test
+    void selfFenceDoesNotTripAtExactlyTheThreshold() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.SELF_FENCE_THRESHOLD);
+        assertThat(lease.lost()).isFalse();
+    }
+
+    /** A run that never took the lease has nothing to hold. */
+    @Test
+    void aRefusedRunIsLost() {
+        seed("other", NOW - 1000);
+        var lease = lease();
+        assertThat(lease.acquire()).isEqualTo(SyncLease.Decision.REFUSE);
+        assertThat(lease.lost()).isTrue();
+    }
+
+    @Test
+    void renewalStopsAfterTheProgressWindow() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.PROGRESS_WINDOW.plusMillis(1));
+        lease.tick();
+        assertThat(store.renewCalls).isZero();
+    }
+
+    @Test
+    void progressReopensRenewal() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.PROGRESS_WINDOW.plusMillis(1));
+        lease.reportProgress();
+        lease.tick();
+        assertThat(store.renewCalls).isEqualTo(1);
+    }
+
+    /** A driver can throw an Error. The tick must survive that too, or the schedule dies. */
+    @Test
+    void aTickSurvivesAnError() {
+        var lease = lease();
+        lease.acquire();
+        store.renewFailure = new StackOverflowError("stack");
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(lease.lost()).isFalse();
+        store.renewFailure = null;
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(clock.millis());
+    }
+
+    @Test
+    void stopIsSafeBeforeStartAndTwice() {
+        var lease = lease();
+        lease.stopHeartbeat();
+        lease.startHeartbeat();
+        lease.stopHeartbeat();
+        lease.stopHeartbeat();
     }
 }

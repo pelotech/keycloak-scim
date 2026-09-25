@@ -4,6 +4,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import org.jboss.logging.Logger;
 
 /**
@@ -35,8 +38,14 @@ final class SyncLease {
     private final Clock clock;
     /** Token of this run. Per run, not per node, so two runs on one node never share a lease. */
     private final String token = UUID.randomUUID().toString();
-    /** Set after acquisition, so the self-fence does not trip at the first check. */
+    /** Set after acquisition, so the self-fence does not trip at the first check. Zero until then. */
     private volatile long lastRenewal;
+    /** Set after acquisition and on every report, so renewal starts open. */
+    private volatile long lastProgress;
+    /** Set by a tick that matched nothing. Read by the run thread. */
+    private volatile boolean lostFlag;
+    /** Non-null while the heartbeat runs. Read and cleared on the run thread only. */
+    private ScheduledExecutorService heartbeat;
 
     SyncLease(LeaseStore store, String componentId, Clock clock) {
         this.store = Objects.requireNonNull(store);
@@ -105,7 +114,9 @@ final class SyncLease {
         });
         if (decision == Decision.TAKE) {
             // Set only after the transaction commits: run state must not lead the database.
-            lastRenewal = clock.millis();
+            long committed = clock.millis();
+            lastRenewal = committed;
+            lastProgress = committed;
             LOGGER.infof("Sync lease for component %s taken by run %s", componentId, token);
         }
         return decision;
@@ -129,8 +140,104 @@ final class SyncLease {
         }
     }
 
-    // Stub. No heartbeat exists yet, so there is nothing to stop.
+    /**
+     * Whether this run still holds the lease. True when a tick matched
+     * nothing, because another run took the lease. Also true when this run's
+     * own last successful renewal is older than the self-fence threshold,
+     * whatever the flag says. A holder that cannot reach the database never
+     * sees a matched-nothing update, so the flag alone would leave the
+     * overlap after a takeover unbounded. The self-fence bounds it. A run
+     * that never took the lease has nothing to hold, so it is lost as well.
+     */
+    boolean lost() {
+        if (lostFlag || lastRenewal == 0) {
+            return true;
+        }
+        // Strict, like the decision: an age equal to the threshold is not past it.
+        return clock.millis() - lastRenewal > SELF_FENCE_THRESHOLD.toMillis();
+    }
+
+    /**
+     * The run reports progress for every resource it examines, whatever the
+     * outcome. A run that fails users is still alive. Renewal is gated on
+     * these reports, so a run hung in a call that never returns loses its
+     * lease and another node can sync.
+     */
+    void reportProgress() {
+        lastProgress = clock.millis();
+    }
+
+    /**
+     * One heartbeat. Renews unless the run has made no progress for the
+     * progress window. A matched-nothing renewal means another run took the
+     * lease, so it sets the lost flag. A thrown renewal is not a loss: the
+     * database may be away for a moment and the row may still name this
+     * run, so the next tick tries again. The self-fence covers the case
+     * where the throws go on for too long. Catches every throwable, because
+     * a throw would cancel the schedule and a driver can throw an Error.
+     */
+    void tick() {
+        if (lostFlag) {
+            return; // the loss is logged once, not on every tick
+        }
+        try {
+            long now = clock.millis();
+            if (now - lastProgress > PROGRESS_WINDOW.toMillis()) {
+                LOGGER.warnf("Sync lease for component %s not renewed: no progress for %d ms; "
+                    + "another node may take it", componentId, now - lastProgress);
+                return;
+            }
+            int matched = store.renew(componentId, token, now);
+            if (matched == 0) {
+                LOGGER.errorf("Sync lease for component %s was taken by another run; this run will stop",
+                    componentId);
+                lostFlag = true;
+                return;
+            }
+            lastRenewal = now;
+        } catch (Throwable t) {
+            LOGGER.warnf(t, "Sync lease heartbeat for component %s failed; will retry", componentId);
+        }
+    }
+
+    /**
+     * Starts the heartbeat on this run's own daemon thread. Call after the
+     * acquisition transaction has committed. Not the shared timer thread: a
+     * scheduled sync runs on that thread, so a heartbeat there would never
+     * fire during a scheduled sync.
+     */
+    void startHeartbeat() {
+        var scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            var t = new Thread(r, "scim-sync-lease-" + componentId);
+            t.setDaemon(true); // must not keep the JVM alive
+            return t;
+        });
+        long interval = HEARTBEAT_INTERVAL.toMillis();
+        scheduler.scheduleAtFixedRate(this::tick, interval, interval, TimeUnit.MILLISECONDS);
+        heartbeat = scheduler;
+    }
+
+    /**
+     * Stops the heartbeat and waits a bounded time for a tick in flight, so
+     * it cannot log a false loss after the run. {@code shutdown}, not
+     * {@code shutdownNow}: an interrupted tick inside a database call would
+     * throw, log a false retry, and could leave a pool connection broken. A
+     * scheduled executor drops the pending periodic task on shutdown and
+     * lets the running one finish. A tick stuck on the database must not
+     * hold the run, so after the wait {@code release} clears the holder
+     * anyway. Safe to call before a start and more than once.
+     */
     void stopHeartbeat() {
-        /* no heartbeat yet */
+        var scheduler = heartbeat;
+        if (scheduler == null) {
+            return;
+        }
+        heartbeat = null;
+        scheduler.shutdown();
+        try {
+            scheduler.awaitTermination(10, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 }
