@@ -91,14 +91,16 @@ refuse log names the token; a node name is not needed.
 transaction when both toggles are off or no propagation is enabled, and
 before any stage. Acquisition is two short transactions.
 
-**Ensure the row.** Insert a row for the component with a null holder, in
-its own transaction. Any failure of this transaction is non-fatal: log it
-at debug level and go on. The common failure is that another node inserted
-first, and the violation surfaces at commit, wrapped by Keycloak, not
-inside the task; classifying it would be guesswork, and the next step
-finds out the truth. This transaction exists because a `PESSIMISTIC_WRITE`
-on a missing row locks nothing, so two nodes would both insert and one
-would fail at commit, after it had already decided to take the lease.
+**Ensure the row.** Read the component's row and insert one with a null
+holder if none exists, in its own transaction. Any failure of this
+transaction is non-fatal: log it at debug level and go on. The only
+expected failure is two nodes inserting the first row of a component at
+the same instant; the loser's violation surfaces at commit, wrapped by
+Keycloak, not inside the task. Reading first matters: a blind insert of a
+row that exists makes the database layer log an error on every sync after
+the first. This transaction exists because a `PESSIMISTIC_WRITE` on a
+missing row locks nothing, so two nodes would both insert and one would
+fail at commit, after it had already decided to take the lease.
 
 **Lock and decide.** Load the row with `PESSIMISTIC_WRITE`, as the group
 provisioning lock does. If the row is still absent, the database refused
