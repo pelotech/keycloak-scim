@@ -162,7 +162,7 @@ Three outcomes matter:
 Renewal is gated on progress. The run reports progress for every
 resource it examines, whatever the outcome: pushed, skipped, throttled,
 failed or missing. A run that fails users is still alive, and the cursor
-moves for all of them. The page step reports after each row. The unpaged
+moves for all of them. The page step reports at the top of each row. The unpaged
 loops in the client, `importResources` and `refreshResources`, take a
 progress callback as an argument beside the result they count into, and
 call it at the top of every iteration, before any branch. The import loop
