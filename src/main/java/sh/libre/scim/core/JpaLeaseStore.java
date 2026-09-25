@@ -30,21 +30,35 @@ final class JpaLeaseStore implements LeaseStore {
 
     /**
      * Inserts the row in its own transaction, ahead of the lock-and-decide
-     * step. A lock on a missing row locks nothing. Without this step first,
-     * two nodes could both insert, and one would fail at commit after it had
-     * already decided to take the lease.
+     * step, if none exists yet. A lock on a missing row locks nothing, so
+     * this step must still run first. Reading before inserting means that
+     * every sync after a component's first does not attempt an insert that
+     * Hibernate and the transaction manager both log as a failure. Two nodes
+     * can still race on a component's first-ever acquisition and both find
+     * no row; one insert then fails at commit, but only once.
      */
     @Override
     public void ensureRow(String componentId) {
         KeycloakModelUtils.runJobInTransaction(sessionFactory, session -> {
-            var row = new ScimSyncLease();
-            row.setComponentId(componentId);
-            em(session).persist(row);
+            var em = em(session);
+            if (em.find(ScimSyncLease.class, componentId) == null) {
+                var row = new ScimSyncLease();
+                row.setComponentId(componentId);
+                em.persist(row);
+            }
         });
     }
 
     /** The locked operations, bound to the session that holds the row lock. */
     private record JpaLocked(EntityManager em) implements Locked {
+        /**
+         * PostgreSQL waits for the row lock without limit, so a second node
+         * blocks here and then refuses. H2, which the dev server and the
+         * integration tests use, gives up after 2 seconds and throws instead,
+         * so two acquisitions of one component in the same instant fail on
+         * H2 rather than refusing. Either way, it cannot let two runs both
+         * take the lease.
+         */
         @Override
         public Optional<Row> lockAndRead(String componentId) {
             var row = em.find(ScimSyncLease.class, componentId, LockModeType.PESSIMISTIC_WRITE);
@@ -54,6 +68,9 @@ final class JpaLeaseStore implements LeaseStore {
         @Override
         public void take(String componentId, String token, long now) {
             var row = em.find(ScimSyncLease.class, componentId);
+            if (row == null) {
+                throw new IllegalStateException("take before lockAndRead for component " + componentId);
+            }
             row.setHolder(token);
             row.setAcquiredAt(now);
             row.setRenewedAt(now);

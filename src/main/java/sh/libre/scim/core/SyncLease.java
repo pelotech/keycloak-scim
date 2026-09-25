@@ -142,7 +142,9 @@ final class SyncLease {
      * Stops the heartbeat, then clears the holder if this run still holds it.
      * The order matters: a tick after the clear would see no holder and log
      * a false loss. A failure to clear is logged and swallowed, because the
-     * heartbeat has already stopped, so the lease goes stale on its own.
+     * heartbeat has already stopped, so the lease goes stale on its own. An
+     * {@code Error} from the store is not caught here, even though release
+     * runs in a {@code finally}; it must not be hidden.
      */
     void release() {
         stopHeartbeat();

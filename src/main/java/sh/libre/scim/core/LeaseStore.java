@@ -43,8 +43,10 @@ interface LeaseStore {
     <T> T inOneTransaction(Function<Locked, T> work);
 
     /**
-     * Inserts a row for the component with no holder. The caller tolerates any
-     * failure, because a duplicate surfaces at commit and is the common case.
+     * Inserts a row for the component with no holder, if none exists yet.
+     * The caller tolerates any failure. A duplicate is rare: it can surface
+     * at commit only when two nodes race to insert the same component for
+     * the first time.
      */
     void ensureRow(String componentId);
 
