@@ -43,10 +43,16 @@ same overlap risk and deserves its own change.
 | progress window | 10 min | Renewal stops when the run has reported no progress for this long |
 
 These are constants, not settings. There is no deployment-specific reason
-to change them, and a wrong value on one node breaks every node. The
-self-fence threshold sits below the stale threshold so a holder stops
-before another node can take over, with the clock skew margin described
-under Clocks.
+to change them, and a wrong value on one node breaks every node. Every
+comparison against a threshold is strict: an age equal to the threshold is
+not past it.
+
+Two margins follow from these values. A holder self-fences 30 seconds
+before any taker may take, so a taker ahead by more than 30 seconds can
+take first; that is still safe, because the holder fences on its own clock
+within 90 seconds of its own last success. A taker judges a live holder
+stale only when it is ahead by more than 90 seconds, the stale threshold
+minus one heartbeat interval. See Clocks.
 
 ## Storage
 
@@ -85,15 +91,20 @@ refuse log names the token; a node name is not needed.
 transaction when both toggles are off or no propagation is enabled, and
 before any stage. Acquisition is two short transactions.
 
-**Ensure the row.** Insert a row for the component with a null holder. A
-primary-key violation means another node inserted it first; catch it and go
-on. This transaction exists because a `PESSIMISTIC_WRITE` on a missing row
-locks nothing, so two nodes would both insert and one would fail at commit,
-after it had already decided to take the lease.
+**Ensure the row.** Insert a row for the component with a null holder, in
+its own transaction. Any failure of this transaction is non-fatal: log it
+at debug level and go on. The common failure is that another node inserted
+first, and the violation surfaces at commit, wrapped by Keycloak, not
+inside the task; classifying it would be guesswork, and the next step
+finds out the truth. This transaction exists because a `PESSIMISTIC_WRITE`
+on a missing row locks nothing, so two nodes would both insert and one
+would fail at commit, after it had already decided to take the lease.
 
 **Lock and decide.** Load the row with `PESSIMISTIC_WRITE`, as the group
-provisioning lock does. The row lock makes the decision atomic across
-nodes. Then apply the decision function:
+provisioning lock does. If the row is still absent, the database refused
+the insert for a reason other than a duplicate; count one failure, log it,
+and return. The row lock makes the decision atomic across nodes. Then
+apply the decision function:
 
     decide(holder, renewedAt, now) -> TAKE | REFUSE
 
@@ -113,10 +124,10 @@ at its next period.
 
 The decision function is pure, so it is unit-tested without a database.
 
-If either transaction throws, for example because the database is
-unreachable, the run does not proceed. It counts one failure, logs the
-cause, and returns. A run without a lease would recreate the overlap this
-design removes.
+If the lock-and-decide transaction throws, for example because the
+database is unreachable, the run does not proceed. It counts one failure,
+logs the cause, and returns. A run without a lease would recreate the
+overlap this design removes.
 
 ## Heartbeat
 
@@ -145,15 +156,22 @@ Three outcomes matter:
   Set the lost flag.
 - **Threw.** Log at warning level. Do nothing else.
 
-Renewal is gated on progress. The run reports progress when a page handles
-a user, and at the start and end of each stage. When the last progress is
-older than the progress window, the tick stops renewing and logs why. A run
-that is hung in a call that never returns then loses its lease within the
-stale threshold, and another node can sync. Keycloak's own lock used to
-free a hung component when its timeout passed; this rule keeps that
-property. A single non-paged stage that runs longer than the progress
-window without a stage boundary lets the lease lapse; the warning logged
-above 500 groups bounds that exposure.
+Renewal is gated on progress. The run reports progress for every
+resource it examines, whatever the outcome: pushed, skipped, throttled,
+failed or missing. A run that fails users is still alive, and the cursor
+moves for all of them. The page step reports after each row. The unpaged
+loops in the client, `importResources` and `refreshResources`, report after
+each resource through a progress callback that the sync client carries.
+`ScimSync` also reports at the start and end of each stage. When the last
+progress is older than the progress window, the tick stops renewing and
+logs why. A run that is hung in a call that never returns then loses its
+lease within the stale threshold, and another node can sync. Keycloak's
+own lock used to free a hung component when its timeout passed; this rule
+keeps that property. The exposure is one resource in flight: only a single
+call that takes longer than the progress window trips it.
+
+The holder's last successful renewal starts at the acquisition time, so
+`lost()` is false at the first check.
 
 ## Self-fence
 
@@ -183,7 +201,9 @@ interval plus one in-flight user.
   already counts any incomplete run as one failure.
 - `ScimSync.run` checks it before each stage and skips the rest once it is
   set. Import and group refresh run as one transaction each and cannot
-  stop in the middle; they finish their stage.
+  stop in the middle; they finish their stage. Each skipped stage counts
+  one failure and logs at error level, so the sync result shows an
+  incomplete run rather than a clean one.
 
 After a takeover the old holder can still push for up to one heartbeat
 interval plus one in-flight user, which with retries can be minutes. A
@@ -193,8 +213,12 @@ handling, which is safe.
 ## Release
 
 When the run ends by any path, `ScimSync.run` stops the heartbeat, waits
-for a tick in flight to finish so it cannot log a false loss after the run,
-and clears the holder:
+a bounded time for a tick in flight to finish so it cannot log a false loss
+after the run, and clears the holder. The wait uses `awaitTermination` with
+a timeout on the order of one transaction's worst case; a tick stuck on
+connection acquisition must not hold the run's `finally`. After the
+timeout, release anyway; a late tick then matches nothing and at most logs
+a false loss on a finished run.
 
     UPDATE SCIM_SYNC_LEASE SET HOLDER = NULL
      WHERE COMPONENT_ID = :component AND HOLDER = :token
@@ -226,17 +250,23 @@ are within a second. `SyncLease` takes an injected `Clock`, as
   heartbeat, the progress and self-fence rules, and the static decision
   function. One instance per run, holding the run's token. It owns the
   scheduler thread and stops it on release. It exposes `lost()` and
-  `progressed()`.
+  `reportProgress()`.
 - `sh.libre.scim.core.ScimSync.run`: acquires after the early returns,
   releases in a `finally`, reports progress at stage boundaries, checks
-  `lost()` between stages, and passes `lost()` and `progressed()` to the
-  page step.
+  `lost()` between stages, and passes `lost()` and `reportProgress()` to
+  the page step and to the sync client.
+- `sh.libre.scim.core.ScimClient`: the sync client carries an optional
+  progress callback, invoked once per resource in `importResources` and
+  `refreshResources`. Every other client has none.
 - `sh.libre.scim.core.StopReason.LEASE_LOST`, and one more case in the
   runner's exhaustive switch.
-- A system property, `scim.sync.lease.heartbeat`, default `true`. Set to
-  `false` it disables the heartbeat. It exists so an integration test can
-  make a lease go stale without killing a container. It is documented as a
-  test aid, not an operator setting.
+- A system property, `scim.sync.lease.simulateCrash`, default `false`. Set
+  to `true`, a run takes its lease and then behaves as a crashed holder: no
+  heartbeat, no self-fence, and no release. It exists so an integration
+  test can produce a stale lease without killing a container. Acquisition
+  logs a warning whenever it is set, so a deployment that copied a test
+  flag is visible in the log. It is documented as a test aid, not an
+  operator setting.
 
 ## Alternatives rejected
 
@@ -275,6 +305,8 @@ Unit tests, no database:
 - The heartbeat tick: sets the lost flag on matched-nothing, does not on a
   throw, survives a throw and runs again, and stops renewing after the
   progress window.
+- Progress: a failed, skipped, throttled or missing user counts, and the
+  unpaged loops report once per resource.
 - Self-fence: `lost()` is true when the last success is older than the
   threshold, with no flag set.
 - Release that matches none after a takeover.
@@ -291,11 +323,16 @@ Integration tests:
   started, a second sync started after 40 seconds while the first is still
   running. The second returns the ignored status. The first completes with
   every user pushed. A third sync, started after the first ends, runs.
-- **A stale lease is taken.** A dedicated container with
-  `-Dscim.sync.lease.heartbeat=false`, following the `JAVA_OPTS_APPEND`
-  precedent of the timeout test. Start a sync that outlasts the stale
-  threshold, wait past the threshold, start another. It runs. This test
-  needs more than 120 seconds of wall time and says so.
+- **A stale lease is taken, and a merely old one is not.** A dedicated
+  container with `-Dscim.sync.lease.simulateCrash=true`, following the
+  `JAVA_OPTS_APPEND` precedent of the timeout test. Run one short sync; it
+  leaves a row with its token and an ageing `RENEWED_AT`. A second sync
+  started before 120 seconds is refused, which proves the stale judgement
+  and not a null holder. A third sync started after 120 seconds runs. The
+  test needs about 2.5 minutes of wall time and says so.
+- In the two-syncs test the first call blocks, so the second must come
+  from another thread, and the assertion is `isIgnored()` on the returned
+  representation.
 
 ## Documentation
 
