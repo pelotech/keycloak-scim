@@ -303,6 +303,18 @@ class SyncLeaseTest {
         assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(clock.millis());
     }
 
+    /** A second start would drop the first scheduler and leak its thread. */
+    @Test
+    void aSecondStartThrows() {
+        var lease = lease();
+        try {
+            lease.startHeartbeat();
+            assertThatThrownBy(lease::startHeartbeat).isInstanceOf(IllegalStateException.class);
+        } finally {
+            lease.stopHeartbeat();
+        }
+    }
+
     @Test
     void stopIsSafeBeforeStartAndTwice() {
         var lease = lease();
