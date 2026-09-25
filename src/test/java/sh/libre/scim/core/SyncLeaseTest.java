@@ -225,11 +225,17 @@ class SyncLeaseTest {
         assertThat(lease.lost()).isFalse();
     }
 
-    /** A run that never took the lease has nothing to hold. */
+    /**
+     * A run that never took the lease has nothing to hold. The clock is near
+     * zero on purpose: a never-set renewal reads as epoch zero, and at the
+     * usual test time that age alone trips the self-fence. A few milliseconds
+     * cannot, so only the never-took rule can make this assertion hold.
+     */
     @Test
     void aRefusedRunIsLost() {
-        seed("other", NOW - 1000);
-        var lease = lease();
+        long nearZero = 1_000L;
+        seed("other", nearZero);
+        var lease = new SyncLease(store, "comp-1", new MutableClock(nearZero));
         assertThat(lease.acquire()).isEqualTo(SyncLease.Decision.REFUSE);
         assertThat(lease.lost()).isTrue();
     }
