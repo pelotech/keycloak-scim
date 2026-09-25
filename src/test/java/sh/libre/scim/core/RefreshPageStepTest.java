@@ -385,6 +385,18 @@ class RefreshPageStepTest {
         assertThat(progress.stopReason()).isEqualTo(StopReason.TRANSACTION_FAILED);
     }
 
+    /**
+     * A lost lease ends the run; a budget stop only ends the page and the
+     * runner opens another. If the two checks ever swapped order, a run
+     * would open another page under a lease it no longer holds.
+     */
+    @Test
+    void aLostLeaseOutranksTheBudgetStop() {
+        var progress = RefreshPageStep.processRows(page(null, 3, "a", "b"),
+            new RefreshPageStep.ThrottleStreak(), PUSHED, () -> false, () -> true, OVER_BUDGET, () -> {});
+        assertThat(progress.stopReason()).isEqualTo(StopReason.LEASE_LOST);
+    }
+
     // --- page-level guards ---
 
     @Test

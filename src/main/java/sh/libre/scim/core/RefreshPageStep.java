@@ -99,18 +99,18 @@ final class RefreshPageStep implements PageStep<String> {
     private final Clock clock;
     private final SyncErrorPolicy policy;
     private final BooleanSupplier leaseLost;
-    private final Runnable progress;
+    private final Runnable progressReporter;
     // The runner keeps one step for the whole run, so the count crosses pages.
     private final ThrottleStreak throttleStreak = new ThrottleStreak();
 
     /**
      * @param leaseLost whether this run has lost the component's lease. The
      *     step checks it after every row and ends the page when it is true.
-     * @param progress reports one examined row. The step calls it for every
-     *     row, whatever the row's outcome.
+     * @param progressReporter reports one examined row. The step calls it for
+     *     every row, whatever the row's outcome.
      */
     RefreshPageStep(KeycloakSessionFactory sessionFactory, String realmId, ComponentModel model,
-                    Duration pageBudget, Clock clock, BooleanSupplier leaseLost, Runnable progress) {
+                    Duration pageBudget, Clock clock, BooleanSupplier leaseLost, Runnable progressReporter) {
         // Fail at wiring time. A missing argument must not surface inside the
         // first page transaction, after the run has already started.
         this.sessionFactory = Objects.requireNonNull(sessionFactory, "sessionFactory");
@@ -119,7 +119,7 @@ final class RefreshPageStep implements PageStep<String> {
         this.pageBudget = Objects.requireNonNull(pageBudget, "pageBudget");
         this.clock = Objects.requireNonNull(clock, "clock");
         this.leaseLost = Objects.requireNonNull(leaseLost, "leaseLost");
-        this.progress = Objects.requireNonNull(progress, "progress");
+        this.progressReporter = Objects.requireNonNull(progressReporter, "progressReporter");
         this.policy = SyncErrorPolicy.fromConfig(model.get("sync-on-error"));
     }
 
@@ -161,7 +161,7 @@ final class RefreshPageStep implements PageStep<String> {
                     transaction::getRollbackOnly,
                     leaseLost,
                     () -> overBudget(start, clock.instant(), pageBudget),
-                    progress);
+                    progressReporter);
                 return new PageOutcome<>(rowProgress.cursor(), rowProgress.progressed(),
                     rowProgress.exhausted(), counters, rowProgress.stopReason());
             } finally {
@@ -240,17 +240,17 @@ final class RefreshPageStep implements PageStep<String> {
      * @param transactionFailed whether the page transaction can no longer commit
      * @param leaseLost whether this run has lost the component's lease
      * @param overBudget whether the page has spent its wall-clock budget
-     * @param progress reports one examined row, called before {@code handle}
-     *     so every examined row reports whatever happens next
+     * @param progressReporter reports one examined row, called before
+     *     {@code handle} so every examined row reports whatever happens next
      */
     static PageProgress processRows(Page page, ThrottleStreak streak,
             Function<UserRow, RefreshOutcome> handle, BooleanSupplier transactionFailed,
-            BooleanSupplier leaseLost, BooleanSupplier overBudget, Runnable progress) {
+            BooleanSupplier leaseLost, BooleanSupplier overBudget, Runnable progressReporter) {
         List<UserRow> rows = page.rows();
         String last = page.after();
         StopReason stopReason = StopReason.NONE;
         for (int i = 0; i < rows.size(); i++) {
-            progress.run();
+            progressReporter.run();
             UserRow row = rows.get(i);
             last = row.username();
             RefreshOutcome outcome = handle.apply(row);
