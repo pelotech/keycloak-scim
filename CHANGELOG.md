@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.7.0](https://github.com/pelotech/keycloak-scim/compare/v1.6.1...v1.7.0) (2026-09-25)
+
+
+### Features
+
+* commit sync-refresh one page of users at a time ([#62](https://github.com/pelotech/keycloak-scim/issues/62)) ([5719346](https://github.com/pelotech/keycloak-scim/commit/5719346d72912bcb4de161ccfd10fa3e2001638a))
+* paging core for sync-refresh, not yet wired in ([#61](https://github.com/pelotech/keycloak-scim/issues/61)) ([2e12f63](https://github.com/pelotech/keycloak-scim/commit/2e12f63408348ef4aea09e1ac0874cdfdaafec6b))
+
+
+### Bug fixes
+
+* a 429 no longer stops a sync, and skipped users are no longer counted as updated ([#60](https://github.com/pelotech/keycloak-scim/issues/60)) ([d5c82cc](https://github.com/pelotech/keycloak-scim/commit/d5c82cc040480b2ebcab61875a7c2712a7655f8c))
+
+
+### Tests
+
+* start only the containers a test class uses, and fix a readiness race ([#59](https://github.com/pelotech/keycloak-scim/issues/59)) ([056243f](https://github.com/pelotech/keycloak-scim/commit/056243fdada8fb7a06be14b69e26987491534f70))
+
+
+### Documentation
+
+* design record for the paged sync-refresh ([#58](https://github.com/pelotech/keycloak-scim/issues/58)) ([dc5e687](https://github.com/pelotech/keycloak-scim/commit/dc5e6877bd58c26ae7311e818cdcdfcf6383e815))
+* streamline the documentation copy and fix stale claims ([#57](https://github.com/pelotech/keycloak-scim/issues/57)) ([3b1a170](https://github.com/pelotech/keycloak-scim/commit/3b1a170cb41bce4cc01dd068a11d00db8593965f))
+
 ## [1.6.1](https://github.com/pelotech/keycloak-scim/compare/v1.6.0...v1.6.1) (2026-09-02)
 
 
