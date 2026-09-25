@@ -7,6 +7,7 @@ import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.jboss.logging.Logger;
 
 /**
@@ -30,22 +31,36 @@ final class SyncLease {
     static final Duration SELF_FENCE_THRESHOLD = Duration.ofSeconds(90);
     /** Renewal stops when the run has reported no progress for this long. */
     static final Duration PROGRESS_WINDOW = Duration.ofMinutes(10);
+    /**
+     * How long a stop waits for a tick in flight. One tick is one short
+     * transaction, so this bounds a tick stuck on the pool. After it,
+     * release clears the holder anyway, and a late tick can only match
+     * nothing.
+     */
+    static final Duration STOP_WAIT = Duration.ofSeconds(10);
 
     enum Decision { TAKE, REFUSE }
+
+    /** What the lock transaction decided, and the clock it wrote to the row. */
+    private record Outcome(Decision decision, long now) { }
 
     private final LeaseStore store;
     private final String componentId;
     private final Clock clock;
     /** Token of this run. Per run, not per node, so two runs on one node never share a lease. */
     private final String token = UUID.randomUUID().toString();
-    /** Set after acquisition, so the self-fence does not trip at the first check. Zero until then. */
+    /**
+     * This run's last successful renewal. Set after acquisition, so the
+     * self-fence does not trip at the first check; zero until then. Written
+     * by the run thread and by the heartbeat, read by both, so volatile.
+     */
     private volatile long lastRenewal;
-    /** Set after acquisition and on every report, so renewal starts open. */
+    /** Set after acquisition and on every report, so renewal starts open. Read by the heartbeat, so volatile. */
     private volatile long lastProgress;
-    /** Set by a tick that matched nothing. Read by the run thread. */
+    /** Set by a tick that matched nothing. Read by the heartbeat and by the run thread, so volatile. */
     private volatile boolean lostFlag;
-    /** Non-null while the heartbeat runs. Read and cleared on the run thread only. */
-    private ScheduledExecutorService heartbeat;
+    /** Non-null while the heartbeat runs. Atomic, so a stop from any thread takes the one scheduler. */
+    private final AtomicReference<ScheduledExecutorService> heartbeat = new AtomicReference<>();
 
     SyncLease(LeaseStore store, String componentId, Clock clock) {
         this.store = Objects.requireNonNull(store);
@@ -97,7 +112,7 @@ final class SyncLease {
             LOGGER.debugf(e, "Sync lease row for component %s was not inserted; it may already exist", componentId);
         }
         final RuntimeException ensureCause = ensureFailure;
-        Decision decision = store.inOneTransaction(locked -> {
+        Outcome outcome = store.inOneTransaction(locked -> {
             var row = locked.lockAndRead(componentId).orElseThrow(() -> new IllegalStateException(
                 "no sync lease row for component " + componentId
                     + (ensureCause == null ? "" : ": " + ensureCause.getMessage()), ensureCause));
@@ -110,16 +125,16 @@ final class SyncLease {
                 LOGGER.warnf("Sync of component %s refused: run %s holds the lease, last renewed %d s ago",
                     componentId, row.holder(), ageSeconds);
             }
-            return d;
+            return new Outcome(d, now);
         });
-        if (decision == Decision.TAKE) {
-            // Set only after the transaction commits: run state must not lead the database.
-            long committed = clock.millis();
-            lastRenewal = committed;
-            lastProgress = committed;
+        if (outcome.decision() == Decision.TAKE) {
+            // Set only after the transaction commits, and to the clock the row
+            // holds: run state must not lead the database.
+            lastRenewal = outcome.now();
+            lastProgress = outcome.now();
             LOGGER.infof("Sync lease for component %s taken by run %s", componentId, token);
         }
-        return decision;
+        return outcome.decision();
     }
 
     /**
@@ -182,9 +197,12 @@ final class SyncLease {
         }
         try {
             long now = clock.millis();
-            if (now - lastProgress > PROGRESS_WINDOW.toMillis()) {
-                LOGGER.warnf("Sync lease for component %s not renewed: no progress for %d ms; "
-                    + "another node may take it", componentId, now - lastProgress);
+            // One read: a second could straddle a report and log a nonsense age.
+            long idle = now - lastProgress;
+            if (idle > PROGRESS_WINDOW.toMillis()) {
+                // Logged on every gated tick on purpose: it is the liveness signal for a hung run.
+                LOGGER.warnf("Sync lease for component %s not renewed: no progress for %d s; "
+                    + "another node may take it", componentId, idle / 1000);
                 return;
             }
             int matched = store.renew(componentId, token, now);
@@ -205,6 +223,9 @@ final class SyncLease {
      * acquisition transaction has committed. Not the shared timer thread: a
      * scheduled sync runs on that thread, so a heartbeat there would never
      * fire during a scheduled sync.
+     *
+     * @throws IllegalStateException when a heartbeat is already running; a
+     *     second start would silently drop the first scheduler and its thread
      */
     void startHeartbeat() {
         var scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -212,9 +233,12 @@ final class SyncLease {
             t.setDaemon(true); // must not keep the JVM alive
             return t;
         });
+        if (!heartbeat.compareAndSet(null, scheduler)) {
+            scheduler.shutdown(); // nothing scheduled yet, so this only frees the thread
+            throw new IllegalStateException("sync lease heartbeat for component " + componentId + " already running");
+        }
         long interval = HEARTBEAT_INTERVAL.toMillis();
         scheduler.scheduleAtFixedRate(this::tick, interval, interval, TimeUnit.MILLISECONDS);
-        heartbeat = scheduler;
     }
 
     /**
@@ -225,17 +249,18 @@ final class SyncLease {
      * scheduled executor drops the pending periodic task on shutdown and
      * lets the running one finish. A tick stuck on the database must not
      * hold the run, so after the wait {@code release} clears the holder
-     * anyway. Safe to call before a start and more than once.
+     * anyway. Safe to call before a start and more than once, from any
+     * thread: the swap takes the scheduler exactly once, so no caller can
+     * read a stale null and leak the thread.
      */
     void stopHeartbeat() {
-        var scheduler = heartbeat;
+        var scheduler = heartbeat.getAndSet(null);
         if (scheduler == null) {
             return;
         }
-        heartbeat = null;
         scheduler.shutdown();
         try {
-            scheduler.awaitTermination(10, TimeUnit.SECONDS);
+            scheduler.awaitTermination(STOP_WAIT.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

@@ -162,6 +162,7 @@ class SyncLeaseTest {
         assertThat(SyncLease.decide("other", null, NOW)).isEqualTo(SyncLease.Decision.TAKE);
     }
 
+    /** The recorded success is what stops a run from self-fencing after the first threshold. */
     @Test
     void aTickRenewsAndRecordsTheSuccess() {
         var lease = lease();
@@ -169,6 +170,9 @@ class SyncLeaseTest {
         clock.advance(SyncLease.HEARTBEAT_INTERVAL);
         lease.tick();
         assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(clock.millis());
+        assertThat(lease.lost()).isFalse();
+        // Past the threshold since acquire, exactly at it since the tick. Strict, so not past.
+        clock.advance(SyncLease.SELF_FENCE_THRESHOLD);
         assertThat(lease.lost()).isFalse();
     }
 
@@ -180,6 +184,21 @@ class SyncLeaseTest {
         clock.advance(SyncLease.HEARTBEAT_INTERVAL);
         lease.tick();
         assertThat(lease.lost()).isTrue();
+    }
+
+    /** Once lost, the run has nothing to renew, so a tick must not touch the store. */
+    @Test
+    void aLostLeaseTicksWithoutAStoreCall() {
+        var lease = lease();
+        lease.acquire();
+        store.rows.get("comp-1").holder = "other";
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(lease.lost()).isTrue();
+        int callsAtLoss = store.renewCalls;
+        clock.advance(SyncLease.HEARTBEAT_INTERVAL);
+        lease.tick();
+        assertThat(store.renewCalls).isEqualTo(callsAtLoss);
     }
 
     @Test
@@ -247,6 +266,16 @@ class SyncLeaseTest {
         clock.advance(SyncLease.PROGRESS_WINDOW.plusMillis(1));
         lease.tick();
         assertThat(store.renewCalls).isZero();
+    }
+
+    /** The gate is strict, like the thresholds: an age equal to the window is not past it. */
+    @Test
+    void anAgeExactlyAtTheProgressWindowStillRenews() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.PROGRESS_WINDOW);
+        lease.tick();
+        assertThat(store.renewCalls).isEqualTo(1);
     }
 
     @Test
