@@ -27,9 +27,11 @@ public class ScimSyncLease {
     @Column(name = "HOLDER")
     private String holder;
 
+    /** Epoch milliseconds when the current holder took the lease, or null. */
     @Column(name = "ACQUIRED_AT")
     private Long acquiredAt;
 
+    /** Epoch milliseconds of the last successful renewal, or null. */
     @Column(name = "RENEWED_AT")
     private Long renewedAt;
 
