@@ -1,7 +1,7 @@
 package sh.libre.scim.core;
 
 import java.util.Optional;
-import java.util.function.Supplier;
+import java.util.function.Function;
 
 /**
  * The database operations a sync lease needs. Each runs in its own short
@@ -11,33 +11,42 @@ import java.util.function.Supplier;
  */
 interface LeaseStore {
 
-    /**
-     * Runs {@code work} in one transaction, so the lock taken by
-     * {@link #lockAndRead} is still held when {@link #take} writes.
-     */
-    <T> T inOneTransaction(Supplier<T> work);
-
     /** A row as read under the lock. */
     record Row(String holder, Long renewedAt) {}
+
+    /**
+     * The two operations that must share one transaction, so the row lock
+     * taken by {@link #lockAndRead} is still held when {@link #take} writes.
+     * A handle exists only inside {@link LeaseStore#inOneTransaction}, so
+     * neither operation can be called outside it.
+     */
+    interface Locked {
+
+        /**
+         * Locks the component's row and reads it. Returns empty when there is
+         * no row, which means the insert was refused for a reason other than
+         * a duplicate.
+         */
+        Optional<Row> lockAndRead(String componentId);
+
+        /**
+         * Writes the holder and both timestamps on the row locked by
+         * {@link #lockAndRead}.
+         */
+        void take(String componentId, String token, long now);
+    }
+
+    /**
+     * Runs {@code work} in one transaction, so the lock taken by
+     * {@link Locked#lockAndRead} is still held when {@link Locked#take} writes.
+     */
+    <T> T inOneTransaction(Function<Locked, T> work);
 
     /**
      * Inserts a row for the component with no holder. The caller tolerates any
      * failure, because a duplicate surfaces at commit and is the common case.
      */
     void ensureRow(String componentId);
-
-    /**
-     * Locks the component's row and reads it. Returns empty when there is no
-     * row, which means the insert was refused for a reason other than a
-     * duplicate. Valid only inside {@link #inOneTransaction}.
-     */
-    Optional<Row> lockAndRead(String componentId);
-
-    /**
-     * Writes the holder and both timestamps on the row locked by
-     * {@link #lockAndRead}. Valid only inside {@link #inOneTransaction}.
-     */
-    void take(String componentId, String token, long now);
 
     /** Renews if the row still belongs to {@code token}. Returns the rows matched, 0 or 1. */
     int renew(String componentId, String token, long now);
