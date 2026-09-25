@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -53,7 +54,7 @@ final class FakeLeaseStore implements LeaseStore {
 
         @Override
         public void take(String componentId, String token, long now) {
-            Cell c = rows.get(componentId);
+            Cell c = Objects.requireNonNull(rows.get(componentId), "take before lockAndRead");
             c.holder = token;
             c.acquiredAt = now;
             c.renewedAt = now;

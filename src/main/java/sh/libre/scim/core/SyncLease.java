@@ -17,6 +17,8 @@ import org.jboss.logging.Logger;
  */
 final class SyncLease {
 
+    private static final Logger LOGGER = Logger.getLogger(SyncLease.class);
+
     /** How often the holder renews. */
     static final Duration HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
     /** Age of the last renewal past which any node may take the lease. */
@@ -27,6 +29,25 @@ final class SyncLease {
     static final Duration PROGRESS_WINDOW = Duration.ofMinutes(10);
 
     enum Decision { TAKE, REFUSE }
+
+    private final LeaseStore store;
+    private final String componentId;
+    private final Clock clock;
+    /** Token of this run. Per run, not per node, so two runs on one node never share a lease. */
+    private final String token = UUID.randomUUID().toString();
+    /** Set after acquisition, so the self-fence does not trip at the first check. */
+    private volatile long lastRenewal;
+
+    SyncLease(LeaseStore store, String componentId, Clock clock) {
+        this.store = Objects.requireNonNull(store);
+        this.componentId = Objects.requireNonNull(componentId);
+        this.clock = Objects.requireNonNull(clock);
+    }
+
+    /** The token this run carries. A run's log lines name it; no node name is needed. */
+    String token() {
+        return token;
+    }
 
     /**
      * Whether a run may take the lease described by the row. Pure, so the
@@ -44,34 +65,17 @@ final class SyncLease {
         return now - renewedAt > STALE_THRESHOLD.toMillis() ? Decision.TAKE : Decision.REFUSE;
     }
 
-    private static final Logger LOGGER = Logger.getLogger(SyncLease.class);
-
-    private final LeaseStore store;
-    private final String componentId;
-    private final Clock clock;
-    /** Token of this run. Per run, not per node, so two runs on one node never share a lease. */
-    private final String token = UUID.randomUUID().toString();
-
-    SyncLease(LeaseStore store, String componentId, Clock clock) {
-        this.store = Objects.requireNonNull(store);
-        this.componentId = Objects.requireNonNull(componentId);
-        this.clock = Objects.requireNonNull(clock);
-    }
-
-    /** The token this run carries. A run's log lines name it; no node name is needed. */
-    String token() {
-        return token;
-    }
-
     /**
      * Takes the lease or refuses it. Two short transactions: first ensure the
      * row exists, then lock it and decide.
      *
      * <p>The ensure step is lenient. A duplicate row is the common case, and
-     * the failure surfaces at commit, wrapped, so telling it apart from a
-     * real fault would be guesswork. The lock step reads the truth: a row
-     * still absent after both steps means the insert was refused for another
-     * reason, and that is the failure this method reports.
+     * the failure surfaces at commit, wrapped, so it cannot be told apart
+     * from a real fault. The lock step reads the row under a lock. A row
+     * still absent after both steps means the insert failed for a reason
+     * other than a duplicate, and that failure is what this method reports.
+     * Whatever the lock transaction itself throws also propagates from this
+     * method, for example a failure to reach the database.
      *
      * @throws IllegalStateException when no row exists after the ensure step
      */
@@ -84,26 +88,28 @@ final class SyncLease {
             LOGGER.debugf(e, "Sync lease row for component %s was not inserted; it may already exist", componentId);
         }
         final RuntimeException ensureCause = ensureFailure;
-        return store.inOneTransaction(locked -> {
+        Decision decision = store.inOneTransaction(locked -> {
             var row = locked.lockAndRead(componentId).orElseThrow(() -> new IllegalStateException(
                 "no sync lease row for component " + componentId
                     + (ensureCause == null ? "" : ": " + ensureCause.getMessage()), ensureCause));
             long now = clock.millis();
-            var decision = decide(row.holder(), row.renewedAt(), now);
-            if (decision == Decision.TAKE) {
+            var d = decide(row.holder(), row.renewedAt(), now);
+            if (d == Decision.TAKE) {
                 locked.take(componentId, token, now);
-                lastRenewal = now;
             } else {
-                long age = row.renewedAt() == null ? -1 : now - row.renewedAt();
-                LOGGER.warnf("Sync of component %s refused: run %s holds the lease, last renewed %d ms ago",
-                    componentId, row.holder(), age);
+                long ageSeconds = (now - row.renewedAt()) / 1000;
+                LOGGER.warnf("Sync of component %s refused: run %s holds the lease, last renewed %d s ago",
+                    componentId, row.holder(), ageSeconds);
             }
-            return decision;
+            return d;
         });
+        if (decision == Decision.TAKE) {
+            // Set only after the transaction commits: run state must not lead the database.
+            lastRenewal = clock.millis();
+            LOGGER.infof("Sync lease for component %s taken by run %s", componentId, token);
+        }
+        return decision;
     }
-
-    /** Set at acquisition, so the self-fence does not trip at the first check. */
-    private volatile long lastRenewal;
 
     /**
      * Stops the heartbeat, then clears the holder if this run still holds it.
@@ -116,14 +122,14 @@ final class SyncLease {
         try {
             int matched = store.release(componentId, token);
             if (matched == 0) {
-                LOGGER.warnf("Sync lease for component %s was not released: another run holds it", componentId);
+                LOGGER.warnf("Sync lease for component %s was not released: this run no longer holds it", componentId);
             }
         } catch (RuntimeException e) {
             LOGGER.warnf(e, "Sync lease for component %s could not be released; it will go stale", componentId);
         }
     }
 
-    // Replaced in the next task, which adds the heartbeat thread this stub stands in for.
+    // Stub. No heartbeat exists yet, so there is nothing to stop.
     void stopHeartbeat() {
         /* no heartbeat yet */
     }

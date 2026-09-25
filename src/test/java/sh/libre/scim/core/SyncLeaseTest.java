@@ -3,7 +3,11 @@ package sh.libre.scim.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import org.junit.jupiter.api.Test;
 
 class SyncLeaseTest {
@@ -14,14 +18,14 @@ class SyncLeaseTest {
     private final FakeLeaseStore store = new FakeLeaseStore();
     private final MutableClock clock = new MutableClock(NOW);
 
-    /** A clock the tests move by hand. */
-    static final class MutableClock extends java.time.Clock {
-        private long millis;
+    /** A clock the tests move by hand. Volatile, because the next task reads it from a scheduler thread. */
+    static final class MutableClock extends Clock {
+        private volatile long millis;
         MutableClock(long millis) { this.millis = millis; }
         void advance(Duration d) { millis += d.toMillis(); }
-        @Override public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
-        @Override public java.time.Clock withZone(java.time.ZoneId zone) { return this; }
-        @Override public java.time.Instant instant() { return java.time.Instant.ofEpochMilli(millis); }
+        @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        @Override public Clock withZone(ZoneId zone) { return this; }
+        @Override public Instant instant() { return Instant.ofEpochMilli(millis); }
         @Override public long millis() { return millis; }
     }
 
@@ -39,6 +43,7 @@ class SyncLeaseTest {
         var lease = lease();
         assertThat(lease.acquire()).isEqualTo(SyncLease.Decision.TAKE);
         assertThat(store.rows.get("comp-1").holder).isEqualTo(lease.token());
+        assertThat(store.rows.get("comp-1").acquiredAt).isEqualTo(NOW);
         assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(NOW);
     }
 
@@ -76,10 +81,25 @@ class SyncLeaseTest {
 
     @Test
     void aMissingRowAfterTheEnsureStepIsAFailure() {
-        store.ensureFailure = new IllegalStateException("no privilege");
+        var ensureFailure = new IllegalStateException("no privilege");
+        store.ensureFailure = ensureFailure;
         assertThatThrownBy(() -> lease().acquire())
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("no privilege");
+            .hasMessageContaining("no privilege")
+            .hasCause(ensureFailure);
+    }
+
+    /** Proves the lenient catch stops at the ensure step: a lock failure is not swallowed. */
+    @Test
+    void aLockStepFailurePropagatesAndWritesNothing() {
+        store.ensureRow("comp-1");
+        store.lockFailure = new IllegalStateException("row lock timed out");
+        assertThatThrownBy(() -> lease().acquire())
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("row lock timed out");
+        assertThat(store.rows.get("comp-1").holder).isNull();
+        assertThat(store.rows.get("comp-1").acquiredAt).isNull();
+        assertThat(store.rows.get("comp-1").renewedAt).isNull();
     }
 
     @Test
