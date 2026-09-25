@@ -607,10 +607,18 @@ class ScimSyncLoopTest {
     // Progress reporting on the two unpaged loops
     // -----------------------------------------------------------------------
 
+    /**
+     * Under the STOP policy, the second resource's failure makes {@code
+     * refreshOne} return STOP. The report for that resource must still have
+     * happened, or moving it after the stop check would pass this test too.
+     */
     @Test
+    @SuppressWarnings("unchecked")
     void refreshReportsProgressForEveryResource() {
-        var client = spy(newClient());
-        doReturn(true).when(client).createApplied(any());
+        var client = spy(newClient("stop"));
+        doReturn(true)
+            .doThrow(new InconsistentScimMappingException("bad mapping"))
+            .when(client).createApplied(any());
         var reports = new int[1];
         client.refreshResources(twoResourceFactory(mock(TestModel.class), mock(TestModel.class)),
             new SynchronizationResult(), () -> reports[0]++);

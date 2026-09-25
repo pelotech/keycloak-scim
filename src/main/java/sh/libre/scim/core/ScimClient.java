@@ -1224,6 +1224,9 @@ public class ScimClient {
         // an adapter to read the failed resource's id from.
         A adapter = getAdapter(factory);
         for (var resource : resources) {
+            // Report before any branch. A steady-state import is a valid
+            // mapping on every resource, and every branch below this line
+            // can exit the iteration early, so a later report would never run.
             progress.run();
             try {
                 LOGGER.infof("Reconciling remote resource %s", resource);
