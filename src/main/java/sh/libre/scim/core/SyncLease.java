@@ -52,7 +52,8 @@ final class SyncLease {
     /**
      * This run's last successful renewal. Set after acquisition, so the
      * self-fence does not trip at the first check; zero until then. Written
-     * by the run thread and by the heartbeat, read by both, so volatile.
+     * by the run thread and by the heartbeat, read by {@link #lost()} on the
+     * run thread, so volatile.
      */
     private volatile long lastRenewal;
     /** Set after acquisition and on every report, so renewal starts open. Read by the heartbeat, so volatile. */
@@ -234,7 +235,7 @@ final class SyncLease {
             return t;
         });
         if (!heartbeat.compareAndSet(null, scheduler)) {
-            scheduler.shutdown(); // nothing scheduled yet, so this only frees the thread
+            scheduler.shutdown(); // no thread yet, so this only marks the unused executor terminated
             throw new IllegalStateException("sync lease heartbeat for component " + componentId + " already running");
         }
         long interval = HEARTBEAT_INTERVAL.toMillis();
