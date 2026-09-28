@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/pelotech/keycloak-scim/compare/v1.7.0...v1.8.0) (2026-09-28)
+
+
+### Features
+
+* one sync per component at a time ([#65](https://github.com/pelotech/keycloak-scim/issues/65)) ([e034530](https://github.com/pelotech/keycloak-scim/commit/e034530834062e3c7642c7ab5bb5f05e64d99d6e))
+
 ## [1.7.0](https://github.com/pelotech/keycloak-scim/compare/v1.6.1...v1.7.0) (2026-09-25)
 
 
