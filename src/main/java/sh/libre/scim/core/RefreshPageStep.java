@@ -37,6 +37,10 @@ import org.keycloak.storage.user.SynchronizationResult;
  * <p>This type and the paging machinery around it stay package-private. A
  * caller in another package starts a sync through the public entry point of
  * this package, so the paging types do not become API.
+ *
+ * <p>The step checks the lease after every row and stops the page when it is
+ * lost. It reports progress for every row it examines, whatever the row's
+ * outcome, so a caller watching the lease can tell the run is still alive.
  */
 final class RefreshPageStep implements PageStep<String> {
 
@@ -94,11 +98,19 @@ final class RefreshPageStep implements PageStep<String> {
     private final Duration pageBudget;
     private final Clock clock;
     private final SyncErrorPolicy policy;
+    private final BooleanSupplier leaseLost;
+    private final Runnable progressReporter;
     // The runner keeps one step for the whole run, so the count crosses pages.
     private final ThrottleStreak throttleStreak = new ThrottleStreak();
 
+    /**
+     * @param leaseLost whether this run has lost the component's lease. The
+     *     step checks it after every row and ends the page when it is true.
+     * @param progressReporter reports one examined row. The step calls it for
+     *     every row, whatever the row's outcome.
+     */
     RefreshPageStep(KeycloakSessionFactory sessionFactory, String realmId, ComponentModel model,
-                    Duration pageBudget, Clock clock) {
+                    Duration pageBudget, Clock clock, BooleanSupplier leaseLost, Runnable progressReporter) {
         // Fail at wiring time. A missing argument must not surface inside the
         // first page transaction, after the run has already started.
         this.sessionFactory = Objects.requireNonNull(sessionFactory, "sessionFactory");
@@ -106,6 +118,8 @@ final class RefreshPageStep implements PageStep<String> {
         this.model = Objects.requireNonNull(model, "model");
         this.pageBudget = Objects.requireNonNull(pageBudget, "pageBudget");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.leaseLost = Objects.requireNonNull(leaseLost, "leaseLost");
+        this.progressReporter = Objects.requireNonNull(progressReporter, "progressReporter");
         this.policy = SyncErrorPolicy.fromConfig(model.get("sync-on-error"));
     }
 
@@ -134,7 +148,7 @@ final class RefreshPageStep implements PageStep<String> {
                 var page = new Page(after, size, queryRows(em, realmId, after, size));
                 var counters = new SynchronizationResult();
                 var transaction = session.getTransactionManager();
-                var progress = processRows(page, throttleStreak,
+                var rowProgress = processRows(page, throttleStreak,
                     row -> {
                         // A cache miss validates a federated user against its
                         // directory and returns null if the entry is gone. A
@@ -145,9 +159,11 @@ final class RefreshPageStep implements PageStep<String> {
                             u -> client.refreshOne(UserAdapter::new, u, counters, policy));
                     },
                     transaction::getRollbackOnly,
-                    () -> overBudget(start, clock.instant(), pageBudget));
-                return new PageOutcome<>(progress.cursor(), progress.progressed(),
-                    progress.exhausted(), counters, progress.stopReason());
+                    leaseLost,
+                    () -> overBudget(start, clock.instant(), pageBudget),
+                    progressReporter);
+                return new PageOutcome<>(rowProgress.cursor(), rowProgress.progressed(),
+                    rowProgress.exhausted(), counters, rowProgress.stopReason());
             } finally {
                 ScimClient.closeQuietly(client);
             }
@@ -212,24 +228,29 @@ final class RefreshPageStep implements PageStep<String> {
      * moves past every row examined, whether it was pushed, skipped or missing.
      *
      * <p>The checks run in this order: the policy stop, the throttle streak,
-     * the failed transaction, then the budget. The first three end the run, so
-     * they run after every row. The budget only ends the page, so it runs only
-     * while rows remain. A short final page therefore reports no budget stop,
-     * and the run does not open another transaction to fetch nothing.
+     * the failed transaction, the lost lease, then the budget. The first four
+     * end the run, so they run after every row. The budget only ends the page,
+     * so it runs only while rows remain. A short final page therefore reports
+     * no budget stop, and the run does not open another transaction to fetch
+     * nothing.
      *
      * @param page the rows to handle and the request that read them
      * @param streak the throttle count, which the caller keeps across pages
      * @param handle pushes one user and reports what to do next
      * @param transactionFailed whether the page transaction can no longer commit
+     * @param leaseLost whether this run has lost the component's lease
      * @param overBudget whether the page has spent its wall-clock budget
+     * @param progressReporter reports one examined row, called before
+     *     {@code handle} so every examined row reports whatever happens next
      */
     static PageProgress processRows(Page page, ThrottleStreak streak,
             Function<UserRow, RefreshOutcome> handle, BooleanSupplier transactionFailed,
-            BooleanSupplier overBudget) {
+            BooleanSupplier leaseLost, BooleanSupplier overBudget, Runnable progressReporter) {
         List<UserRow> rows = page.rows();
         String last = page.after();
         StopReason stopReason = StopReason.NONE;
         for (int i = 0; i < rows.size(); i++) {
+            progressReporter.run();
             UserRow row = rows.get(i);
             last = row.username();
             RefreshOutcome outcome = handle.apply(row);
@@ -247,6 +268,11 @@ final class RefreshPageStep implements PageStep<String> {
             if (transactionFailed.getAsBoolean()) {
                 LOGGER.errorf("SCIM sync stopped: the page transaction cannot commit, at cursor %s", last);
                 stopReason = StopReason.TRANSACTION_FAILED;
+                break;
+            }
+            if (leaseLost.getAsBoolean()) {
+                LOGGER.errorf("SCIM sync stopped: this run no longer holds the lease, at cursor %s", last);
+                stopReason = StopReason.LEASE_LOST;
                 break;
             }
             boolean rowsRemain = i + 1 < rows.size();

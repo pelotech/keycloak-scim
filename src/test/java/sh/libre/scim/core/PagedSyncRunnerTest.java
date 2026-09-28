@@ -132,6 +132,20 @@ class PagedSyncRunnerTest {
     }
 
     /**
+     * A lost lease still commits the page in flight, because its pushes
+     * already happened. Only the next page is skipped.
+     */
+    @Test
+    void stopsWhenAPageReportsALostLease() {
+        var step = new ScriptedStep(List.of(
+            new PageOutcome<>("b", true, false, updated(2), StopReason.LEASE_LOST)));
+        var result = new SynchronizationResult();
+        var run = PagedSyncRunner.run(step, 10, result);
+        assertThat(run.stopReason()).isEqualTo(StopReason.LEASE_LOST);
+        assertThat(result.getUpdated()).isEqualTo(2); // the page in flight committed
+    }
+
+    /**
      * A page that cannot commit keeps none of its pushes, so its updated count
      * describes work the database rolled back. Its failures still happened, and
      * the result is the only place besides the log where they show.

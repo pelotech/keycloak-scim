@@ -53,4 +53,26 @@
         </addColumn>
     </changeSet>
 
+    <changeSet author="keycloak-scim" id="scim-sync-lease-1.0">
+        <!-- One row per SCIM component. A sync run takes the row under a
+             row lock, renews RENEWED_AT with a heartbeat, and clears HOLDER
+             at the end. See SyncLease. -->
+        <createTable tableName="SCIM_SYNC_LEASE">
+            <column name="COMPONENT_ID" type="VARCHAR(36)">
+                <constraints nullable="false" />
+            </column>
+            <column name="HOLDER" type="VARCHAR(36)">
+                <constraints nullable="true" />
+            </column>
+            <column name="ACQUIRED_AT" type="BIGINT">
+                <constraints nullable="true" />
+            </column>
+            <column name="RENEWED_AT" type="BIGINT">
+                <constraints nullable="true" />
+            </column>
+        </createTable>
+        <addPrimaryKey constraintName="PK_SCIM_SYNC_LEASE" tableName="SCIM_SYNC_LEASE" columnNames="COMPONENT_ID" />
+        <addForeignKeyConstraint baseTableName="SCIM_SYNC_LEASE" baseColumnNames="COMPONENT_ID" constraintName="FK_SCIM_SYNC_LEASE_COMPONENT" referencedTableName="COMPONENT" referencedColumnNames="ID" onDelete="CASCADE" onUpdate="CASCADE" />
+    </changeSet>
+
 </databaseChangeLog>

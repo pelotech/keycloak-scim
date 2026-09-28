@@ -35,5 +35,11 @@ enum StopReason {
      * and the runner never sees this value. It exists so that the page stops
      * at the first row instead of at the last one.
      */
-    TRANSACTION_FAILED
+    TRANSACTION_FAILED,
+    /**
+     * Another run took this run's lease on the component, or this run could
+     * not prove it still holds it. The page in flight commits; its pushes
+     * happened. The run stops before the next page.
+     */
+    LEASE_LOST
 }

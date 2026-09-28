@@ -1043,6 +1043,17 @@ public class ScimClient {
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(
             AdapterFactory<M, S, A> factory,
             SynchronizationResult syncRes) {
+        refreshResources(factory, syncRes, () -> {});
+    }
+
+    /**
+     * @param progress called once per resource, before anything is done with
+     *     it. A sync run uses this call to prove it is still alive.
+     */
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void refreshResources(
+            AdapterFactory<M, S, A> factory,
+            SynchronizationResult syncRes,
+            Runnable progress) {
         LOGGER.info("Refresh resources");
         SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.refresh", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
@@ -1054,6 +1065,7 @@ public class ScimClient {
             // because a realm holds few groups. The throttle-streak guard
             // protects the user population, which is large.
             for (var resource : getAdapter(factory).getResourceStream().toList()) {
+                progress.run();
                 if (refreshOne(factory, resource, syncRes, policy) == RefreshOutcome.STOP) {
                     return;
                 }
@@ -1170,8 +1182,16 @@ public class ScimClient {
 
     public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
             AdapterFactory<M, S, A> factory, SynchronizationResult syncRes) {
+        importResources(factory, syncRes, () -> {});
+    }
+
+    /**
+     * @param progress called once per resource, before anything is done with
+     *     it. A sync run uses this call to prove it is still alive.
+     */
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importResources(
+            AdapterFactory<M, S, A> factory, SynchronizationResult syncRes, Runnable progress) {
         LOGGER.info("Import");
-        SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
         try (var ignored = TRACING.startSpan("scim.sync.import", getAdapter(factory).getType(), scimApplicationBaseUrl)) {
             try {
                 var adapter = getAdapter(factory);
@@ -1181,89 +1201,111 @@ public class ScimClient {
                     scimRequestBuilder.list(listUrl, resourceClass).get().sendRequest());
                 ListResponse<S> resourceTypeListResponse = response.getResource();
 
-                for (var resource : resourceTypeListResponse.getListedResources()) {
-                    try {
-                        LOGGER.infof("Reconciling remote resource %s", resource);
-                        adapter = getAdapter(factory);
-                        adapter.apply(resource);
-
-                        var mapping = adapter.getMapping();
-                        if (mapping != null) {
-                            adapter.apply(mapping);
-                            if (adapter.entityExists()) {
-                                LOGGER.info("Valid mapping found, skipping");
-                                continue;
-                            } else if (mapping.getDeactivatedAt() != null) {
-                                // Deactivation tombstone: the local user is
-                                // supposed to be absent. Keep the row so a
-                                // returning user gets the same remote id.
-                                LOGGER.debugf("Keeping deactivated mapping %s (tombstone)", mapping.getId());
-                                continue;
-                            } else {
-                                LOGGER.info("Delete a dangling mapping");
-                                adapter.deleteMapping();
-                            }
-                        }
-
-                        var mapped = adapter.tryToMap();
-                        if (mapped) {
-                            LOGGER.info("Matched");
-                            adapter.saveMapping();
-                        } else {
-                            if (shouldDeactivate(model, adapter.getType())
-                                    && resource instanceof User remoteUser
-                                    && !remoteUser.isActive().orElse(true)) {
-                                // Users we deactivated still show up in the
-                                // consumer's /Users list, and their local absence
-                                // is expected. DELETE_REMOTE would hard-delete our
-                                // own tombstone and CREATE_LOCAL would resurrect a
-                                // deprovisioned user, so skip both.
-                                LOGGER.debugf("Skipping inactive remote user %s under delete-mode=deactivate",
-                                    resource.getId().orElse("?"));
-                                continue;
-                            }
-                            switch (this.model.get("sync-import-action")) {
-                                case "CREATE_LOCAL":
-                                    LOGGER.info("Create local resource");
-                                    try {
-                                        adapter.createEntity();
-                                        adapter.saveMapping();
-                                        syncRes.increaseAdded();
-                                    } catch (Exception e) {
-                                        LOGGER.error(e);
-                                    }
-                                    break;
-                                case "DELETE_REMOTE":
-                                    LOGGER.info("Delete remote resource");
-                                    scimRequestBuilder
-                                        .delete(genScimUrl(adapter.getSCIMEndpoint(),
-                                                           resource.getId().get()),
-                                                           adapter.getResourceClass())
-                                        .sendRequest();
-                                    syncRes.increaseRemoved();
-                                    break;
-                            }
-                        }
-                    } catch (ScimPropagationException e) {
-                        // More-specific than the generic handler below; must come
-                        // first or the classified throw would be swallowed there.
-                        LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
-                            adapter.getId(), e.getClass().getSimpleName());
-                        syncRes.increaseFailed();
-                        if (policy.shouldStopRun(e)) {
-                            LOGGER.errorf("SCIM sync aborted after %s on resource %s",
-                                e.getClass().getSimpleName(), adapter.getId());
-                            return; // stop the whole run
-                        }
-                        // else continue
-                    } catch (Exception e) {
-                        LOGGER.error(e);
-                        e.printStackTrace();
-                        syncRes.increaseFailed();
-                    }
-                }
+                importListed(factory, resourceTypeListResponse.getListedResources(), syncRes, progress);
             } catch (ResponseException e) {
                 throw new RuntimeException(e);
+            }
+        }
+    }
+
+    /**
+     * Holds the import loop, so a test can drive it with a plain list and no
+     * endpoint. Reports progress at the top of every iteration, before any
+     * branch: the loop leaves most iterations through a {@code continue} on a
+     * valid mapping, a tombstone, or an inactive remote user, and the steady
+     * state of an import is a valid mapping on every resource, so a report at
+     * the end of the body would almost never fire.
+     */
+    // package-private so a test can drive the loop without an endpoint
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void importListed(
+            AdapterFactory<M, S, A> factory, List<S> resources, SynchronizationResult syncRes, Runnable progress) {
+        SyncErrorPolicy policy = SyncErrorPolicy.fromConfig(this.model.get("sync-on-error"));
+        // Declared before the loop so the propagation catch below always has
+        // an adapter to read the failed resource's id from.
+        A adapter = getAdapter(factory);
+        for (var resource : resources) {
+            // Report before any branch. A steady-state import is a valid
+            // mapping on every resource, and every branch below this line
+            // can exit the iteration early, so a later report would never run.
+            progress.run();
+            try {
+                LOGGER.infof("Reconciling remote resource %s", resource);
+                adapter = getAdapter(factory);
+                adapter.apply(resource);
+
+                var mapping = adapter.getMapping();
+                if (mapping != null) {
+                    adapter.apply(mapping);
+                    if (adapter.entityExists()) {
+                        LOGGER.info("Valid mapping found, skipping");
+                        continue;
+                    } else if (mapping.getDeactivatedAt() != null) {
+                        // Deactivation tombstone: the local user is
+                        // supposed to be absent. Keep the row so a
+                        // returning user gets the same remote id.
+                        LOGGER.debugf("Keeping deactivated mapping %s (tombstone)", mapping.getId());
+                        continue;
+                    } else {
+                        LOGGER.info("Delete a dangling mapping");
+                        adapter.deleteMapping();
+                    }
+                }
+
+                var mapped = adapter.tryToMap();
+                if (mapped) {
+                    LOGGER.info("Matched");
+                    adapter.saveMapping();
+                } else {
+                    if (shouldDeactivate(model, adapter.getType())
+                            && resource instanceof User remoteUser
+                            && !remoteUser.isActive().orElse(true)) {
+                        // Users we deactivated still show up in the
+                        // consumer's /Users list, and their local absence
+                        // is expected. DELETE_REMOTE would hard-delete our
+                        // own tombstone and CREATE_LOCAL would resurrect a
+                        // deprovisioned user, so skip both.
+                        LOGGER.debugf("Skipping inactive remote user %s under delete-mode=deactivate",
+                            resource.getId().orElse("?"));
+                        continue;
+                    }
+                    switch (this.model.get("sync-import-action")) {
+                        case "CREATE_LOCAL":
+                            LOGGER.info("Create local resource");
+                            try {
+                                adapter.createEntity();
+                                adapter.saveMapping();
+                                syncRes.increaseAdded();
+                            } catch (Exception e) {
+                                LOGGER.error(e);
+                            }
+                            break;
+                        case "DELETE_REMOTE":
+                            LOGGER.info("Delete remote resource");
+                            scimRequestBuilder
+                                .delete(genScimUrl(adapter.getSCIMEndpoint(),
+                                                   resource.getId().get()),
+                                                   adapter.getResourceClass())
+                                .sendRequest();
+                            syncRes.increaseRemoved();
+                            break;
+                    }
+                }
+            } catch (ScimPropagationException e) {
+                // More-specific than the generic handler below; must come
+                // first or the classified throw would be swallowed there.
+                LOGGER.warnf(e, "SCIM sync: resource %s failed (%s)",
+                    adapter.getId(), e.getClass().getSimpleName());
+                syncRes.increaseFailed();
+                if (policy.shouldStopRun(e)) {
+                    LOGGER.errorf("SCIM sync aborted after %s on resource %s",
+                        e.getClass().getSimpleName(), adapter.getId());
+                    return; // stop the whole import
+                }
+                // else continue
+            } catch (Exception e) {
+                LOGGER.error(e);
+                e.printStackTrace();
+                syncRes.increaseFailed();
             }
         }
     }

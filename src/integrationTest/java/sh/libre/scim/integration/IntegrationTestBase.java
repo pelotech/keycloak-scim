@@ -494,22 +494,7 @@ public abstract class IntegrationTestBase {
     // ---------- WireMock stubs ----------
 
     protected void stubScimUserCreateOk() {
-        // UserAdapter.apply(User) calls .get() on id/userName/displayName/active,
-        // so all four must be present or the adapter throws and the mapping
-        // never gets persisted. The id must fit in the SCIM_RESOURCE.EXTERNAL_ID
-        // column (VARCHAR(36)); a bare UUID is exactly 36 characters.
-        wireMock.stubFor(post(urlPathEqualTo("/Users"))
-            .willReturn(aResponse()
-                .withStatus(201)
-                .withHeader("Content-Type", "application/scim+json")
-                .withBody("""
-                    {
-                      "id": "%s",
-                      "userName": "placeholder",
-                      "displayName": "placeholder",
-                      "active": true,
-                      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
-                    }""".formatted(UUID.randomUUID()))));
+        stubScimUserCreateOk(0);
     }
 
     /**
@@ -545,6 +530,33 @@ public abstract class IntegrationTestBase {
             response = response.withFixedDelay(delayMs);
         }
         wireMock.stubFor(post(urlPathEqualTo("/Bulk")).willReturn(response));
+    }
+
+    /**
+     * Like {@link #stubScimUserCreateOk()} but every create waits a fixed time
+     * before it answers. A run of many users then lasts long enough for a
+     * test to act while it is still going.
+     */
+    protected void stubScimUserCreateOk(int delayMs) {
+        // UserAdapter.apply(User) calls .get() on id/userName/displayName/active,
+        // so all four must be present or the adapter throws and the mapping
+        // never gets persisted. The id must fit in the SCIM_RESOURCE.EXTERNAL_ID
+        // column (VARCHAR(36)); a bare UUID is exactly 36 characters.
+        var response = aResponse()
+            .withStatus(201)
+            .withHeader("Content-Type", "application/scim+json")
+            .withBody("""
+                {
+                  "id": "%s",
+                  "userName": "placeholder",
+                  "displayName": "placeholder",
+                  "active": true,
+                  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"]
+                }""".formatted(UUID.randomUUID()));
+        if (delayMs > 0) {
+            response = response.withFixedDelay(delayMs);
+        }
+        wireMock.stubFor(post(urlPathEqualTo("/Users")).willReturn(response));
     }
 
     /** Current count of POST /Bulk requests WireMock has received. */
