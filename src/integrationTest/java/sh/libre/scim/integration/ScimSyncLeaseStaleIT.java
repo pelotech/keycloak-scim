@@ -85,6 +85,8 @@ class ScimSyncLeaseStaleIT extends IntegrationTestBase {
         assertFalse(first.isIgnored());
         assertEquals(3, first.getUpdated());
 
+        // The first run's own duration folds into this margin and is near zero:
+        // three users against an undelayed stub.
         sleepQuietly(45);
         var second = realm.userStorage().syncUsers(componentId, "triggerFullSync");
         assertTrue(second.isIgnored(), "45 seconds after a crashed holder the lease is still live");

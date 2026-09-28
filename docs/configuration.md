@@ -278,13 +278,20 @@ and `sync-import` no longer run through the dispatcher those events use. The
 code now matches what this document already said: a sync never rolls back.
 It only skips or stops, governed by `sync-on-error`.
 
-**Two syncs of the same realm can overlap.** Keycloak locks a component
-before a sync starts. That lock's expiry does not grow with the run's
-length, so it can expire long before a long run ends. A second scheduled or
-admin-triggered sync can then start on the same component while the first is
-still running. A run that stops because a page cannot commit, with no
-throttle streak and no `sync-on-error` stop logged, is the likely sign of
-this.
+**One sync per component at a time.** A run takes a lease on its component
+before it starts and renews it every 30 seconds. A second sync of the same
+component, from the scheduler or from an admin, is refused at once and
+reports "Synchronization ignored as it's already in progress". A refused
+scheduled sync runs at its next period. Two SCIM providers in one realm may
+sync at the same time.
+
+A lease outlives a crashed node by at most two minutes. A run that makes no
+progress for ten minutes stops renewing, so a run hung in a call that
+never returns loses its lease in the same way. No manual step clears a
+lease.
+
+During a rolling upgrade, nodes on the old version take no lease and can
+still overlap with any run. Upgrade every node.
 
 **What to check on the first run after upgrading.** A few behaviors change
 without any configuration change:
@@ -711,6 +718,7 @@ runtime. Set them with `-D…` JVM flags on the Keycloak process.
 | `scim.dispatch.blockWarnMs` | `10000` | `ScimDispatcher` / bulk lane | How long a producer may stay blocked on a full queue before the plugin logs a back-pressure WARN and bumps a counter. A rising count signals a slow or wedged SCIM server that is throttling syncs. |
 | `scim.dispatch.bulkBatchSize` | `20` | bulk lane | Maximum number of SCIM operations the plugin combines into one `/Bulk` request (K). Must be at most the SCIM server's advertised `maxOperations`. An oversize batch draws a whole-request `413` or `400`, and that batch's creates are lost for that round. Set K conservatively. The plugin does not auto-discover this limit. Only relevant when a component has `bulk-enabled=true`. |
 | `scim.tls.insecureHostnameVerification` | `false` | `ScimClient` | When `true`, disables TLS hostname verification on outbound SCIM requests. The plugin then accepts any certificate the SCIM server presents, regardless of CN/SAN. Use this only as an escape hatch for development environments, internal CAs with CN drift, or explicitly-trusted self-signed setups. **Leave `false` in production.** With verification off, an attacker can position itself between the plugin and the SCIM server. It can then present a valid certificate for any domain, impersonate the SCIM server, and harvest bearer tokens. |
+| `scim.sync.lease.simulateCrash` | `false` | `ScimSync` | Test aid. When `true`, a sync run takes its lease and then behaves as a crashed holder: no heartbeat, no release. Later syncs of that component are refused for 120 seconds, and a run longer than that can overlap the next one. The plugin logs a warning on every sync while it is set. Leave it unset in production. |
 | `keycloak.image` | `quay.io/keycloak/keycloak:25.0.6` | integration tests | Overrides the Keycloak container image the test harness uses. The CI matrix uses this to verify both 25.x and 26.x. Not relevant to production. |
 
 ## What's NOT configurable (by design)

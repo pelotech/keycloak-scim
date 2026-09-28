@@ -143,11 +143,8 @@ reader falls back to the default and logs a warning.
 
 ## Follow-ups
 
-- **Overlapping syncs.** Keycloak's cluster lock for a sync expires on a
-  fixed timer that does not grow with the run, so two syncs of one realm
-  can overlap. The loser marks its page transaction rollback only and
-  stops; the winner keeps every committed page. Preventing it needs a
-  lease the plugin owns, renewed at each page commit.
+- **Overlapping syncs.** Resolved by a per-component lease. See
+  `2026-09-25-sync-lease-design.md`.
 - **Import paging.** The runner is ready for an import step. Fixing
   import's pagination is a behaviour change that needs its own rollout.
 - **Token minter timeouts.** The minter's HTTP client has none. It is
