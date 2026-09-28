@@ -73,6 +73,6 @@ class ScimSyncLeaseIT extends IntegrationTestBase {
         stubScimUserUpdateOk();
         var third = realm.userStorage().syncUsers(componentId, "triggerFullSync");
         assertFalse(third.isIgnored(), "a sync after the first ends must run");
-        assertEquals(USERS, third.getUpdated());
+        assertEquals(USERS, third.getUpdated(), "the third run must replace every user");
     }
 }
