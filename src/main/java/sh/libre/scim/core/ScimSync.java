@@ -3,6 +3,7 @@ package sh.libre.scim.core;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
@@ -26,6 +27,11 @@ import sh.libre.scim.storage.ScimStorageProviderFactory;
  * at the global timeout. A run longer than that still pushes every user and
  * keeps every mapping the pages committed, but Keycloak reports the sync as
  * failed. Paging does not change that.
+ *
+ * <p>A run holds a lease on its component while it runs, so one sync of a
+ * component happens at a time across the cluster. A run that loses its lease
+ * finishes the transaction in flight, skips the stages it has not started, and
+ * counts each skipped stage as a failure. The rules are in {@link SyncLease}.
  */
 public final class ScimSync {
 
@@ -43,8 +49,22 @@ public final class ScimSync {
 
     private ScimSync() {}
 
+    /**
+     * Test aid only. When this system property is set, a run takes its lease
+     * and then behaves as a crashed holder: no heartbeat, no self-fence and no
+     * release. An integration test uses it to prove that a stale lease is
+     * taken by the next run.
+     */
+    static final String SIMULATE_CRASH_PROPERTY = "scim.sync.lease.simulateCrash";
+
     public static SynchronizationResult run(KeycloakSessionFactory sessionFactory, String realmId,
                                             ComponentModel model) {
+        return run(sessionFactory, realmId, model, new JpaLeaseStore(sessionFactory), Clock.systemUTC());
+    }
+
+    // package-private so a test can pass a fake store
+    static SynchronizationResult run(KeycloakSessionFactory sessionFactory, String realmId,
+                                     ComponentModel model, LeaseStore store, Clock clock) {
         var result = new SynchronizationResult();
         boolean doImport = model.get("sync-import", false);
         boolean doRefresh = model.get("sync-refresh", false);
@@ -56,37 +76,106 @@ public final class ScimSync {
                 + "disabled; nothing to do", model.getId());
             return result;
         }
-        if ("true".equals(model.get("propagation-user"))) {
-            if (doImport) {
-                runContained(model, "user import", result, () ->
-                    runInTransaction(sessionFactory, realmId, model, "user import", result,
-                        (client, session, counters) -> client.importResources(UserAdapter::new, counters)));
+        boolean users = "true".equals(model.get("propagation-user"));
+        boolean groups = "true".equals(model.get("propagation-group"));
+        if (!users && !groups) {
+            // No stage would run, so there is nothing to hold a lease for.
+            return result;
+        }
+
+        var lease = new SyncLease(store, model.getId(), clock);
+        boolean simulateCrash = Boolean.getBoolean(SIMULATE_CRASH_PROPERTY);
+        if (simulateCrash) {
+            LOGGER.warnf("%s is set: this run keeps its lease, so later syncs of component %s are refused "
+                + "for %d s, and a run longer than that can overlap the next one. Test aid only; unset it in "
+                + "production.", SIMULATE_CRASH_PROPERTY, model.getId(), SyncLease.STALE_THRESHOLD.toSeconds());
+        }
+        try {
+            if (lease.acquire() == SyncLease.Decision.REFUSE) {
+                return SynchronizationResult.ignored();
             }
-            if (doRefresh) {
-                runContained(model, "user refresh", result,
-                    () -> refreshUsers(sessionFactory, realmId, model, result));
+        } catch (RuntimeException e) {
+            // A run without a lease would recreate the overlap the lease removes.
+            LOGGER.errorf(e, "SCIM sync of component %s could not take its lease", model.getId());
+            result.increaseFailed();
+            return result;
+        }
+        // See SIMULATE_CRASH_PROPERTY.
+        BooleanSupplier lost = simulateCrash ? () -> false : lease::lost;
+        try {
+            if (!simulateCrash) {
+                // Inside the try, so a throw here still releases.
+                lease.startHeartbeat();
+            }
+            runStages(sessionFactory, realmId, model, clock, result, lease::reportProgress, lost,
+                doImport, doRefresh, users, groups);
+        } finally {
+            if (!simulateCrash) {
+                lease.release();
             }
         }
-        if ("true".equals(model.get("propagation-group"))) {
+        return result;
+    }
+
+    /**
+     * The four stages, in order. Each is checked against the lease first, so
+     * a run that lost it skips what it has not started. The stages see only
+     * the progress reporter and the lost check, never the lease itself.
+     */
+    // package-private so a test can reach it with a fake lease
+    static void runStages(KeycloakSessionFactory sessionFactory, String realmId, ComponentModel model, Clock clock,
+                          SynchronizationResult result, Runnable progress, BooleanSupplier lost,
+                          boolean doImport, boolean doRefresh, boolean users, boolean groups) {
+        if (users) {
             if (doImport) {
-                runContained(model, "group import", result, () ->
-                    runInTransaction(sessionFactory, realmId, model, "group import", result,
-                        (client, session, counters) -> client.importResources(GroupAdapter::new, counters)));
+                unlessLost(lost, "user import", result, () ->
+                    runContained(model, "user import", result, () ->
+                        runInTransaction(sessionFactory, realmId, model, "user import", result, progress,
+                            (client, session, counters) ->
+                                client.importResources(UserAdapter::new, counters, progress))));
+            }
+            if (doRefresh) {
+                unlessLost(lost, "user refresh", result, () ->
+                    runContained(model, "user refresh", result,
+                        () -> refreshUsers(sessionFactory, realmId, model, clock, result, lost, progress)));
+            }
+        }
+        if (groups) {
+            if (doImport) {
+                unlessLost(lost, "group import", result, () ->
+                    runContained(model, "group import", result, () ->
+                        runInTransaction(sessionFactory, realmId, model, "group import", result, progress,
+                            (client, session, counters) ->
+                                client.importResources(GroupAdapter::new, counters, progress))));
             }
             if (doRefresh) {
                 // Groups are not paged. This stage has no per-resource guard and
                 // no rollback check between groups, so one fault that poisons the
                 // transaction discards every group mapping the stage wrote. The
                 // group-count warning tells the operator when that exposure grows.
-                runContained(model, "group refresh", result, () ->
-                    runInTransaction(sessionFactory, realmId, model, "group refresh", result,
-                        (client, session, counters) -> {
-                            warnIfManyGroups(session, model);
-                            client.refreshResources(GroupAdapter::new, counters);
-                        }));
+                unlessLost(lost, "group refresh", result, () ->
+                    runContained(model, "group refresh", result, () ->
+                        runInTransaction(sessionFactory, realmId, model, "group refresh", result, progress,
+                            (client, session, counters) -> {
+                                warnIfManyGroups(session, model);
+                                client.refreshResources(GroupAdapter::new, counters, progress);
+                            })));
             }
         }
-        return result;
+    }
+
+    /**
+     * Skips a stage once the run has lost its lease. The skipped stage counts
+     * as a failure, so the sync result shows an incomplete run.
+     */
+    // package-private so a test can reach it without a session factory
+    static void unlessLost(BooleanSupplier lost, String stage, SynchronizationResult result, Runnable work) {
+        if (lost.getAsBoolean()) {
+            LOGGER.errorf("SCIM %s skipped: this run no longer holds the component's lease", stage);
+            result.increaseFailed();
+            return;
+        }
+        work.run();
     }
 
     /**
@@ -100,17 +189,17 @@ public final class ScimSync {
      * and an operator does not have to read the log to find out.
      */
     private static void refreshUsers(KeycloakSessionFactory sessionFactory, String realmId,
-                                     ComponentModel model, SynchronizationResult result) {
+                                     ComponentModel model, Clock clock, SynchronizationResult result,
+                                     BooleanSupplier lost, Runnable progress) {
+        progress.run();
         int pageSize = ScimStorageProviderFactory.positiveIntSetting(model,
             ScimStorageProviderFactory.SYNC_PAGE_SIZE,
             ScimStorageProviderFactory.DEFAULT_SYNC_PAGE_SIZE);
         var pageBudget = Duration.ofSeconds(ScimStorageProviderFactory.positiveIntSetting(model,
             ScimStorageProviderFactory.SYNC_PAGE_MAX_SECONDS,
             ScimStorageProviderFactory.DEFAULT_SYNC_PAGE_MAX_SECONDS));
-        // The lease check and the progress report are not wired to a real
-        // lease yet; a later change supplies them.
-        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, Clock.systemUTC(),
-            () -> false, () -> {});
+        // The run's clock, so the page budget and the lease read the same time.
+        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, clock, lost, progress);
         try (var ignored = TRACING.startSpan("scim.sync.refresh", "User", model.get("endpoint"))) {
             var outcome = PagedSyncRunner.run(step, pageSize, result);
             if (!outcome.completed()) {
@@ -120,6 +209,7 @@ public final class ScimSync {
                 result.increaseFailed();
             }
         }
+        progress.run();
     }
 
     /**
@@ -133,10 +223,14 @@ public final class ScimSync {
      *
      * <p>The stage therefore counts into its own result, and only a transaction
      * that committed contributes all of it. See {@link #mergeStage}.
+     *
+     * <p>Progress is reported before and after the stage, so a stage boundary
+     * counts as a sign of life even when the stage examines nothing.
      */
     private static void runInTransaction(KeycloakSessionFactory sessionFactory, String realmId,
                                          ComponentModel model, String stage, SynchronizationResult result,
-                                         Stage work) {
+                                         Runnable progress, Stage work) {
+        progress.run();
         var staged = new SynchronizationResult();
         var kept = new AtomicBoolean(false);
         try {
@@ -176,6 +270,7 @@ public final class ScimSync {
                 stage, model.getId());
         }
         mergeStage(result, staged, kept.get());
+        progress.run();
     }
 
     /**
