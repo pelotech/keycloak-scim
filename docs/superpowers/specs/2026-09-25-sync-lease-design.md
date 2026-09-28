@@ -194,9 +194,12 @@ thread keeps a connection it already had.
 
 So the run thread also treats the lease as lost when the last successful
 renewal is older than the self-fence threshold, whether or not the lost
-flag is set. `SyncLease.lost()` answers true in either case. With this rule
-the overlap after a takeover is bounded in every scenario by one heartbeat
-interval plus one resource in flight.
+flag is set. `SyncLease.lost()` answers true in either case. The fence
+latches: the first time it trips, the run stays lost, so a later
+successful renewal cannot revive a run that has already stopped one stage
+and would otherwise run the rest. With this rule the overlap after a
+takeover is bounded in every scenario by one heartbeat interval plus one
+resource in flight.
 
 ## Lost lease
 
