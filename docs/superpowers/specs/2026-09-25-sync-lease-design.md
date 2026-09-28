@@ -349,6 +349,26 @@ Integration tests:
   from another thread, and the assertion is `isIgnored()` on the returned
   representation.
 
+## Follow-ups
+
+Recorded at the final review of the implementation.
+
+- **Paths only the fake store exercises.** A real matched-nothing renewal
+  after a takeover of a live holder; the self-fence against a real database
+  outage; the progress gate on a real hang; the first-acquisition duplicate
+  that surfaces at commit; row-lock blocking on PostgreSQL, where H2 times
+  out instead; a two-JVM cluster; and the scheduled sync on the timer
+  thread. Each needs a paused or second JVM. The unit tests cover the rules;
+  the integration tests cover single-node H2.
+- **Lost-lease logging repeats the cursor.** The page step, the runner and
+  the user refresh each log it at error level. The older stop reasons do the
+  same, so fix them together.
+- **A component deleted during a run.** The cascade removes the lease row,
+  and the next tick reports that another run took the lease. Distinguish a
+  missing row from a changed holder if that ever matters.
+- **Two-argument `importResources` and `refreshResources`.** They now exist
+  only for one unit test. Drop them and pass a no-op there.
+
 ## Documentation
 
 `docs/configuration.md` replaces the paragraph that names the overlap
