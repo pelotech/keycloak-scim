@@ -41,8 +41,8 @@ final class SyncLease {
 
     enum Decision { TAKE, REFUSE }
 
-    /** What the lock transaction decided, and the clock it wrote to the row. */
-    private record Outcome(Decision decision, long now) { }
+    /** What the lock transaction decided, the clock it wrote to the row, and the row it found. */
+    private record Outcome(Decision decision, long now, LeaseStore.Row previous) { }
 
     private final LeaseStore store;
     private final String componentId;
@@ -58,7 +58,11 @@ final class SyncLease {
     private volatile long lastRenewal;
     /** Set after acquisition and on every report, so renewal starts open. Read by the heartbeat, so volatile. */
     private volatile long lastProgress;
-    /** Set by a tick that matched nothing. Read by the heartbeat and by the run thread, so volatile. */
+    /**
+     * Set by a tick that matched nothing, or by the self-fence once it trips.
+     * Never cleared: a lost run stays lost. Read by the heartbeat and by the
+     * run thread, so volatile.
+     */
     private volatile boolean lostFlag;
     /** Non-null while the heartbeat runs. Atomic, so a stop from any thread takes the one scheduler. */
     private final AtomicReference<ScheduledExecutorService> heartbeat = new AtomicReference<>();
@@ -127,14 +131,24 @@ final class SyncLease {
                 LOGGER.warnf("Sync of component %s refused: run %s holds the lease, last renewed %d s ago",
                     componentId, row.holder(), ageSeconds);
             }
-            return new Outcome(d, now);
+            return new Outcome(d, now, row);
         });
         if (outcome.decision() == Decision.TAKE) {
             // Set only after the transaction commits, and to the clock the row
             // holds: run state must not lead the database.
             lastRenewal = outcome.now();
             lastProgress = outcome.now();
-            LOGGER.infof("Sync lease for component %s taken by run %s", componentId, token);
+            var previous = outcome.previous();
+            if (previous.holder() == null) {
+                LOGGER.infof("Sync lease for component %s taken by run %s", componentId, token);
+            } else {
+                // A takeover is the only moment an operator learns that a node crashed or hung.
+                var age = previous.renewedAt() == null
+                    ? "never renewed"
+                    : "last renewed " + (outcome.now() - previous.renewedAt()) / 1000 + " s ago";
+                LOGGER.warnf("Stale sync lease for component %s held by run %s, %s, taken by run %s",
+                    componentId, previous.holder(), age, token);
+            }
         }
         return outcome.decision();
     }
@@ -167,13 +181,24 @@ final class SyncLease {
      * sees a matched-nothing update, so the flag alone would leave the
      * overlap after a takeover unbounded. The self-fence bounds it. A run
      * that never took the lease has nothing to hold, so it is lost as well.
+     *
+     * <p>The self-fence latches. Without that, a later successful renewal
+     * would move the last success forward and a run that stopped one stage
+     * would go on to run the rest. A lost run skips the rest.
      */
     boolean lost() {
         if (lostFlag || lastRenewal == 0) {
             return true;
         }
         // Strict, like the decision: an age equal to the threshold is not past it.
-        return clock.millis() - lastRenewal > SELF_FENCE_THRESHOLD.toMillis();
+        long age = clock.millis() - lastRenewal;
+        if (age > SELF_FENCE_THRESHOLD.toMillis()) {
+            LOGGER.errorf("Sync lease for component %s not renewed for %d s; this run will stop",
+                componentId, age / 1000);
+            lostFlag = true;
+            return true;
+        }
+        return false;
     }
 
     /**

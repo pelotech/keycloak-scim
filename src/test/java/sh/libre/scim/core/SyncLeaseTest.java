@@ -62,6 +62,17 @@ class SyncLeaseTest {
         assertThat(store.rows.get("comp-1").holder).isEqualTo(lease.token());
     }
 
+    /** A holder with no renewal time is a malformed row. The takeover log must not choke on the missing age. */
+    @Test
+    void aHolderWithNoRenewalTimeIsTakenOver() {
+        seed("other", NOW - 1000);
+        store.rows.get("comp-1").renewedAt = null;
+        var lease = lease();
+        assertThat(lease.acquire()).isEqualTo(SyncLease.Decision.TAKE);
+        assertThat(store.rows.get("comp-1").holder).isEqualTo(lease.token());
+        assertThat(store.rows.get("comp-1").renewedAt).isEqualTo(NOW);
+    }
+
     /** The row exists, so the ensure step fails on a duplicate. This is not fatal; the test proves the lenient path. */
     @Test
     void aFailedEnsureStepStillAcquiresWhenTheRowExists() {
@@ -233,6 +244,22 @@ class SyncLeaseTest {
         store.renewFailure = new IllegalStateException("db away");
         clock.advance(SyncLease.SELF_FENCE_THRESHOLD.plusMillis(1));
         lease.tick();
+        assertThat(lease.lost()).isTrue();
+    }
+
+    /**
+     * A run that fenced itself stays lost, so the rest of the run stays
+     * skipped. Without the latch the next tick would renew, move the last
+     * success forward, and revive the run. With it the tick renews nothing.
+     */
+    @Test
+    void selfFenceStaysTrippedAfterALaterTick() {
+        var lease = lease();
+        lease.acquire();
+        clock.advance(SyncLease.SELF_FENCE_THRESHOLD.plusMillis(1));
+        assertThat(lease.lost()).isTrue();
+        lease.tick();
+        assertThat(store.renewCalls).isZero();
         assertThat(lease.lost()).isTrue();
     }
 
