@@ -79,6 +79,11 @@ the GET already shows the user as inactive, the plugin sends no PUT. With
 404 on any call means the resource is already gone from the SCIM server,
 so the plugin treats the deprovision as complete.
 
+The GET-then-PUT path sends back only what the GET returned. If your SCIM
+server leaves stored attributes out of its GET response, the PUT can
+clear them. Such a server should use `user-patchOp=true`, so that
+deactivation changes only `active`.
+
 The plugin records each deactivation locally, in the `DEACTIVATED_AT`
 column on the mapping row. Because of this record:
 
@@ -315,7 +320,7 @@ servers (notably Databricks) require PATCH for groups.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. |
+| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. The PATCH replaces the same attributes that the PUT sends: `externalId`, `userName`, `displayName`, `name.givenName`, `name.familyName`, `emails`, `active`, and the extension mappings. An attribute with no value is left out. `roles` is not sent. |
 | `group-patchOp` | bool | `false` | When true, group updates use PATCH instead of PUT. When false (default), the plugin still falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. Most operators do not need to turn this on. |
 
 ### User identity mapping

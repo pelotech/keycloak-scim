@@ -8,9 +8,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.builder.PatchBuilder;
 import de.captaingoldfish.scim.sdk.common.constants.enums.PatchOp;
+import de.captaingoldfish.scim.sdk.common.request.PatchOpRequest;
+import de.captaingoldfish.scim.sdk.common.request.PatchRequestOperation;
 import de.captaingoldfish.scim.sdk.common.resources.User;
 import de.captaingoldfish.scim.sdk.common.resources.multicomplex.Email;
 import de.captaingoldfish.scim.sdk.common.resources.complex.Name;
@@ -286,38 +289,43 @@ public class UserAdapter extends Adapter<UserModel, User> {
     public Boolean skipRefresh() {
         return "admin".equals(getUsername());
     }
+
+    /**
+     * Builds the PATCH that replaces the same attributes {@link #toSCIM} sends
+     * in a PUT, so user-patchOp=true and false give the same remote state. An
+     * attribute with no value is left out: a REPLACE needs a value, and a
+     * REMOVE of an attribute the server does not hold can fail on a strict
+     * server.
+     */
     @Override
     public PatchBuilder<User> toPatchBuilder(ScimRequestBuilder scimRequestBuilder, String url) {
-        var emails = new ArrayList<Email>();
-        if (email != null) {
-            emails.add(Email.builder().value(getEmail()).type("work").primary(true).build());
+        var user = toSCIM(false);
+        var nodes = JsonNodeFactory.instance;
+        var ops = new ArrayList<PatchRequestOperation>();
+        user.getExternalId().ifPresent(v -> ops.add(ScimPatchOps.replace("externalId", nodes.textNode(v))));
+        user.getUserName().ifPresent(v -> ops.add(ScimPatchOps.replace("userName", nodes.textNode(v))));
+        user.getDisplayName().ifPresent(v -> ops.add(ScimPatchOps.replace("displayName", nodes.textNode(v))));
+        user.getName().ifPresent(name -> {
+            name.getGivenName().ifPresent(v -> ops.add(ScimPatchOps.replace("name.givenName", nodes.textNode(v))));
+            name.getFamilyName().ifPresent(v -> ops.add(ScimPatchOps.replace("name.familyName", nodes.textNode(v))));
+        });
+        if (!user.getEmails().isEmpty()) {
+            var emails = nodes.arrayNode();
+            user.getEmails().forEach(emails::add);
+            ops.add(ScimPatchOps.replace("emails", emails));
         }
-        PatchBuilder<User> patchBuilder;
-        patchBuilder = scimRequestBuilder.patch(url, User.class);
-        patchBuilder.addOperation()
-                      .path("active")
-                      .op(PatchOp.REPLACE)
-                      .value(active.toString())
-                      .next()
-                      .path("userName")
-                      .op(PatchOp.REPLACE)
-                      .value(username)
-                      .next()
-                      .path("displayName")
-                      .op(PatchOp.REPLACE)
-                      .value(displayName)
-                    .build();
+        user.isActive().ifPresent(v -> ops.add(ScimPatchOps.replace("active", nodes.booleanNode(v))));
 
         if (extensionMappings != null && !extensionMappings.isEmpty()) {
             for (var pv : extensionMappings.patchValues(extensionValues)) {
-                patchBuilder.addOperation()
+                ops.add(PatchRequestOperation.builder()
                     .path(pv.path())
                     .op(PatchOp.REPLACE)
                     .valueNode(pv.value())
-                    .build();
+                    .build());
             }
         }
 
-        return patchBuilder;
+        return scimRequestBuilder.patch(url, User.class).setPatchResource(new PatchOpRequest(ops));
     }
 }

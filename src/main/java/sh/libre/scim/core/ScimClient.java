@@ -9,14 +9,16 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.builder.BulkBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.constants.enums.HttpMethod;
-import de.captaingoldfish.scim.sdk.common.constants.enums.PatchOp;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
+import de.captaingoldfish.scim.sdk.common.request.PatchOpRequest;
 import de.captaingoldfish.scim.sdk.common.resources.Group;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
 import de.captaingoldfish.scim.sdk.common.resources.User;
@@ -223,7 +225,36 @@ public class ScimClient {
      * therefore only runs when this is true (see ScimLdapStorageMapper).
      */
     public boolean isGroupMembershipDeltaEnabled() {
-        return this.model.get(GROUP_PATCH_OP_KEY, false);
+        return usesPatch(this.model, "Group");
+    }
+
+    /**
+     * Whether a replace of this resource type goes out as PATCH. Both
+     * {@code group-patchOp} and {@code user-patchOp} default to false (PUT).
+     */
+    static boolean usesPatch(ComponentModel model, String type) {
+        if ("Group".equals(type)) {
+            return model.get(GROUP_PATCH_OP_KEY, false);
+        }
+        if ("User".equals(type)) {
+            return model.get(USER_PATCH_OP_KEY, false);
+        }
+        return false;
+    }
+
+    /**
+     * Whether a failed replace re-creates the resource. Only a 404 means the
+     * remote resource is gone. A 400 means the server rejected the body, so a
+     * create would not fix it.
+     */
+    static boolean recreatesAfterFailedReplace(int status) {
+        return status == 404;
+    }
+
+    /** The PATCH that deactivates a user. RFC 7643 defines active as a boolean. */
+    static PatchOpRequest deactivatePatch() {
+        return new PatchOpRequest(List.of(
+            ScimPatchOps.replace("active", JsonNodeFactory.instance.booleanNode(false))));
     }
 
     protected ScimClientConfig genScimClientConfig() {
@@ -641,9 +672,7 @@ public class ScimClient {
                 try {
                     response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                         try {
-                            LOGGER.info(adapter.getType());
-                            if ((adapter.getType() == "Group" && this.model.get(GROUP_PATCH_OP_KEY, false))
-                                 || (adapter.getType() == "User" && this.model.get(USER_PATCH_OP_KEY, false))) {
+                            if (usesPatch(this.model, adapter.getType())) {
                                 return adapter.toPatchBuilder(scimRequestBuilder, url)
                                               .sendRequest();
                             }
@@ -663,13 +692,13 @@ public class ScimClient {
                 }
                 if (!response.isSuccess()) {
                     int statusCode = response.getHttpStatus();
-                    if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get(GROUP_PATCH_OP_KEY, false)) {
+                    if (statusCode == 405 && "Group".equals(adapter.getType()) && !usesPatch(this.model, "Group")) {
                         LOGGER.infof("PUT not supported (405) for group %s, falling back to PATCH", adapter.getId());
                         response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
                     }
                     if (!response.isSuccess()) {
                         int currentStatus = response.getHttpStatus();
-                        if (currentStatus == 404 || currentStatus == 400) {
+                        if (recreatesAfterFailedReplace(currentStatus)) {
                             LOGGER.infof("Remote resource %s not found (%d), re-creating", adapter.getId(), currentStatus);
                             ServerResponse<S> createResponse = scimRequestBuilder
                                 .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
@@ -800,16 +829,12 @@ public class ScimClient {
 
                 ServerResponse<User> response;
                 try {
-                    if (this.model.get(USER_PATCH_OP_KEY, false)) {
+                    if (usesPatch(this.model, "User")) {
                         response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                             try {
-                                var patch = scimRequestBuilder.patch(url, User.class);
-                                patch.addOperation()
-                                    .path("active")
-                                    .op(PatchOp.REPLACE)
-                                    .value("false")
-                                    .build();
-                                return patch.sendRequest();
+                                return scimRequestBuilder.patch(url, User.class)
+                                    .setPatchResource(deactivatePatch())
+                                    .sendRequest();
                             } catch (ResponseException e) {
                                 throw new RuntimeException(e);
                             }
@@ -903,7 +928,7 @@ public class ScimClient {
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
             String groupId, String userId, boolean isAdd) {
 
-        if (!this.model.get(GROUP_PATCH_OP_KEY, false)) {
+        if (!isGroupMembershipDeltaEnabled()) {
             var group = session.groups().getGroupById(
                     session.getContext().getRealm(), groupId);
             // group-patchOp=false propagates a membership change via a full-group
@@ -1034,7 +1059,7 @@ public class ScimClient {
             LOGGER.infof("Skipping membership ensure: group %s not found locally", groupId);
             return false;
         }
-        if (this.model.get(GROUP_PATCH_OP_KEY, false)) {
+        if (isGroupMembershipDeltaEnabled()) {
             provisionGroupForMembership(factory, group);
         }
         return this.patchGroupMembership(factory, groupId, userId, true);
