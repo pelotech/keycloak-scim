@@ -49,12 +49,12 @@ choose to use them.
 - **OCI image** for Kubernetes ImageVolume mounting
   (`ghcr.io/pelotech/keycloak-scim`).
 
-## New settings (all default-off / backward-compatible)
+## New settings (backward-compatible except `group-patchOp`)
 
 | Setting | Default | Effect if unchanged |
 | --- | --- | --- |
 | `user-patchOp` | false | Identical to upstream (PUT for user updates). |
-| `group-patchOp` | false | Identical to upstream (PUT for group updates, with automatic 405→PATCH fallback). |
+| `group-patchOp` | true | **Differs from upstream.** Group updates use PATCH, and each membership change is a single-member PATCH. Set `false` to keep upstream behavior (PUT for group updates, with automatic 405→PATCH fallback). |
 | `username-source` | `username` | Identical to upstream (uses Keycloak username for SCIM userName). |
 | `reconciler-enabled` | false | No reconciler activity. |
 | `reconciler-interval-seconds` | 86400 | Ignored when reconciler is disabled. |

@@ -315,13 +315,13 @@ without any configuration change:
 ### PATCH vs PUT preferences
 
 To update an existing SCIM resource, the plugin can issue either PUT
-(full replace) or PATCH (selective). PUT is the default. Some SCIM
-servers (notably Databricks) require PATCH for groups.
+(full replace) or PATCH (selective). Users use PUT by default. Groups use
+PATCH by default.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. The PATCH replaces the same attributes that the PUT sends: `externalId`, `userName`, `displayName`, `name.givenName`, `name.familyName`, `emails`, `active`, and the extension mappings. An attribute with no value is left out. `roles` is not sent. |
-| `group-patchOp` | bool | `false` | When true, group updates use PATCH instead of PUT. When false (default), the plugin still falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. Most operators do not need to turn this on. |
+| `group-patchOp` | bool | `true` | When true (default), group updates use PATCH, and each membership change is one PATCH that adds or removes one member. When false, group updates and membership changes PUT the whole group, and the plugin falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. With `false`, the plugin does not send group membership from a federated (LDAP) provider. See [`ldap-federation-support.md`](ldap-federation-support.md). |
 
 ### User identity mapping
 

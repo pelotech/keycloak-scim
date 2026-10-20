@@ -229,12 +229,13 @@ public class ScimClient {
     }
 
     /**
-     * Whether a replace of this resource type goes out as PATCH. Both
-     * {@code group-patchOp} and {@code user-patchOp} default to false (PUT).
+     * Whether a replace of this resource type goes out as PATCH. Groups use
+     * PATCH by default ({@code group-patchOp=true}); users use PUT by default
+     * ({@code user-patchOp=false}).
      */
     static boolean usesPatch(ComponentModel model, String type) {
         if ("Group".equals(type)) {
-            return model.get(GROUP_PATCH_OP_KEY, false);
+            return model.get(GROUP_PATCH_OP_KEY, true);
         }
         if ("User".equals(type)) {
             return model.get(USER_PATCH_OP_KEY, false);

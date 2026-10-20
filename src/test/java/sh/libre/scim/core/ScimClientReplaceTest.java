@@ -26,13 +26,13 @@ class ScimClientReplaceTest {
     }
 
     @Test
-    void groupsUsePutByDefault() {
-        assertThat(ScimClient.usesPatch(model(null, null), "Group")).isFalse();
+    void groupsUsePatchByDefault() {
+        assertThat(ScimClient.usesPatch(model(null, null), "Group")).isTrue();
     }
 
     @Test
-    void groupsUsePatchWhenGroupPatchOpIsTrue() {
-        assertThat(ScimClient.usesPatch(model("true", null), "Group")).isTrue();
+    void groupsUsePutWhenGroupPatchOpIsFalse() {
+        assertThat(ScimClient.usesPatch(model("false", null), "Group")).isFalse();
     }
 
     @Test
