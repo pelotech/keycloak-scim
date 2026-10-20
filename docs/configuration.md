@@ -320,7 +320,7 @@ PATCH by default.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. The PATCH replaces the same attributes that the PUT sends: `externalId`, `userName`, `displayName`, `name.givenName`, `name.familyName`, `emails`, `active`, and the extension mappings. An attribute with no value is left out. `roles` is not sent. |
+| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. The PATCH replaces the same attributes that the PUT sends: `externalId`, `userName`, `displayName`, `name.givenName`, `name.familyName`, `emails`, `active`, and the extension mappings. An attribute with no value is left out. `roles` is not sent, so a component that sends [SCIM roles](#scim-roles) must keep this `false`. |
 | `group-patchOp` | bool | `true` | When true (default), group updates use PATCH, and each membership change is one PATCH that adds or removes one member. When false, group updates and membership changes PUT the whole group, and the plugin falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. With `false`, the plugin does not send group membership from a federated (LDAP) provider. See [`ldap-federation-support.md`](ldap-federation-support.md). |
 
 ### User identity mapping
@@ -328,6 +328,39 @@ PATCH by default.
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `username-source` | enum | `username` | Which Keycloak attribute fills the SCIM `userName` field. Options: `username`, `email`. Use `email` if the SCIM server expects email-style identifiers. Falls back to the user's `username` if you select `email` but the user has no email set. |
+
+### SCIM roles
+
+The plugin fills the SCIM `roles` attribute of a user from Keycloak
+roles. This is not a component setting. To send a role, set the role
+attribute `scim` to `"true"` on that role. The marker applies to every
+SCIM component in the realm.
+
+- The plugin sends each marked role as `{"value": "<role name>"}`. It
+  does not send `type`, `display`, or `primary`.
+- The plugin collects marked roles from the user's direct role mappings
+  and from the role mappings of the user's direct groups. It does not
+  expand composite roles, and it does not read the roles of parent
+  groups. A role that a user gets only in one of these ways is not sent.
+- The plugin sends `roles` only in a PUT. A PUT replaces the whole user,
+  so a role that is removed in Keycloak is also removed on the server.
+  With `user-patchOp=true`, the plugin does not send `roles`.
+
+These changes send a user PUT at once:
+
+- A realm role is granted to or removed from the user.
+- A realm role is granted to or removed from a group. The plugin sends
+  a PUT for each member of the group.
+- The user is added to or removed from a group that has a marked role.
+
+These changes do not send a PUT. The server gets the change at the next
+user write or the next `sync-refresh`:
+
+- A client role is granted to or removed from a user or group. The
+  plugin includes marked client roles in `roles`, but it does not act on
+  client role-mapping events. Use realm roles if a change must reach the
+  server at once.
+- The `scim` attribute is added to or removed from an existing role.
 
 ### Group filtering
 
