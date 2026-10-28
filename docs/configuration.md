@@ -63,7 +63,7 @@ imports (when the `scim-ldap-sync` mapper is attached), and sync.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `delete-mode` | enum | `delete` | How user deprovisioning reaches the SCIM server. Options: `delete`, `deactivate`. |
+| `delete-mode` | enum | `delete` | How user deprovisioning reaches the SCIM server. Options: `delete`, `deactivate`. Values are case-sensitive. The admin console and the admin REST API reject any other value. A realm import does not check the value, and the plugin reads any value other than `deactivate` as `delete`. |
 
 With `delete` (the default), the plugin sends `DELETE /Users/{id}` and
 drops the local mapping. This is the original, unchanged behaviour. With

@@ -37,6 +37,8 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
     public static final String DELETE_MODE = "delete-mode";
+    /** The values {@link #DELETE_MODE} accepts. The first is the default. */
+    static final List<String> DELETE_MODES = List.of("delete", "deactivate");
     public static final String SYNC_PAGE_SIZE = "sync-page-size";
     public static final String SYNC_PAGE_MAX_SECONDS = "sync-page-max-seconds";
     public static final int DEFAULT_SYNC_PAGE_SIZE = 50;
@@ -180,8 +182,8 @@ public class ScimStorageProviderFactory
                     + "deactivate sets active:false on the remote user and keeps the mapping, so a "
                     + "returning user reactivates under the same remote id. Users only; groups are "
                     + "always deleted with DELETE /Groups/{id}.")
-                .options("delete", "deactivate")
-                .defaultValue("delete")
+                .options(DELETE_MODES)
+                .defaultValue(DELETE_MODES.get(0))
                 .add()
                 .property()
                 .name("sync-import")
@@ -334,6 +336,14 @@ public class ScimStorageProviderFactory
 
         requirePositiveIntIfSet(model, SYNC_PAGE_SIZE);
         requirePositiveIntIfSet(model, SYNC_PAGE_MAX_SECONDS);
+
+        // The client reads any value other than "deactivate" as delete, so a
+        // typo would hard-delete users. Accept only the exact option values.
+        String deleteMode = model.get(DELETE_MODE);
+        if (deleteMode != null && !DELETE_MODES.contains(deleteMode)) {
+            throw new ComponentValidationException(
+                DELETE_MODE + " must be one of " + DELETE_MODES + " (got '" + forMessage(deleteMode) + "')");
+        }
 
         try {
             // Map.get rather than MultivaluedMap.getList — see UserAdapter.apply.
