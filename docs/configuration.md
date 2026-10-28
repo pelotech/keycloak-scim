@@ -63,14 +63,17 @@ imports (when the `scim-ldap-sync` mapper is attached), and sync.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `delete-mode` | enum | `delete` | How user deprovisioning reaches the SCIM server. Options: `delete`, `deactivate`. Values are case-sensitive. The admin console and the admin REST API reject any other value. A realm import does not check the value, and the plugin reads any value other than `deactivate` as `delete`. |
+| `delete-mode` | enum | `deactivate` | How user deprovisioning reaches the SCIM server. Options: `deactivate`, `delete`. Values are case-sensitive. The admin console and the admin REST API reject any other value. A realm import does not check the value. The plugin reads any value other than `delete` as `deactivate`, and logs a warning once for each component. |
 
-With `delete` (the default), the plugin sends `DELETE /Users/{id}` and
-drops the local mapping. This is the original, unchanged behaviour. With
-`deactivate`, the plugin never hard-deletes users. Every deprovisioning
+With `deactivate` (the default), the plugin never hard-deletes users.
+A deactivated user can come back under the same remote id. A deleted
+user cannot, so only an exact `delete` deletes. Every deprovisioning
 path (admin user deletion, account self-deletion, and the LDAP-deletion
 reconciler) instead marks the remote user inactive and keeps the local
 mapping.
+
+With `delete`, the plugin sends `DELETE /Users/{id}` and drops the local
+mapping. This was the default before version 2.0.
 
 By default (`user-patchOp=false`), deactivation sends a `GET /Users/{id}`,
 then a `PUT /Users/{id}` of the fetched resource with `active: false`. If

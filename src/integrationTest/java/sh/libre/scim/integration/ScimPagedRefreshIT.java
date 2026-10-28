@@ -229,7 +229,11 @@ class ScimPagedRefreshIT extends IntegrationTestBase {
         stubScimUserCreateOk();
         stubScimUserUpdateOk();
         stubScimUserDeleteOk();
-        var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.putSingle("sync-refresh", "true"));
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("sync-refresh", "true");
+            // This test counts DELETEs, so it uses the DELETE path, not the default.
+            cfg.putSingle("delete-mode", "delete");
+        });
         var uids = seedLdapUsers("rmc", 2);
         try {
             triggerFullSync(r);

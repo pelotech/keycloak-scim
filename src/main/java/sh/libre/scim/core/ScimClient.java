@@ -50,7 +50,6 @@ public class ScimClient {
     private static final ScimTracingBridge TRACING = ScimTracingBridge.create();
     private static final String GROUP_PATCH_OP_KEY = "group-patchOp";
     private static final String USER_PATCH_OP_KEY = "user-patchOp";
-    private static final String DELETE_MODE_KEY = ScimStorageProviderFactory.DELETE_MODE;
 
     // Every other caller uses these. They have no page to fit inside, and a
     // slow endpoint should not fail a user's login.
@@ -316,10 +315,10 @@ public class ScimClient {
     /**
      * True when deprovisioning should set active:false instead of DELETE.
      * Only Users can deactivate (RFC 7643 Groups have no {@code active}
-     * attribute); the default mode is {@code delete}. Package-private for tests.
+     * attribute); the default mode is {@code deactivate}. Package-private for tests.
      */
     static boolean shouldDeactivate(ComponentModel model, String adapterType) {
-        return "deactivate".equals(model.get(DELETE_MODE_KEY, "delete")) && "User".equals(adapterType);
+        return "deactivate".equals(ScimStorageProviderFactory.deleteMode(model)) && "User".equals(adapterType);
     }
 
     /** Whether the sole findById row for this KC id is a retained deactivation tombstone. */
