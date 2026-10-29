@@ -14,8 +14,8 @@ directly.
 - `sh.libre.scim.ldap.ScimLdapStorageMapper` and `ScimLdapStorageMapperFactory`
   (id `scim-ldap-sync`), with `META-INF/services` registration.
 - `keycloak-ldap-federation` as a `compileOnly` dependency, through the
-  Gradle version catalog. It targets Keycloak 25.0.6 as the minimum
-  version. One artifact is binary-compatible with 26.x.
+  Gradle version catalog. It targets Keycloak 26.0.8 as the minimum
+  version. One artifact is binary-compatible with later 26.x releases.
 - Shared-service routing. The mapper delegates to the existing
   `ScimDispatcher`. So the event-listener path and the
   federation-import path send to the same configured SCIM providers.
@@ -310,8 +310,8 @@ Federation against the FreeIPA or OpenLDAP container, with
 
 - **Keycloak version compatibility.** `LDAPStorageMapper`'s signature
   has changed across Keycloak major versions. The current build
-  targets Keycloak 25.0.6 as the minimum, and is binary-compatible
-  with 26.x. Future major versions will need checking. The test
+  targets Keycloak 26.0.8 as the minimum, and is binary-compatible
+  with later 26.x releases. Future major versions will need checking. The test
   harness's Testcontainers setup gives a fast way to do that.
 - **Role-gating.** Add an opt-in filter, so the mapper propagates only
   users with a configured realm role. Decide whether to build this
