@@ -343,6 +343,8 @@ Enterprise User field constraints are in
 
 ## Documentation
 
+- [`docs/upgrading-to-2.0.md`](docs/upgrading-to-2.0.md): changes in
+  2.0, and how to keep the 1.x behavior. Read it before you upgrade.
 - [`docs/configuration.md`](docs/configuration.md): every setting,
   attribute, endpoint, and JVM property.
 - [`docs/tracing.md`](docs/tracing.md): OpenTelemetry tracing. What is
