@@ -283,10 +283,6 @@ public class UserAdapter extends Adapter<UserModel, User> {
     }
 
     @Override
-    public Boolean skipRefresh() {
-        return "admin".equals(getUsername());
-    }
-    @Override
     public PatchBuilder<User> toPatchBuilder(ScimRequestBuilder scimRequestBuilder, String url) {
         var emails = new ArrayList<Email>();
         if (email != null) {

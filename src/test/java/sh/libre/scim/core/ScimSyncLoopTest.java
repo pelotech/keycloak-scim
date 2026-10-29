@@ -65,7 +65,6 @@ class ScimSyncLoopTest {
         return (session, componentId) -> {
             Adapter<TestModel, User> a = mock(Adapter.class);
             when(a.getType()).thenReturn("User");
-            when(a.skipRefresh()).thenReturn(false);
             when(a.getMapping()).thenReturn(null);
             when(a.getResourceStream()).thenReturn(Stream.of(first, second));
             return a;
@@ -205,7 +204,6 @@ class ScimSyncLoopTest {
             Adapter<TestModel, User> a = mock(Adapter.class);
             a.skip = true;
             when(a.getType()).thenReturn("User");
-            when(a.skipRefresh()).thenReturn(false);
             when(a.getMapping()).thenReturn(null);
             when(a.getResourceStream()).thenReturn(Stream.of(only));
             return a;
@@ -235,7 +233,6 @@ class ScimSyncLoopTest {
             Adapter<TestModel, User> a = mock(Adapter.class);
             a.skip = true;
             when(a.getType()).thenReturn("User");
-            when(a.skipRefresh()).thenReturn(false);
             when(a.getMapping()).thenReturn(new ScimResource());
             when(a.getResourceStream()).thenReturn(Stream.of(only));
             return a;
@@ -264,7 +261,6 @@ class ScimSyncLoopTest {
         AdapterFactory<TestModel, User, Adapter<TestModel, User>> factory = (session, componentId) -> {
             Adapter<TestModel, User> a = mock(Adapter.class);
             when(a.getType()).thenReturn("User");
-            when(a.skipRefresh()).thenReturn(false);
             when(a.getMapping()).thenReturn(null);
             when(a.getResourceStream()).thenReturn(Stream.of(skipped, pushed));
             // refreshOne calls apply(resource) before checking adapter.skip, so
@@ -298,7 +294,6 @@ class ScimSyncLoopTest {
             Adapter<TestModel, User> a = mock(Adapter.class);
             a.skip = skip;
             when(a.getType()).thenReturn("User");
-            when(a.skipRefresh()).thenReturn(false);
             when(a.getMapping()).thenReturn(null);
             return a;
         };
@@ -401,7 +396,6 @@ class ScimSyncLoopTest {
         a.skip = false;
         when(a.getType()).thenReturn("User");
         when(a.getId()).thenReturn("u1");
-        when(a.skipRefresh()).thenReturn(false);
         when(a.getMapping()).thenReturn(null);
         TypedQuery<ScimResource> query = mock(TypedQuery.class);
         when(query.getResultList()).thenReturn(existing);
@@ -428,7 +422,6 @@ class ScimSyncLoopTest {
         a.skip = false;
         when(a.getType()).thenReturn("User");
         when(a.getId()).thenReturn("u1");
-        when(a.skipRefresh()).thenReturn(false);
         when(a.getMapping()).thenReturn(new ScimResource());
         when(a.getSCIMEndpoint()).thenThrow(new IllegalStateException("the endpoint name broke"));
         return a;

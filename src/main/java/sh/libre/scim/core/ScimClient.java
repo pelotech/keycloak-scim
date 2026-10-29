@@ -1118,7 +1118,7 @@ public class ScimClient {
             // initializers, so it's null (not the real default of false) on a
             // mock. Read it via Boolean.TRUE.equals rather than unboxing it
             // directly, or a mocked adapter with no explicit skip would NPE.
-            if (adapter.skipRefresh() || Boolean.TRUE.equals(adapter.skip)) {
+            if (Boolean.TRUE.equals(adapter.skip)) {
                 LOGGER.debugf("Skipping refresh for excluded resource %s", adapter.getId());
                 return RefreshOutcome.CONTINUE;
             }
