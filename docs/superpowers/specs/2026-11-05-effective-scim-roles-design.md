@@ -245,7 +245,7 @@ For each component id, it keeps one state, changed atomically
 | --- | --- | --- |
 | Finished, with or without per-user failures | `IDLE` | `SCHEDULED`, and schedule a run after the delay. |
 | Refused: the lease is held by another run, or the lease could not be taken because of an error | `SCHEDULED`, and schedule a run after the delay. | `SCHEDULED`, and schedule a run after the delay. |
-| Stopped early: any `StopReason` (including stop-on-error, a throttle streak, and a failed page transaction), a lost lease, or shutdown | `IDLE` | `SCHEDULED`, and schedule a run after the delay. On shutdown, nothing is scheduled. |
+| Stopped early: any run that did not complete (`outcome.completed()` is false), including stop-on-error, a throttle streak, a failed page transaction, a lost lease, or shutdown | `IDLE` | `SCHEDULED`, and schedule a run after the delay. On shutdown, nothing is scheduled. |
 
 So a newer request is never dropped while the node runs. A refused run tries
 again after the delay. While the database or another sync blocks it, this
