@@ -116,6 +116,11 @@ SHA-256 in hex. A Liquibase change in `scim-resource-changelog.xml` adds it.
   other users. An event that deletes or deactivates the same user waits at
   most for that short transaction.
 - A failed request does not write the hash, so the old hash stays.
+- A replace that got a 404 and re-created the user does not write the hash.
+  That path changes the mapping row's external id, which is part of the
+  primary key, inside the page transaction. A second transaction on the
+  same row would wait on that lock. The next role refresh sends the user
+  once more.
 
 No other path writes or reads the hash: not event creates and replaces, not
 bulk creates, not deactivation, not reactivation. A user that one of these
@@ -167,14 +172,22 @@ server, so a stale role on that user grants nothing.
 | A user added to or removed from a group | `GROUP_MEMBERSHIP` | As today: the group membership PATCH, then a user replace if `groupConfersScimRole` is true. That check now covers parent groups and composites. |
 | A role granted to or removed from a group | `REALM_ROLE_MAPPING` or `CLIENT_ROLE_MAPPING`, path `groups/{id}/role-mappings/...` | Request a role refresh. The current fan-out to group members is removed. |
 | Any change to a realm role or a client role | `REALM_ROLE` or `CLIENT_ROLE` | Request a role refresh. |
-| A group moved, to a new parent or to the top level | `GROUP` `UPDATE`, path `groups/{id}` or `groups` | The existing group update, then request a role refresh. |
-| A group renamed | `GROUP` `UPDATE`, path `groups/{id}` | The same as a move. The event does not say which change it was. A rename is rare, and a role refresh that finds no change sends nothing. |
+| A group moved to a new parent | `GROUP` `UPDATE`, path `groups/{newParentId}/children` | Request a role refresh only. Do not run a group update: the path names the new parent, not the moved group, and a move does not change the group's SCIM body. Today this event replaces the parent group by mistake. |
+| A group moved to the top level | `GROUP` `UPDATE`, path `groups` | Request a role refresh only. The path has no group id. |
+| A group renamed, or its attributes changed | `GROUP` `UPDATE`, path `groups/{id}` | The existing group update, then request a role refresh. The event does not say which change it was. A role refresh that finds no change sends nothing. |
 | A group deleted | `GROUP` `DELETE` | The existing group delete, then request a role refresh. |
 | A client deleted | `CLIENT` `DELETE` | Request a role refresh. Deleting a client removes its roles from users and sends no role event. |
 
-The `GROUP` pattern in `ScimEventListenerProvider` must also match the path
-`groups`, which a move to the top level uses. Today that path matches
-nothing, so the event is dropped.
+`ScimEventListenerProvider` drops an event when its resource type has no
+pattern (`patterns.get` returns null). So:
+
+- The `GROUP` handling must tell the three `UPDATE` paths apart, and must
+  match the path `groups`, which today matches nothing.
+- `CLIENT_ROLE_MAPPING`, `REALM_ROLE`, `CLIENT_ROLE`, and `CLIENT` have no
+  pattern today. Each one needs a pattern, or a branch before the pattern
+  check. For `REALM_ROLE`, `CLIENT_ROLE`, and `CLIENT`, the path does not
+  matter: every event of these types requests a role refresh (for `CLIENT`,
+  only `DELETE`).
 
 Every role event requests a refresh, even one that cannot change any user's
 roles, such as a new empty role. Sorting those out would mean reading the
@@ -194,8 +207,9 @@ visible.
 ### Role refresh scheduler
 
 `RoleRefreshScheduler` is one object per node. `ScimEventListenerProviderFactory`
-creates it in `init` and shuts it down in `close`. It owns a single-thread
-scheduled executor.
+creates it in `postInit`, which receives the `KeycloakSessionFactory` that a
+run needs, and shuts it down in `close`. It owns a single-thread scheduled
+executor.
 
 For each component id, it keeps one state, changed atomically
 (`ConcurrentHashMap.compute`):
@@ -220,9 +234,10 @@ For each component id, it keeps one state, changed atomically
 
 1. Change the state from `SCHEDULED` to `RUNNING` in one atomic step, before
    it reads anything.
-2. Read the component again from its realm. If it no longer exists, or has
-   `enabled=false` or `propagation-user=false`, change the state to `IDLE`
-   and stop.
+2. Read the component again from its realm. If the realm or the component
+   no longer exists, or the component has `enabled=false` or
+   `propagation-user=false`, change the state to `IDLE` and stop. A missing
+   `enabled` value counts as `true`, as in `ScimDispatcher`.
 3. Run the role refresh through `ScimSync`.
 4. When it ends, change the state:
 
@@ -230,7 +245,7 @@ For each component id, it keeps one state, changed atomically
 | --- | --- | --- |
 | Finished, with or without per-user failures | `IDLE` | `SCHEDULED`, and schedule a run after the delay. |
 | Refused: the lease is held by another run, or the lease could not be taken because of an error | `SCHEDULED`, and schedule a run after the delay. | `SCHEDULED`, and schedule a run after the delay. |
-| Stopped early: stop-on-error, a lost lease, or shutdown | `IDLE` | `SCHEDULED`, and schedule a run after the delay. |
+| Stopped early: any `StopReason` (including stop-on-error, a throttle streak, and a failed page transaction), a lost lease, or shutdown | `IDLE` | `SCHEDULED`, and schedule a run after the delay. On shutdown, nothing is scheduled. |
 
 So a newer request is never dropped while the node runs. A refused run tries
 again after the delay. While the database or another sync blocks it, this
@@ -315,7 +330,9 @@ sync runs as normal. The docs state this.
 ### Measurement
 
 Run one role refresh over 10,000 mapped users with no change. Record the
-duration and confirm it sends no request. The adapter cost measured in
+duration and confirm it sends no request. Also record how much the hash
+write adds to a periodic sync, which now opens one short transaction for
+each user it replaces. The adapter cost measured in
 `docs/performance.md` (about 0.6 ms per user, with direct roles only) gives
 a starting estimate of about 6 seconds. Deep role expansion and the hash add
 to that, so the measured number is the one to publish. Record it in
@@ -338,4 +355,11 @@ to that, so the measured number is the one to publish. Record it in
   write it too, so fewer users would be sent twice. But an event and a
   refresh can then race to write the hash, and the last writer wins even if
   its body is older. Event paths would also wait on row locks that a refresh
-  page holds. Writing the hash only in a refresh avoids both.
+  page holds. Writing the hash only in a refresh avoids both problems.
+
+  One race stays, and it also exists in 1.x. A refresh can compute a user's
+  body, an event can then send a newer body, and the refresh can then send
+  its older body. The stored hash then differs from the current body, so the
+  next role refresh fixes the user. A change to one user does not request a
+  role refresh, so until the next role event, the daily periodic sync fixes
+  it. This is accepted.
