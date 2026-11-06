@@ -2012,7 +2012,12 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
     @Test
     void aRoleGrantedToAParentGroupReachesSubgroupMembers() {
         var realm = newRealm();
+        String componentId = scimComponentId(realm);
+        int before = roleRefreshLogLines(componentId);
         var role = markedRole(realm, "from-parent");
+        // Creating the role requests a role refresh. Let it end first, so the
+        // "admin request sends no user" check below cannot see its PUT.
+        await().atMost(30, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
         String parentId = createGroup(realm, "parent");
         var childRep = new GroupRepresentation();
         childRep.setName("child");
