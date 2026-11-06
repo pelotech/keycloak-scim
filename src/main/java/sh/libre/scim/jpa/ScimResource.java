@@ -15,7 +15,8 @@ import jakarta.persistence.Table;
                 @NamedQuery(name = "findById", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and id = :id"),
                 @NamedQuery(name = "findByExternalId", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id"),
                 @NamedQuery(name = "findByComponentAndType", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type"),
-                @NamedQuery(name = "deleteDeactivatedByExternalId", query = "delete from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id and deactivatedAt is not null")})
+                @NamedQuery(name = "deleteDeactivatedByExternalId", query = "delete from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id and deactivatedAt is not null"),
+                @NamedQuery(name = "updateBodyHash", query = "update ScimResource set bodyHash = :hash where realmId = :realmId and componentId = :componentId and type = :type and id = :id and externalId = :externalId")})
 public class ScimResource {
         @Id
         @Column(name = "ID", nullable = false)
@@ -44,6 +45,22 @@ public class ScimResource {
          */
         @Column(name = "DEACTIVATED_AT")
         private Long deactivatedAt;
+
+        /**
+         * SHA-256 (hex) of the SCIM body the last refresh sent for this
+         * resource. Null until a refresh sends it. Only a refresh writes it;
+         * see the effective roles design.
+         */
+        @Column(name = "BODY_HASH", length = 64)
+        private String bodyHash;
+
+        public String getBodyHash() {
+                return bodyHash;
+        }
+
+        public void setBodyHash(String bodyHash) {
+                this.bodyHash = bodyHash;
+        }
 
         public String getId() {
                 return id;
