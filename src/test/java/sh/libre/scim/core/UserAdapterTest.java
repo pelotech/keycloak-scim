@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
@@ -22,7 +24,9 @@ import org.mockito.quality.Strictness;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -258,4 +262,47 @@ class UserAdapterTest {
         assertFalse(ops.containsKey("emails"));
     }
 
+    private static RoleModel role(String name, boolean marked, RoleModel... composites) {
+        var r = mock(RoleModel.class);
+        when(r.getName()).thenReturn(name);
+        when(r.getFirstAttribute("scim")).thenReturn(marked ? "true" : null);
+        when(r.isComposite()).thenReturn(composites.length > 0);
+        when(r.getCompositesStream()).thenAnswer(i -> Stream.of(composites));
+        return r;
+    }
+
+    /**
+     * Roles reach SCIM from composites, parent groups, and client roles. A
+     * realm role and a client role with the same name appear once. Unmarked
+     * roles stay out. The list is sorted.
+     */
+    @Test
+    void applySendsEffectiveMarkedRoles() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.getConfig()).thenReturn(new MultivaluedHashMap<>());
+        var direct = role("direct", true);
+        var plain = role("plain", false);
+        var viaComposite = role("via-composite", true);
+        var composite = role("composite", false, viaComposite);
+        var fromParent = role("from-parent", true);
+        var sharedRealm = role("shared", true);
+        var sharedClient = role("shared", true);
+        var parent = mock(GroupModel.class);
+        when(parent.getRoleMappingsStream()).thenAnswer(i -> Stream.of(fromParent));
+        var child = mock(GroupModel.class);
+        when(child.getParentId()).thenReturn("parent-id");
+        when(child.getParent()).thenReturn(parent);
+        when(child.getRoleMappingsStream()).thenAnswer(i -> Stream.of(sharedClient));
+        var user = mock(UserModel.class);
+        when(user.getId()).thenReturn("u1");
+        when(user.getUsername()).thenReturn("alice");
+        when(user.isEnabled()).thenReturn(true);
+        when(user.getRoleMappingsStream()).thenAnswer(i -> Stream.of(direct, plain, composite, sharedRealm));
+        when(user.getGroupsStream()).thenAnswer(i -> Stream.of(child));
+
+        var fresh = new UserAdapter(session, COMPONENT_ID);
+        fresh.apply(user);
+
+        assertArrayEquals(new String[] {"direct", "from-parent", "shared", "via-composite"}, fresh.getRoles());
+    }
 }
