@@ -392,7 +392,7 @@ enum RoleRefreshResult {
 - [ ] **Step 2: Compile**
 
 Run: `./gradlew compileJava -q`
-Expected: success. No commit yet; Task 6 commits it with its first user.
+Expected: success. No commit yet; Task 5 commits it.
 
 ### Task 5: Role-refresh mode and hash write in `refreshOne`
 
@@ -576,14 +576,16 @@ class ScimClientRoleRefreshTest {
         verify(client, never()).writeBodyHash(any(), anyString(), anyString());
     }
 
-    /** A 404 re-create changes the external id inside the page transaction. */
+    /**
+     * A 404 re-create changes the mapping row's external id inside the page
+     * transaction. The re-create path edits the same managed row that
+     * refreshOne passed in.
+     */
     @Test
     void aReCreateStoresNoHash() {
         var client = client();
         var m = mapping(null);
         doAnswer(i -> {
-            Adapter<?, ?> adapter = i.getArgument(0);
-            adapter.setExternalId("ext-2");
             m.setExternalId("ext-2");
             return true;
         }).when(client).replaceApplied(any(), any());
@@ -599,6 +601,11 @@ class ScimClientRoleRefreshTest {
 Before you run it, check two things in the code and adjust the test to match, not the other way round:
 - How `Adapter.getMapping()` reads the row (`getResultList` or `getSingleResult`), and how `Adapter.query` builds the query (`createNamedQuery(name, ScimResource.class)` with `setParameter`). Stub what it really calls.
 - That `UserAdapter.apply` works with this `session` mock. It reads `realm.getComponent("comp-1").getConfig()` for extension mappings; the model above has a real config.
+
+Note: today `Adapter.setExternalId` only sets a value when none is set, so the
+re-create path writes the old external id back, and the key does not change.
+That is an existing bug, tracked separately. Do not fix it in this plan. The
+check above compares the row, so it stays correct when that bug is fixed.
 
 - [ ] **Step 2: Run the tests and see them fail**
 
@@ -649,15 +656,16 @@ In the 5-argument body, replace the block from `if (mapping == null) {` through 
                 }
                 LOGGER.info("Replacing it");
                 branch = "replace";
-                // A 404 re-create changes the external id. Read it first.
+                // A 404 re-create edits this same managed row and can change
+                // its external id, which is part of the key. Read it first.
                 String externalIdBefore = mapping.getExternalId();
                 // Hand over the row read above. A second read of it would take
                 // page capacity and return the same row.
                 pushed = replaceApplied(adapter, mapping);
-                if (pushed && hash != null && Objects.equals(externalIdBefore, adapter.getExternalId())) {
-                    // A re-create changed the row's key inside the page
-                    // transaction, so it skips this write. The next role
-                    // refresh sends that user once more.
+                if (pushed && hash != null && Objects.equals(externalIdBefore, mapping.getExternalId())) {
+                    // A re-create that changed the row's key holds a lock on
+                    // it in the page transaction, so it skips this write. The
+                    // next role refresh sends that user once more.
                     writeBodyHash(mapping, externalIdBefore, hash);
                 }
             }
@@ -840,7 +848,7 @@ Add, after `run(...)`:
                 return RoleRefreshResult.REFUSED;
             }
         } catch (RuntimeException e) {
-            LOGGER.warnf(e, "SCIM role refresh of component %s could not take its lease; it will try again",
+            LOGGER.warnf(e, "SCIM role refresh: component %s could not take its lease; it will try again",
                 model.getId());
             return RoleRefreshResult.REFUSED;
         }
@@ -1026,6 +1034,46 @@ class RoleRefreshSchedulerTest {
         assertThat(scheduled).hasSize(2);
     }
 
+    private static org.keycloak.component.ComponentModel component(String providerId, String enabled,
+                                                                   String propagationUser) {
+        var m = new org.keycloak.component.ComponentModel();
+        var config = new org.keycloak.common.util.MultivaluedHashMap<String, String>();
+        if (enabled != null) {
+            config.putSingle("enabled", enabled);
+        }
+        if (propagationUser != null) {
+            config.putSingle("propagation-user", propagationUser);
+        }
+        m.setConfig(config);
+        m.setProviderId(providerId);
+        return m;
+    }
+
+    @Test
+    void onlyAnEnabledScimComponentWithUserPropagationIsRefreshable() {
+        assertThat(RoleRefreshScheduler.refreshable(component("scim", null, "true"))).isTrue();
+        assertThat(RoleRefreshScheduler.refreshable(component("scim", "false", "true"))).isFalse();
+        assertThat(RoleRefreshScheduler.refreshable(component("scim", "true", "false"))).isFalse();
+        assertThat(RoleRefreshScheduler.refreshable(component("scim", "true", null))).isFalse();
+        assertThat(RoleRefreshScheduler.refreshable(component("ldap", "true", "true"))).isFalse();
+        assertThat(RoleRefreshScheduler.refreshable(null)).isFalse();
+    }
+
+    @Test
+    void aRunnerThatThrowsAnErrorStillFreesTheComponent() {
+        var erroring = new RoleRefreshScheduler(
+            (realmId, componentId, shutdown) -> { throw new StackOverflowError(); },
+            (task, delay) -> scheduled.add(task), Duration.ofSeconds(60), null);
+        erroring.request("r", "c");
+        try {
+            runNext();
+        } catch (StackOverflowError expected) {
+            // The error still reaches the executor.
+        }
+
+        assertThat(erroring.state("c")).isNull();
+    }
+
     @Test
     void afterShutdownRequestsAreIgnoredAndNothingIsRescheduled() {
         results.add(RoleRefreshResult.REFUSED);
@@ -1051,9 +1099,9 @@ package sh.libre.scim.core;
 
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
@@ -1114,11 +1162,13 @@ public final class RoleRefreshScheduler {
         if (current != null) {
             return;
         }
-        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r -> {
+        var executor = new ScheduledThreadPoolExecutor(1, r -> {
             var thread = new Thread(r, "scim-role-refresh");
             thread.setDaemon(true);
             return thread;
         });
+        // Runs that wait for their delay are dropped at shutdown.
+        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
         var delay = Duration.ofSeconds(Long.getLong(DELAY_PROPERTY, DEFAULT_DELAY_SECONDS));
         current = new RoleRefreshScheduler(
             (realmId, componentId, isShutdown) -> runForComponent(sessionFactory, realmId, componentId, isShutdown),
@@ -1162,7 +1212,11 @@ public final class RoleRefreshScheduler {
     void shutdown() {
         shutdown = true;
         if (ownedExecutor != null) {
-            ownedExecutor.shutdownNow();
+            // Not shutdownNow: an interrupt can land inside a JDBC or HTTP
+            // call and break the lease release. The running refresh sees the
+            // flag through its lost check and stops at the next user. See
+            // SyncLease.stopHeartbeat for the same choice.
+            ownedExecutor.shutdown();
         }
     }
 
@@ -1184,19 +1238,25 @@ public final class RoleRefreshScheduler {
     }
 
     private void run(String realmId, String componentId) {
+        if (shutdown) {
+            states.remove(componentId);
+            return;
+        }
         // Moves to RUNNING before anything is read, so a request after this
         // point causes one more refresh instead of being absorbed.
         if (!states.replace(componentId, State.SCHEDULED, State.RUNNING)) {
             return;
         }
-        RoleRefreshResult result;
+        RoleRefreshResult result = RoleRefreshResult.STOPPED;
         try {
             result = runner.run(realmId, componentId, () -> shutdown);
         } catch (RuntimeException e) {
-            LOGGER.errorf(e, "SCIM role refresh of component %s failed", componentId);
-            result = RoleRefreshResult.STOPPED;
+            LOGGER.errorf(e, "SCIM role refresh failed for component %s", componentId);
+        } finally {
+            // In finally, so even an Error leaves the component able to
+            // refresh again. Without it, the state would stay RUNNING.
+            finish(realmId, componentId, result);
         }
-        finish(realmId, componentId, result);
     }
 
     private void finish(String realmId, String componentId, RoleRefreshResult result) {
@@ -1225,16 +1285,21 @@ public final class RoleRefreshScheduler {
                 return null;
             }
             var component = realm.getComponent(componentId);
-            boolean on = component != null
-                && ScimStorageProviderFactory.ID.equals(component.getProviderId())
-                && component.get("enabled", true)
-                && component.get("propagation-user", false);
-            return on ? component : null;
+            return refreshable(component) ? component : null;
         });
         if (model == null) {
             return RoleRefreshResult.SKIPPED;
         }
         return ScimSync.runRoleRefresh(sessionFactory, realmId, model, isShutdown);
+    }
+
+    /** Whether a component still exists and is on for user propagation. */
+    // package-private for tests
+    static boolean refreshable(ComponentModel component) {
+        return component != null
+            && ScimStorageProviderFactory.ID.equals(component.getProviderId())
+            && component.get("enabled", true)
+            && component.get("propagation-user", false);
     }
 }
 ```
@@ -1256,26 +1321,11 @@ git commit -m "feat: add a per-node scheduler for role refreshes"
 **Files:**
 - Modify: `src/main/java/sh/libre/scim/core/ScimDispatcher.java`
 - Modify: `src/main/java/sh/libre/scim/event/ScimEventListenerProviderFactory.java`
-- Test: `src/test/java/sh/libre/scim/core/ScimDispatcherTest.java`
+- Test: `src/test/java/sh/libre/scim/core/ScimDispatcherRoleRefreshTest.java`
 
 - [ ] **Step 1: Write the failing test**
 
-Read `ScimDispatcherTest` first and reuse its session, realm and transaction mocks. Add a test with this shape:
-
-```java
-    @Test
-    void aRoleRefreshIsRequestedOnlyAfterCommit() {
-        // Given a realm with one enabled scim component that has
-        // propagation-user=true, and one with propagation-user=false.
-        // When requestRoleRefresh() is called, a KeycloakTransaction is
-        // enlisted with enlistAfterCompletion, and nothing is requested yet.
-        // When that transaction's commit() runs, the scheduler gets exactly
-        // one request, for the first component.
-        // When rollback() runs instead, the scheduler gets none.
-    }
-```
-
-To see the requests, install a test scheduler. Add this package-private hook to `RoleRefreshScheduler`, and use it only from tests:
+First add this package-private hook to `RoleRefreshScheduler`. Only tests use it:
 
 ```java
     // package-private: tests install a scheduler with fake parts
@@ -1284,11 +1334,113 @@ To see the requests, install a test scheduler. Add this package-private hook to 
     }
 ```
 
-Build the test scheduler with a runner that records the component id and a delayer that runs the task at once. Call `RoleRefreshScheduler.stop()` in an `@AfterEach`.
+Then create `src/test/java/sh/libre/scim/core/ScimDispatcherRoleRefreshTest.java`. It captures the enlisted transaction, as `ScimDispatcherRollbackTest` mocks the transaction manager, and reads the scheduler's state to see the requests.
+
+```java
+package sh.libre.scim.core;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.time.Duration;
+import java.util.stream.Stream;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
+import org.keycloak.models.KeycloakContext;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.KeycloakTransaction;
+import org.keycloak.models.KeycloakTransactionManager;
+import org.keycloak.models.RealmModel;
+import org.mockito.ArgumentCaptor;
+import sh.libre.scim.storage.ScimStorageProviderFactory;
+
+class ScimDispatcherRoleRefreshTest {
+
+    private KeycloakSession session;
+    private KeycloakTransactionManager transactions;
+    private RoleRefreshScheduler scheduler;
+
+    private static ComponentModel component(String id, String propagationUser) {
+        var m = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("propagation-user", propagationUser);
+        m.setConfig(config);
+        m.setId(id);
+        m.setProviderId(ScimStorageProviderFactory.ID);
+        return m;
+    }
+
+    @BeforeEach
+    void setUp() {
+        session = mock(KeycloakSession.class);
+        var context = mock(KeycloakContext.class);
+        var realm = mock(RealmModel.class);
+        transactions = mock(KeycloakTransactionManager.class);
+        when(session.getContext()).thenReturn(context);
+        when(context.getRealm()).thenReturn(realm);
+        when(realm.getId()).thenReturn("realm-1");
+        when(realm.getComponentsStream())
+            .thenAnswer(i -> Stream.of(component("on", "true"), component("off", "false")));
+        when(session.getTransactionManager()).thenReturn(transactions);
+        scheduler = new RoleRefreshScheduler(
+            (realmId, componentId, shutdown) -> RoleRefreshResult.FINISHED,
+            (task, delay) -> {}, Duration.ofSeconds(60), null);
+        RoleRefreshScheduler.install(scheduler);
+    }
+
+    @AfterEach
+    void tearDown() {
+        RoleRefreshScheduler.stop();
+    }
+
+    private KeycloakTransaction enlisted() {
+        var captor = ArgumentCaptor.forClass(KeycloakTransaction.class);
+        verify(transactions).enlistAfterCompletion(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    void aRequestIsMadeOnlyAfterCommitAndOnlyForUserPropagation() {
+        new ScimDispatcher(session).requestRoleRefresh();
+        var transaction = enlisted();
+        assertThat(scheduler.state("on")).isNull();
+
+        transaction.commit();
+
+        assertThat(scheduler.state("on")).isEqualTo(RoleRefreshScheduler.State.SCHEDULED);
+        assertThat(scheduler.state("off")).isNull();
+    }
+
+    @Test
+    void aRollbackMakesNoRequest() {
+        new ScimDispatcher(session).requestRoleRefresh();
+
+        enlisted().rollback();
+
+        assertThat(scheduler.state("on")).isNull();
+    }
+
+    @Test
+    void withNoSchedulerNothingIsEnlisted() {
+        RoleRefreshScheduler.stop();
+
+        new ScimDispatcher(session).requestRoleRefresh();
+
+        verify(transactions, never()).enlistAfterCompletion(any());
+    }
+}
+```
 
 - [ ] **Step 2: Run the test and see it fail**
 
-Run: `./gradlew test --tests 'sh.libre.scim.core.ScimDispatcherTest' -q`
+Run: `./gradlew test --tests 'sh.libre.scim.core.ScimDispatcherRoleRefreshTest' -q`
 Expected: compile failure, no `requestRoleRefresh`.
 
 - [ ] **Step 3: Implement `requestRoleRefresh`**
@@ -1368,7 +1520,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/main/java/sh/libre/scim/core/ScimDispatcher.java src/main/java/sh/libre/scim/core/RoleRefreshScheduler.java src/main/java/sh/libre/scim/event/ScimEventListenerProviderFactory.java src/test/java/sh/libre/scim/core/ScimDispatcherTest.java
+git add src/main/java/sh/libre/scim/core/ScimDispatcher.java src/main/java/sh/libre/scim/core/RoleRefreshScheduler.java src/main/java/sh/libre/scim/event/ScimEventListenerProviderFactory.java src/test/java/sh/libre/scim/core/ScimDispatcherRoleRefreshTest.java
 git commit -m "feat: request role refreshes after commit"
 ```
 
@@ -1463,7 +1615,7 @@ git commit -m "feat: count parent groups and composites in groupConfersScimRole"
 
 - [ ] **Step 1: Write the failing tests**
 
-The listener builds its own `ScimDispatcher` in its constructor. To test routing, make the field replaceable in tests: it is already package-visible (`ScimDispatcher dispatcher;`), so a test in `sh.libre.scim.event` can set `listener.dispatcher = mock(ScimDispatcher.class)`.
+The listener builds its own `ScimDispatcher` in its constructor. Its `dispatcher` field is package-visible, so a test in `sh.libre.scim.event` can replace it with a mock. The listener's `getUser` and `getGroup` call `session.getContext().getRealm()`, `session.users()` and `session.groups()`. So each routing test builds its own listener on a session mock with deep stubs.
 
 Add a helper and tests:
 
@@ -1476,10 +1628,11 @@ Add a helper and tests:
         return e;
     }
 
-    private ScimDispatcher routed(AdminEvent e) {
+    private static ScimDispatcher routed(AdminEvent e) {
+        var routing = new ScimEventListenerProvider(mock(KeycloakSession.class, RETURNS_DEEP_STUBS));
         var dispatcher = mock(ScimDispatcher.class);
-        listener.dispatcher = dispatcher;
-        listener.onEvent(e, false);
+        routing.dispatcher = dispatcher;
+        routing.onEvent(e, false);
         return dispatcher;
     }
 
@@ -1566,9 +1719,7 @@ Add a helper and tests:
     }
 ```
 
-These tests call `getGroup` and `getUser` through the session mock, which returns null. The listener passes the null model into the dispatcher lambda, which the mock never runs, so that is fine. If the listener dereferences the model before it calls the dispatcher, stub `session.groups()` and `session.users()` in the test.
-
-Imports to add: `org.keycloak.events.admin.AdminEvent`, `OperationType`, `ResourceType`, `sh.libre.scim.core.ScimDispatcher`, and Mockito's `any`, `eq`, `never`, `verify`, `verifyNoInteractions`.
+Imports to add: `org.keycloak.events.admin.AdminEvent`, `OperationType`, `ResourceType`, `sh.libre.scim.core.ScimDispatcher`, and Mockito's `RETURNS_DEEP_STUBS`, `any`, `eq`, `never`, `verify`, `verifyNoInteractions`.
 
 - [ ] **Step 2: Run the tests and see them fail**
 
@@ -1576,6 +1727,8 @@ Run: `./gradlew test --tests 'sh.libre.scim.event.ScimEventListenerProviderTest'
 Expected: most new tests FAIL.
 
 - [ ] **Step 3: Implement**
+
+Make all of the edits below before you compile. The new prefix declares `var type`, and the old `REALM_ROLE_MAPPING` block uses the same name; the replacement block removes that clash.
 
 In the constructor, change the `GROUP` pattern and add one for client role mappings:
 
@@ -1733,7 +1886,7 @@ git commit -m "test: keep role refreshes out of the shared integration container
 **Files:**
 - Create: `src/integrationTest/java/sh/libre/scim/integration/ScimEffectiveRolesIT.java`
 
-This class runs its own Keycloak with a 3-second delay, like `ScimSyncLeaseStaleIT`. It needs no directory server.
+This class runs its own Keycloak with a 5-second delay, like `ScimSyncLeaseStaleIT`. It needs no directory server.
 
 - [ ] **Step 1: Write the test class**
 
@@ -1768,7 +1921,7 @@ import org.keycloak.representations.idm.RoleRepresentation;
  */
 class ScimEffectiveRolesIT extends IntegrationTestBase {
 
-    private static final int DELAY_SECONDS = 3;
+    private static final int DELAY_SECONDS = 5;
     private static KeycloakContainer rolesKeycloak;
     private static Keycloak rolesAdmin;
 
@@ -1796,15 +1949,17 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
     private RealmResource newRealm() {
         stubScimUserCreateOk();
         stubScimUserUpdateOk();
-        stubScimGroupCreateOk();
-        stubScimGroupUpdateOk();
         String realmName = "it-" + UUID.randomUUID().toString().substring(0, 8);
         var realmRep = new RealmRepresentation();
         realmRep.setRealm(realmName);
         realmRep.setEnabled(true);
         rolesAdmin.realms().create(realmRep);
         RealmResource realm = rolesAdmin.realm(realmName);
-        addScimStorageProvider(realm, cfg -> cfg.putSingle("propagation-group", "true"));
+        // Users only. Group propagation adds requests these tests do not check.
+        addScimStorageProvider(realm, cfg -> {
+            cfg.putSingle("propagation-user", "true");
+            cfg.putSingle("propagation-group", "false");
+        });
         enableScimEventListener(realm);
         return realm;
     }
@@ -1835,8 +1990,10 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
             .orElse("");
     }
 
+    /** Counts the one line each role refresh logs when it ends. */
     private static int roleRefreshLogLines(String componentId) {
-        var matcher = Pattern.compile("SCIM role refresh of component " + Pattern.quote(componentId))
+        var matcher = Pattern.compile("SCIM role refresh of component " + Pattern.quote(componentId)
+                + " (finished|stopped) in ")
             .matcher(rolesKeycloak.getLogs());
         int count = 0;
         while (matcher.find()) {
@@ -1866,10 +2023,33 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         realm.users().get(userId).joinGroup(childId);
 
         realm.groups().group(parentId).roles().realmLevel().add(List.of(role));
+        // The delay is 5 seconds, so a PUT that names the role right after
+        // the admin call returns came from inside the admin request.
+        assertTrue(!newestUserPutFor("sub-member").contains("from-parent"),
+            "the admin request itself sends no user");
 
         await().atMost(30, SECONDS).untilAsserted(() ->
             assertTrue(newestUserPutFor("sub-member").contains("from-parent"),
                 "the subgroup member gets the parent group's role"));
+    }
+
+    @Test
+    void aDirectGrantIsSentAtOnce() {
+        var realm = newRealm();
+        String componentId = scimComponentId(realm);
+        int before = roleRefreshLogLines(componentId);
+        var role = markedRole(realm, "direct-grant");
+        // Creating the role requests a role refresh. Let it end first, so the
+        // check below can only pass through the direct grant.
+        await().atMost(30, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
+        String userId = createAdminUser(realm, "granted", "granted@test.local");
+        awaitUserPostFor("granted");
+
+        realm.users().get(userId).roles().realmLevel().add(List.of(role));
+
+        await().atMost(DELAY_SECONDS - 1, SECONDS).untilAsserted(() ->
+            assertTrue(newestUserPutFor("granted").contains("direct-grant"),
+                "a direct grant sends the user before any role refresh could"));
     }
 
     @Test
@@ -1946,7 +2126,7 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
 }
 ```
 
-Before you run it, check these helpers in `IntegrationTestBase` and adjust calls to their real signatures: `addScimStorageProvider`, `enableScimEventListener`, `createGroup`, `createAdminUser`, `awaitUserPostFor`, `stubScimGroupCreateOk`, `stubScimGroupUpdateOk`. If `addScimStorageProvider` does not set `propagation-user=true`, set it in the config lambda.
+The helpers it uses (`addScimStorageProvider`, `enableScimEventListener`, `createGroup`, `createAdminUser`, `awaitUserPostFor`) exist in `IntegrationTestBase` with these signatures.
 
 - [ ] **Step 2: Run it**
 
@@ -1997,10 +2177,12 @@ class RoleRefreshPerfTest extends PerfTestBase {
         stubScimUserCreateOk();
         stubScimUserUpdateOk();
         var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.putSingle("sync-refresh", "true"));
+        // Without the listener, the role edit below requests nothing.
+        enableScimEventListener(r.realm());
         List<String> seeded = new ArrayList<>(seedLdapUsers("rr", USER_COUNT));
         try {
             r.realm().userStorage().syncUsers(r.ldapId(), "triggerFullSync");
-            await().atMost(30, MINUTES).until(() -> scimUserPostCount() >= USER_COUNT);
+            await().atMost(10, MINUTES).until(() -> perUserPostCount() >= USER_COUNT);
             String scimId = r.realm().components().query(r.realm().toRepresentation().getId(),
                     "org.keycloak.storage.UserStorageProvider").stream()
                 .filter(c -> "scim".equals(c.getProviderId())).findFirst().orElseThrow().getId();
@@ -2012,7 +2194,7 @@ class RoleRefreshPerfTest extends PerfTestBase {
             role.setName("perf-trigger");
             r.realm().roles().create(role);
 
-            await().atMost(30, MINUTES).until(() -> finishedLines(scimId).size() > linesBefore);
+            await().atMost(10, MINUTES).until(() -> finishedLines(scimId).size() > linesBefore);
             var last = finishedLines(scimId).get(finishedLines(scimId).size() - 1);
             System.out.printf("[perf] role refresh, %d users, no change: %s ms, %s sent, %s failed%n",
                 USER_COUNT, last[0], last[1], last[2]);
@@ -2036,7 +2218,7 @@ class RoleRefreshPerfTest extends PerfTestBase {
 }
 ```
 
-Check `seedLdapUsers` (what it returns), `scimUserPostCount` (or the base class's equivalent count helper), and the DN pattern used by other perf tests' cleanup, and match them.
+Check `seedLdapUsers` (what it returns) and the DN pattern that other perf tests pass to `cleanupLdapEntries`, and match them. The `performanceTest` task times out after 30 minutes; the two waits above are 10 minutes each.
 
 - [ ] **Step 2: Run it at 10,000 users**
 
