@@ -504,8 +504,8 @@ hash before the refresh ran.
 The manual sync sends every user once. With this feature it also writes one
 body hash for each user, in its own short transaction. To see what this
 feature adds to a manual sync, the same steps ran without the role refresh
-on the code before this feature (the 1.8.0 release plus the earlier 2.0
-changes). That baseline used a temporary copy of this test.
+on the code before this feature (the 1.8.0 release plus the changes made
+since). That baseline used a temporary copy of this test.
 It compares the whole feature, not only the hash write.
 
 | Users | Manual sync, before this feature | Manual sync, with this feature |

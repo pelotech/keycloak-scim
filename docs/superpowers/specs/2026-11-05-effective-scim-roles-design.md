@@ -44,7 +44,7 @@ from LDAP. The work and the length of the admin request have no limit.
    stores, on each mapping row, a hash of the body that the last refresh
    sent. An event that sends a user clears that user's hash.
 4. A periodic or manual sync ignores the hash and sends every user, as in
-   1.x. Operators run it once a day as a safety net.
+   1.8.0. Operators run it once a day as a safety net.
 
 A change to one user still sends that user at once, as today.
 
@@ -190,7 +190,7 @@ Groups do not get a hash. Group bodies do not carry roles.
 
 | Started by | `roleRefresh` | Behavior |
 | --- | --- | --- |
-| Keycloak periodic sync, or a manual sync (`ImportSynchronization.sync`) | `false` | As in 1.x. Sends every user, and creates users with no mapping. Writes the hash after each successful replace. |
+| Keycloak periodic sync, or a manual sync (`ImportSynchronization.sync`) | `false` | As in 1.8.0. Sends every user, and creates users with no mapping. Writes the hash after each successful replace. |
 | The role refresh scheduler (this design) | `true` | For each user that has a mapping: compute the body hash. Send a replace only when the hash differs from the stored one, or is missing. Skip users with no mapping. Never create a user. |
 
 A role refresh runs only the user refresh stage. It does not run
@@ -338,10 +338,10 @@ sync runs as normal. The docs state this.
     `sync-refresh=true` once a day, and says that a role refresh can make
     that day's periodic sync be refused.
   - The JVM properties table lists the new property.
-- `docs/upgrading-to-2.0.md`:
+- `docs/upgrading-from-1.8.md`:
   - Effective roles change what the plugin sends.
   - Start one manual sync after the upgrade, so that every user gets the
-    composite and parent-group roles that 1.x never sent.
+    composite and parent-group roles that 1.8.0 never sent.
 
 ## Testing
 
@@ -411,7 +411,7 @@ code before this feature too. That abort is not tracked yet.
   writer wins even if its body is older. Clearing on the event path avoids
   that, because a null hash is never wrong.
 
-  One race stays, and it also exists in 1.x. A refresh can compute a user's
+  One race stays, and it also exists in 1.8.0. A refresh can compute a user's
   body, an event can then send a newer body, and the refresh can then send
   its older body. The stored hash then differs from the current body, so the
   next role refresh fixes the user. A change to one user does not request a
