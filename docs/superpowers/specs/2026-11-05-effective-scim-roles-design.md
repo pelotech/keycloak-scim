@@ -380,14 +380,14 @@ sync runs as normal. The docs state this.
 
 ### Measurement
 
-Run one role refresh over 10,000 mapped users with no change. Record the
-duration and confirm it sends no request. Also record how much the hash
-write adds to a periodic sync, which now opens one short transaction for
-each user it replaces. The adapter cost measured in
-`docs/performance.md` (about 0.6 ms per user, with direct roles only) gives
-a starting estimate of about 6 seconds. Deep role expansion and the hash add
-to that, so the measured number is the one to publish. Record it in
-`docs/performance.md`.
+Run one role refresh over N mapped users with no change. Record the
+duration, and prove from the SCIM server's request log that it sends no
+request. Also time a manual sync, which now writes a hash for each user.
+
+Measured so far, at 1,000 and 5,000 users: see `docs/performance.md`,
+"Role refresh". A run at 10,000 users is blocked today: a manual sync
+aborts after about 6,300 updates with `NoHttpResponseException`, on the
+code before this feature too. That abort is tracked separately.
 
 ## Alternatives considered
 
