@@ -50,4 +50,28 @@ class ScimEventListenerProviderTest {
 
         assertFalse(listener.groupConfersScimRole(group));
     }
+
+    @Test
+    void confersScimRole_throughAParentGroup() {
+        var marked = role("true");
+        var parent = mock(GroupModel.class);
+        when(parent.getRoleMappingsStream()).thenAnswer(i -> Stream.of(marked));
+        var child = mock(GroupModel.class);
+        when(child.getRoleMappingsStream()).thenAnswer(i -> Stream.empty());
+        when(child.getParent()).thenReturn(parent);
+
+        assertTrue(listener.groupConfersScimRole(child));
+    }
+
+    @Test
+    void confersScimRole_throughAComposite() {
+        var marked = role("true");
+        var composite = role(null);
+        when(composite.isComposite()).thenReturn(true);
+        when(composite.getCompositesStream()).thenAnswer(i -> Stream.of(marked));
+        var group = mock(GroupModel.class);
+        when(group.getRoleMappingsStream()).thenAnswer(i -> Stream.of(composite));
+
+        assertTrue(listener.groupConfersScimRole(group));
+    }
 }

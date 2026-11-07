@@ -13,6 +13,7 @@ import org.keycloak.events.admin.ResourceType;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.RoleUtils;
 
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
@@ -149,14 +150,20 @@ public class ScimEventListenerProvider implements EventListenerProvider {
     }
 
     /**
-     * Whether the group carries a role mapping to a {@code scim="true"} role —
-     * the same mark {@code UserAdapter} uses to decide which roles reach the
-     * SCIM {@code roles} field. If false, a membership change on this group
-     * cannot alter any member's SCIM representation.
+     * Whether the group, or any parent group, has a role mapping whose
+     * composite expansion includes a role marked scim="true". This is the
+     * same set of roles UserAdapter sends. If false, a membership change on
+     * this group cannot change any member's SCIM roles.
      */
     // package-private for tests
     boolean groupConfersScimRole(GroupModel group) {
-        return group.getRoleMappingsStream()
-                .anyMatch(r -> "true".equals(r.getFirstAttribute("scim")));
+        for (var g = group; g != null; g = g.getParent()) {
+            boolean marked = RoleUtils.expandCompositeRolesStream(g.getRoleMappingsStream())
+                    .anyMatch(r -> "true".equals(r.getFirstAttribute("scim")));
+            if (marked) {
+                return true;
+            }
+        }
+        return false;
     }
 }
