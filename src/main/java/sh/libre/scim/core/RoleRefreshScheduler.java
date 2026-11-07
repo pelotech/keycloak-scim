@@ -89,6 +89,11 @@ public final class RoleRefreshScheduler {
         }
     }
 
+    // package-private: tests install a scheduler with fake parts
+    static synchronized void install(RoleRefreshScheduler scheduler) {
+        current = scheduler;
+    }
+
     /** This node's scheduler, or null before start and after stop. */
     public static RoleRefreshScheduler current() {
         return current;
