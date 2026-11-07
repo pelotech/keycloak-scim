@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
@@ -600,21 +601,22 @@ public class ScimClient {
 
     /**
      * Clears a user's body hash after an event sent that user. The event's
-     * body may differ from the one the hash describes, so the next role
-     * refresh must send the user. Runs in the caller's transaction. A null
-     * hash never matches, so a clear is always safe.
+     * body may differ from the one the hash describes. The hash becomes a
+     * fresh value that never equals a real hash, so the next role refresh
+     * sends the user. The value is not null, because a refresh that read null
+     * could then write over the clear. The write goes to the managed row, so
+     * a later flush in this transaction cannot restore the old value. Runs in
+     * the caller's transaction.
      */
     // package-private so a test can stub it
     void clearBodyHash(Adapter<?, ?> adapter) {
         if (!"User".equals(adapter.getType())) {
             return;
         }
-        getEM().createNamedQuery("clearBodyHash")
-            .setParameter("realmId", session.getContext().getRealm().getId())
-            .setParameter("componentId", model.getId())
-            .setParameter("type", adapter.getType())
-            .setParameter("id", adapter.getId())
-            .executeUpdate();
+        // A SHA-256 hex hash has no '-', so this never equals one.
+        for (var row : adapter.query("findById", adapter.getId()).getResultList()) {
+            row.setBodyHash("cleared-" + UUID.randomUUID());
+        }
     }
 
     /**
@@ -1221,6 +1223,8 @@ public class ScimClient {
                 // A 404 re-create edits this same managed row and can change
                 // its external id, which is part of the key. Read it first.
                 String externalIdBefore = mapping.getExternalId();
+                // The hash write only succeeds if the hash is still this value.
+                String hashBefore = mapping.getBodyHash();
                 // Hand over the row read above. A second read of it would take
                 // page capacity and return the same row.
                 pushed = replaceApplied(adapter, mapping);
@@ -1228,7 +1232,7 @@ public class ScimClient {
                     // A re-create that changed the row's key holds a lock on
                     // it in the page transaction, so it skips this write. The
                     // next role refresh sends that user once more.
-                    writeBodyHash(mapping, externalIdBefore, hash);
+                    writeBodyHash(mapping, externalIdBefore, hashBefore, hash);
                 }
             }
             if (!pushed) {
@@ -1274,20 +1278,36 @@ public class ScimClient {
      * Stores a body hash in its own short transaction, so the page does not
      * hold a lock on the mapping row while it pushes other users. A failure
      * only means the next role refresh sends the user again.
+     *
+     * <p>The write is a compare-and-set. An event can send a newer body and
+     * clear the hash while this send is in flight. The write then waits for
+     * the event's lock, and it must not store the hash of the older body. It
+     * changes the row only if the hash still equals {@code expected}, the
+     * value the row had before the send.
+     *
+     * @param expected the hash the row had before the send; null if it had none
      */
     // package-private so a test can stub it
-    void writeBodyHash(ScimResource mapping, String externalId, String hash) {
+    void writeBodyHash(ScimResource mapping, String externalId, String expected, String hash) {
         try {
-            KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), s ->
-                s.getProvider(JpaConnectionProvider.class).getEntityManager()
-                    .createNamedQuery("updateBodyHash")
+            int changed = KeycloakModelUtils.runJobInTransactionWithResult(session.getKeycloakSessionFactory(), s -> {
+                var query = s.getProvider(JpaConnectionProvider.class).getEntityManager()
+                    .createNamedQuery(expected == null ? "updateBodyHashIfNull" : "updateBodyHashIfEquals")
                     .setParameter("hash", hash)
                     .setParameter("realmId", mapping.getRealmId())
                     .setParameter("componentId", mapping.getComponentId())
                     .setParameter("type", mapping.getType())
                     .setParameter("id", mapping.getId())
-                    .setParameter("externalId", externalId)
-                    .executeUpdate());
+                    .setParameter("externalId", externalId);
+                if (expected != null) {
+                    query.setParameter("expected", expected);
+                }
+                return query.executeUpdate();
+            });
+            if (changed == 0) {
+                LOGGER.debugf("The body hash of %s %s changed during the send; left it alone",
+                    mapping.getType(), mapping.getId());
+            }
         } catch (RuntimeException e) {
             LOGGER.warnf(e, "Could not store the body hash of %s %s; the next role refresh sends it again",
                 mapping.getType(), mapping.getId());
