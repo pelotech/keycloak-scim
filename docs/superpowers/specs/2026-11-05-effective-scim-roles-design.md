@@ -42,7 +42,7 @@ from LDAP. The work and the length of the admin request have no limit.
 3. A role refresh reads every mapped user of the component and sends only
    the users whose SCIM body changed. To know what changed, the plugin
    stores, on each mapping row, a hash of the body that the last refresh
-   sent.
+   sent. An event that sends a user clears that user's hash.
 4. A periodic or manual sync ignores the hash and sends every user, as in
    1.x. Operators run it once a day as a safety net.
 
@@ -107,7 +107,7 @@ SHA-256 in hex. A Liquibase change in `scim-resource-changelog.xml` adds it.
 - Array order is kept. `roles` is already sorted. Multivalued extension
   attributes keep the order that Keycloak stores.
 
-**Who writes it.** Only a refresh writes the hash, of either kind:
+**Who writes it.** Only a refresh writes a hash, of either kind:
 
 - After a successful user replace in a refresh, the refresh writes the hash
   of the body it computed for that user.
@@ -122,11 +122,35 @@ SHA-256 in hex. A Liquibase change in `scim-resource-changelog.xml` adds it.
   same row would wait on that lock. The next role refresh sends the user
   once more.
 
-No other path writes or reads the hash: not event creates and replaces, not
-bulk creates, not deactivation, not reactivation. A user that one of these
-paths sends after the last refresh gets one extra request at the next role
-refresh. This costs one request per such user, and it keeps one simple rule:
-the hash is the body that the last refresh sent.
+**Who clears it.** An event path that sends an existing user sets that
+user's hash to null, in the event's own transaction, after a successful
+send. These paths are `ScimClient.replace` (user events and the group
+membership path) and the reactivation branch of `createApplied`. A new
+mapping row starts with a null hash, so creates and bulk creates need no
+clear.
+
+Clearing is required. Without it, an event can send a body the hash does
+not describe, and a later change can bring the user back to the body the
+hash does describe. Example:
+
+1. A role refresh sends roles `{a}` and stores the hash of that body.
+2. An admin grants a composite that contains `b`. The event sends
+   `{a, b}`.
+3. An admin removes `b` from the composite. The role refresh computes
+   `{a}`. Without the clear, this matches the stored hash, and the server
+   keeps `b` until the daily sync.
+
+A null hash never matches, so clearing can only cause one extra request. A
+race between an event and a refresh cannot make the stored hash describe a
+body the server does not have: the event's clear and the refresh's write
+each run after their own send, and a null left by either is safe.
+
+The refresh page does not lock mapping rows, because it writes hashes in
+their own short transactions. So the event's clear waits at most for one of
+those, and a refresh's hash write waits at most for the event's
+transaction.
+
+No path other than a refresh reads the hash.
 
 **With `user-patchOp=true`.** The refresh's replace sends a PATCH, as today.
 The hash still describes the body the refresh computed, so the next role
@@ -306,6 +330,8 @@ sync runs as normal. The docs state this.
 - A periodic refresh sends every user, and creates users with no mapping.
 - A refresh writes the hash after a successful replace, and does not write
   it after a failed one.
+- An event replace, and a reactivation through `createApplied`, clear the
+  hash after a successful send, and do not clear it after a failed one.
 - The scheduler state table: each transition in the two tables above,
   including a request during `RUNNING`, and a refused run.
 - A run for a component that was disabled during the delay stops and goes
@@ -316,8 +342,9 @@ sync runs as normal. The docs state this.
 1. Grant a group a marked role. Its members, including members of its
    subgroups, get a replace with the role. The admin request sends no user
    request.
-2. Remove a role from a composite. The users who held it through the
-   composite get a replace without it.
+2. Let a role refresh store a user's hash. Grant the user a composite
+   through an event, then remove a role from that composite. The user gets
+   a replace without the role. This is the sequence that needs the clear.
 3. Make 10 role edits in a row, with the delay set to 5 seconds. They
    produce one role refresh. Count refreshes through the scheduler, not
    through request timing.
@@ -352,10 +379,10 @@ to that, so the measured number is the one to publish. Record it in
   a deleted role or group, and listing the members of an LDAP group can
   import users. It would still need the full refresh as a fallback.
 - **Write the hash on every send path.** Event creates and replaces would
-  write it too, so fewer users would be sent twice. But an event and a
-  refresh can then race to write the hash, and the last writer wins even if
-  its body is older. Event paths would also wait on row locks that a refresh
-  page holds. Writing the hash only in a refresh avoids both problems.
+  write the hash of what they sent, so fewer users would be sent twice. But
+  an event and a refresh can then race to write the hash, and the last
+  writer wins even if its body is older. Clearing on the event path avoids
+  that, because a null hash is never wrong.
 
   One race stays, and it also exists in 1.x. A refresh can compute a user's
   body, an event can then send a newer body, and the refresh can then send

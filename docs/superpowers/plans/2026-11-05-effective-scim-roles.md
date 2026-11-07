@@ -746,6 +746,145 @@ git add src/main/java/sh/libre/scim/core/ScimClient.java src/main/java/sh/libre/
 git commit -m "feat: skip unchanged users in a role refresh and store body hashes"
 ```
 
+### Task 5b: Event paths clear the body hash
+
+**Files:**
+- Modify: `src/main/java/sh/libre/scim/jpa/ScimResource.java` (one named query)
+- Modify: `src/main/java/sh/libre/scim/core/ScimClient.java` (`replace`, `createApplied`, new `clearBodyHash`)
+- Test: `src/test/java/sh/libre/scim/core/ScimClientRoleRefreshTest.java`
+
+Why: an event can send a body that the stored hash does not describe. A
+later change can then bring the user back to the hashed body, and a role
+refresh would skip a user whose server copy is wrong. See the spec section
+"Who clears it". A null hash never matches, so clearing is always safe.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `ScimClientRoleRefreshTest`:
+
+```java
+    @Test
+    void anEventReplaceClearsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        doReturn(true).when(client).replaceBody(any(), any());
+        doNothing().when(client).clearBodyHash(any());
+
+        client.replace(UserAdapter::new, user);
+
+        verify(client).clearBodyHash(any());
+    }
+
+    @Test
+    void aFailedEventReplaceKeepsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        doReturn(false).when(client).replaceBody(any(), any());
+        doNothing().when(client).clearBodyHash(any());
+
+        client.replace(UserAdapter::new, user);
+
+        verify(client, never()).clearBodyHash(any());
+    }
+
+    @Test
+    void aReactivationThroughCreateClearsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        var tombstone = mapping(null);
+        tombstone.setDeactivatedAt(1L);
+        doReturn(true).when(client).replaceApplied(any());
+        doNothing().when(client).clearBodyHash(any());
+        var adapter = new UserAdapter(session, "comp-1");
+        adapter.apply(user);
+
+        client.createApplied(adapter);
+
+        verify(client).clearBodyHash(adapter);
+    }
+```
+
+Check how `replace` calls `replaceBody` today (two or three arguments) and
+stub that overload. Check how `createApplied` reads the tombstone
+(`adapter.query("findById", ...).getResultList()` and
+`isDeactivatedTombstone`), and make `mapping(...)` return a row that test
+treats as a tombstone.
+
+- [ ] **Step 2: Run the tests and see them fail**
+
+Run: `./gradlew test --tests 'sh.libre.scim.core.ScimClientRoleRefreshTest' -q`
+Expected: compile failure, no `clearBodyHash`.
+
+- [ ] **Step 3: Implement**
+
+In `ScimResource`, add a named query:
+
+```java
+                @NamedQuery(name = "clearBodyHash", query = "update ScimResource set bodyHash = null where realmId = :realmId and componentId = :componentId and type = :type and id = :id"),
+```
+
+In `ScimClient`, add:
+
+```java
+    /**
+     * Clears a user's body hash after an event sent that user. The event's
+     * body may differ from the one the hash describes, so the next role
+     * refresh must send the user. Runs in the caller's transaction. A null
+     * hash never matches, so a clear is always safe.
+     */
+    // package-private so a test can stub it
+    void clearBodyHash(Adapter<?, ?> adapter) {
+        if (!"User".equals(adapter.getType())) {
+            return;
+        }
+        getEM().createNamedQuery("clearBodyHash")
+            .setParameter("realmId", session.getContext().getRealm().getId())
+            .setParameter("componentId", model.getId())
+            .setParameter("type", adapter.getType())
+            .setParameter("id", adapter.getId())
+            .executeUpdate();
+    }
+```
+
+Change `replace` so it clears after a successful send:
+
+```java
+    public <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> void replace(
+            AdapterFactory<M, S, A> factory, M kcModel) {
+        var adapter = getAdapter(factory);
+        // The model is applied inside the span, so a fault there is traced and
+        // handled the way it always has been.
+        if (replaceBody(adapter, () -> adapter.apply(kcModel))) {
+            clearBodyHash(adapter);
+        }
+    }
+```
+
+In `createApplied`, change the reactivation branch:
+
+```java
+            if (isDeactivatedTombstone(existing)) {
+                LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
+                boolean pushed = replaceApplied(adapter);
+                if (pushed) {
+                    clearBodyHash(adapter);
+                }
+                return pushed;
+            }
+```
+
+Use the real field names for the component model and the session in
+`ScimClient` (`model`, `session`); check them before you paste.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `./gradlew test -q`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/main/java/sh/libre/scim/jpa/ScimResource.java src/main/java/sh/libre/scim/core/ScimClient.java src/test/java/sh/libre/scim/core/ScimClientRoleRefreshTest.java
+git commit -m "feat: clear the body hash when an event sends a user"
+```
+
 ### Task 6: `ScimSync.runRoleRefresh`
 
 **Files:**
@@ -2057,14 +2196,24 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
                 "a direct grant sends the user before any role refresh could"));
     }
 
+    /**
+     * The sequence that needs the event path to clear the hash: a refresh
+     * stores the hash of a body without the role, an event sends the role,
+     * and removing the role brings the body back to the hashed one.
+     */
     @Test
     void removingARoleFromACompositeRemovesItFromHolders() {
         var realm = newRealm();
+        String componentId = scimComponentId(realm);
         var inner = markedRole(realm, "inner");
         var outer = plainRole(realm, "outer");
         realm.roles().get("outer").addComposites(List.of(inner));
         String userId = createAdminUser(realm, "holder", "holder@test.local");
         awaitUserPostFor("holder");
+        // Let a role refresh store the hash of the body without "inner".
+        int before = roleRefreshLogLines(componentId);
+        plainRole(realm, "nudge");
+        await().atMost(30, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
         realm.users().get(userId).roles().realmLevel().add(List.of(outer));
         await().atMost(30, SECONDS).untilAsserted(() ->
             assertTrue(newestUserPutFor("holder").contains("inner"), "a direct grant sends the role at once"));
