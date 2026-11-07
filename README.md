@@ -48,7 +48,7 @@ What's added relative to upstream:
 
 | Component | Supported |
 | --- | --- |
-| Keycloak | 26.x (26.0.8 or later). Version 1.x of the plugin supports 25.x. |
+| Keycloak | 26.x (26.0.8 or later). Plugin version 1.8.0 and earlier support 25.x. |
 | Java (build + runtime) | 21 |
 | Kubernetes (for ImageVolume mounting) | 1.33+ (image volumes beta, on by default) |
 | Architectures (OCI image) | linux/amd64, linux/arm64 |

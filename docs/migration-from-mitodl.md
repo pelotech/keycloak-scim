@@ -25,8 +25,8 @@ you already rely on.
 - **JPA Entity Provider id.** `scim-resource`, used internally for ID
   mapping persistence, is the same.
 - **Java / Keycloak versions.** Both forks use Java 21. Upstream
-  targets Keycloak 25.x. This fork targets Keycloak 26.x from version
-  2.0. Version 1.x supports 25.x. This fork's CI matrix runs the full
+  targets Keycloak 25.x. This fork targets Keycloak 26.x after 1.8.0.
+  Version 1.8.0 and earlier support 25.x. This fork's CI matrix runs the full
   integration suite against Keycloak 26.0.8 and 26.7.4 on every push.
 
 ## What's added
