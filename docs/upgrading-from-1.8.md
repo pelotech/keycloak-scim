@@ -1,15 +1,15 @@
-# Upgrading to 2.0
+# Upgrading from 1.8
 
-Version 2.0 changes some defaults and some wire formats. Read this page
-before you upgrade from 1.x. Each section says what changed, who it
-affects, and how to keep the 1.x behavior.
+The releases after 1.8.0 change some defaults and some wire formats. Read
+this page before you upgrade from 1.8.0 or earlier. Each section says what
+changed, who it affects, and how to keep the 1.8.0 behavior.
 
 ## Before you upgrade
 
 1. Make sure that you run Keycloak 26.0.8 or later. See
    [Keycloak version](#keycloak-version).
 2. Find the settings that each SCIM provider component stores. Two
-   defaults change in 2.0. A component that stores a value keeps it. A
+   defaults change after 1.8.0. A component that stores a value keeps it. A
    component that does not store a value gets the new default.
 
    ```sh
@@ -21,20 +21,20 @@ affects, and how to keep the 1.x behavior.
            + " user-patchOp=\((.config["user-patchOp"] // ["(unset)"])[0])"'
    ```
 
-   A value of `(unset)` means that the component gets the new 2.0
+   A value of `(unset)` means that the component gets the new
    default for that setting.
 3. Read each section below for the changes that apply to your
    components and your SCIM server.
 
-## Breaking changes
+## Changes in behavior
 
 ### Keycloak version
 
 **What changed.** The plugin requires Keycloak 26.0.8 or later. It no
 longer supports Keycloak 25.
 
-**To keep the 1.x behavior.** If you run Keycloak 25, stay on plugin
-version 1.x.
+**To keep the 1.8.0 behavior.** If you run Keycloak 25, stay on plugin
+version 1.8.0.
 
 ### `delete-mode` defaults to `deactivate`
 
@@ -46,7 +46,7 @@ version 1.x.
   deleted.
 - Only the exact value `delete` deletes users. The plugin reads any
   other value as `deactivate`, and logs a warning once for each
-  component. In 1.x, the plugin read any value other than `deactivate`
+  component. In 1.8.0, the plugin read any value other than `deactivate`
   as `delete`.
 - The admin console and the admin REST API now reject a `delete-mode`
   value other than `delete` or `deactivate`. A component that stores a
@@ -70,7 +70,7 @@ value other than `delete` or `deactivate`, in the check above.
 
 See [Deprovisioning mode](configuration.md#deprovisioning-mode).
 
-**To keep the 1.x behavior.** Set `delete-mode=delete`.
+**To keep the 1.8.0 behavior.** Set `delete-mode=delete`.
 
 ### `group-patchOp` defaults to `true`
 
@@ -84,7 +84,7 @@ PATCH for groups:
   `members` with one member. A removal uses `op: remove` on the path
   `members[value eq "<id>"]`.
 - Group membership from a federated (LDAP) provider is now sent. In
-  1.x, a component with the default setting skipped it.
+  1.8.0, a component with the default setting skipped it.
 
 **Who it affects.** Components that show `group-patchOp=(unset)` in the
 check above.
@@ -92,14 +92,14 @@ check above.
 **What to check.** Your SCIM server must support PATCH on `/Groups`,
 including the filtered `remove` path above.
 
-**To keep the 1.x behavior.** Set `group-patchOp=false`. With `false`,
+**To keep the 1.8.0 behavior.** Set `group-patchOp=false`. With `false`,
 the plugin does not send group membership from a federated provider.
 
 ### Single-valued extension attributes are sent as scalars
 
 **What changed.** With `user-patchOp=true`, the plugin sends a
 single-valued extension attribute as a scalar, for example
-`"value": true` or `"value": "Eng"`. In 1.x, it sent a one-element
+`"value": true` or `"value": "Eng"`. In 1.8.0, it sent a one-element
 array, for example `"value": [true]`. A multivalued attribute is still
 sent as one array.
 
@@ -109,18 +109,18 @@ one row in `user-extension-mappings`.
 **What to check.** Your SCIM server must accept a scalar value for a
 single-valued attribute, as RFC 7643 defines it.
 
-**To keep the 1.x behavior.** There is no setting for this.
+**To keep the 1.8.0 behavior.** There is no setting for this.
 
 ### A user named `admin` is included in `sync-refresh`
 
-**What changed.** In 1.x, `sync-refresh` skipped any user whose
-username is `admin`. Create and update events still sent that user. In
-2.0, `sync-refresh` sends that user like any other user.
+**What changed.** In 1.8.0, `sync-refresh` skipped any user whose
+username is `admin`. Create and update events still sent that user. Now,
+`sync-refresh` sends that user like any other user.
 
 **Who it affects.** Realms that have a user named `admin` and a
 component with `sync-refresh=true`.
 
-**To keep the 1.x behavior.** Set the user attribute `scim-skip` to
+**To keep the 1.8.0 behavior.** Set the user attribute `scim-skip` to
 `"true"` on that user. This keeps the user off the SCIM server on every
 path.
 
@@ -132,15 +132,15 @@ plugin sends.
 - **User PATCH sends more attributes.** With `user-patchOp=true`, a user
   PATCH now replaces the same attributes as a user PUT: `externalId`,
   `userName`, `displayName`, `name.givenName`, `name.familyName`,
-  `emails`, `active`, and the extension mappings. In 1.x, it did not
+  `emails`, `active`, and the extension mappings. In 1.8.0, it did not
   send `externalId`, `name`, or `emails`. An attribute with no value is
   left out. `roles` is still sent only in a PUT. See
   [SCIM roles](configuration.md#scim-roles).
-- **User PATCH takes `userName` from `username-source`.** In 1.x, a
+- **User PATCH takes `userName` from `username-source`.** In 1.8.0, a
   PATCH always used the Keycloak username, even with
   `username-source=email`.
-- **PATCH sends `active` as a JSON boolean.** In 1.x, it sent the
+- **PATCH sends `active` as a JSON boolean.** In 1.8.0, it sent the
   string `"true"` or `"false"`.
-- **A 400 on an update no longer re-creates the resource.** In 1.x, a
-  404 or a 400 on an update made the plugin send a POST. In 2.0, only a
+- **A 400 on an update no longer re-creates the resource.** In 1.8.0, a
+  404 or a 400 on an update made the plugin send a POST. Now, only a
   404 does. A 400 means that the server rejected the request body.
