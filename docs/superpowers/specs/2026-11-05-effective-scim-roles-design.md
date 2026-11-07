@@ -53,6 +53,8 @@ A change to one user still sends that user at once, as today.
 - Changes that make no admin event are not detected at once:
   - changes that come from LDAP, through LDAP group or role mappers,
   - roles that an identity provider mapper grants at login,
+  - a client deleted through dynamic client registration, which makes a
+    user event, not an admin event,
   - realm imports and partial imports,
   - direct database edits.
 
@@ -303,7 +305,8 @@ it did not send keep their old hash, so the next role refresh or periodic
 sync sends them.
 
 `ScimSync` reports the result to the scheduler as one of `FINISHED`,
-`REFUSED`, or `STOPPED`. Today a refused run returns
+`REFUSED`, or `STOPPED`. The scheduler adds `SKIPPED` for a component that
+is gone or turned off, which always goes to `IDLE`. Today a refused run returns
 `SynchronizationResult.ignored()`. The new result type keeps that for the
 `ImportSynchronization.sync` caller.
 

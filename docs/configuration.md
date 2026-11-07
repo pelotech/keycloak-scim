@@ -214,8 +214,8 @@ bad value.
   other kind is a change that makes no admin event. See
   [SCIM roles](#scim-roles).
 - A periodic or manual sync sends every user. It also undoes changes that
-  someone made directly on the SCIM server. It stores the hash of each
-  body that it sends.
+  someone made directly on the SCIM server. It stores the hash of the
+  body for each user that it replaces.
 - A role refresh holds the lease of the component while it runs. If it
   holds the lease when the periodic sync starts, Keycloak skips that
   periodic sync until its next period.
@@ -401,6 +401,10 @@ A role refresh works as follows:
 - One thread on each node runs the refreshes for all components. The
   refresh uses the same page settings, error handling, and lease as a
   periodic sync.
+- It skips disabled users, as a periodic sync does.
+- A refresh that stops on an error does not try again on its own. The
+  users it did not reach wait for the next role refresh or the next
+  periodic sync.
 
 For the time a role refresh takes, see
 [Role refresh](performance.md#role-refresh) in the performance notes.
@@ -409,6 +413,7 @@ These changes make no admin event:
 
 - LDAP mappers
 - identity provider mappers
+- a client deleted through dynamic client registration
 - realm imports and partial imports
 - direct database edits
 
@@ -816,6 +821,7 @@ runtime. Set them with `-D…` JVM flags on the Keycloak process.
 | `scim.tls.insecureHostnameVerification` | `false` | `ScimClient` | When `true`, disables TLS hostname verification on outbound SCIM requests. The plugin then accepts any certificate the SCIM server presents, regardless of CN/SAN. Use this only as an escape hatch for development environments, internal CAs with CN drift, or explicitly-trusted self-signed setups. **Leave `false` in production.** With verification off, an attacker can position itself between the plugin and the SCIM server. It can then present a valid certificate for any domain, impersonate the SCIM server, and harvest bearer tokens. |
 | `scim.sync.lease.simulateCrash` | `false` | `ScimSync` | Test aid. When `true`, a sync run takes its lease and then behaves as a crashed holder: no heartbeat, no release. Later syncs of that component are refused for 120 seconds, and a run longer than that can overlap the next one. The plugin logs a warning on every sync while it is set. Leave it unset in production. |
 | `keycloak.image` | `quay.io/keycloak/keycloak:25.0.6` | integration tests | Overrides the Keycloak container image the test harness uses. The CI matrix uses this to verify both 25.x and 26.x. Not relevant to production. |
+| `it.roles.refreshDelaySeconds` | `86400` (`1` in `performanceTest`) | integration and performance tests | Sets `scim.roles.refreshDelaySeconds` on the shared test Keycloak. The long default keeps a role refresh from one test out of later tests. Not relevant to production. |
 
 ## What's NOT configurable (by design)
 
