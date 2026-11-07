@@ -73,7 +73,7 @@ reconciler) instead marks the remote user inactive and keeps the local
 mapping.
 
 With `delete`, the plugin sends `DELETE /Users/{id}` and drops the local
-mapping. This was the default before version 2.0.
+mapping. This was the default in version 1.8.0 and earlier.
 
 By default (`user-patchOp=false`), deactivation sends a `GET /Users/{id}`,
 then a `PUT /Users/{id}` of the fetched resource with `active: false`. If
