@@ -44,7 +44,7 @@ final class ScimBodyHash {
      * A copy with object keys sorted at every level. Jackson's ObjectNode keeps
      * insertion order, so the sort is done here, not through a mapper setting.
      */
-    static JsonNode canonical(JsonNode node) {
+    private static JsonNode canonical(JsonNode node) {
         if (node.isObject()) {
             var names = new ArrayList<String>();
             node.fieldNames().forEachRemaining(names::add);

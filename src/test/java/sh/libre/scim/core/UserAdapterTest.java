@@ -272,9 +272,8 @@ class UserAdapterTest {
     }
 
     /**
-     * Roles reach SCIM from composites, parent groups, and client roles. A
-     * realm role and a client role with the same name appear once. Unmarked
-     * roles stay out. The list is sorted.
+     * Roles reach SCIM from composites and parent groups. Unmarked roles stay
+     * out. Two roles with the same name appear once. The list is sorted.
      */
     @Test
     void applySendsEffectiveMarkedRoles() {
