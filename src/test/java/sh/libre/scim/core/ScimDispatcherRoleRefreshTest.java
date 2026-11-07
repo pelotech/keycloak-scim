@@ -89,6 +89,16 @@ class ScimDispatcherRoleRefreshTest {
     }
 
     @Test
+    void withNoMatchingComponentNothingIsEnlisted() {
+        var realm = session.getContext().getRealm();
+        when(realm.getComponentsStream()).thenAnswer(i -> Stream.of(component("off", "false")));
+
+        new ScimDispatcher(session).requestRoleRefresh();
+
+        verify(transactions, never()).enlistAfterCompletion(any());
+    }
+
+    @Test
     void withNoSchedulerNothingIsEnlisted() {
         RoleRefreshScheduler.stop();
 

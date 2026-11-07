@@ -16,9 +16,16 @@ import org.keycloak.models.utils.KeycloakModelUtils;
 import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 /**
- * Runs at most one role refresh of each component at a time on this node,
- * a short delay after the last request. Several requests in a row become one
- * refresh. A request during a refresh causes one more refresh after it.
+ * Runs at most one role refresh of each component at a time on this node.
+ * A run starts a short delay after the first request that finds the component
+ * idle. The delay does not reset. Later requests before the run join it, so
+ * several requests become one refresh. A request during a refresh causes one
+ * more refresh after it.
+ *
+ * <p>One thread serves every component on the node. A long refresh of one
+ * component delays the others and their retries. This is on purpose. It keeps
+ * the load on the database and on the SCIM servers bounded, and a realm has
+ * few SCIM components.
  *
  * <p>The state is in memory. A request that a stopped node never ran waits for
  * the next periodic sync. See the effective roles design.
@@ -89,8 +96,10 @@ public final class RoleRefreshScheduler {
         }
     }
 
-    // package-private: tests install a scheduler with fake parts
+    // package-private: tests install a scheduler with fake parts.
+    // It stops the old scheduler first, so the old one is shut down.
     static synchronized void install(RoleRefreshScheduler scheduler) {
+        stop();
         current = scheduler;
     }
 
@@ -158,8 +167,11 @@ public final class RoleRefreshScheduler {
         RoleRefreshResult result = RoleRefreshResult.STOPPED;
         try {
             result = runner.run(realmId, componentId, () -> shutdown);
-        } catch (RuntimeException e) {
-            LOGGER.errorf(e, "SCIM role refresh failed for component %s", componentId);
+        } catch (Throwable t) {
+            LOGGER.errorf(t, "SCIM role refresh failed for component %s", componentId);
+            if (t instanceof Error error) {
+                throw error;
+            }
         } finally {
             // In finally, so even an Error leaves the component able to
             // refresh again. Without it, the state would stay RUNNING.
@@ -185,16 +197,24 @@ public final class RoleRefreshScheduler {
     }
 
     /** Reads the component again, then runs the refresh if it is still on. */
-    private static RoleRefreshResult runForComponent(KeycloakSessionFactory sessionFactory, String realmId,
-                                                     String componentId, BooleanSupplier isShutdown) {
-        ComponentModel model = KeycloakModelUtils.runJobInTransactionWithResult(sessionFactory, session -> {
-            var realm = session.realms().getRealm(realmId);
-            if (realm == null) {
-                return null;
-            }
-            var component = realm.getComponent(componentId);
-            return refreshable(component) ? component : null;
-        });
+    // package-private for tests
+    static RoleRefreshResult runForComponent(KeycloakSessionFactory sessionFactory, String realmId,
+                                             String componentId, BooleanSupplier isShutdown) {
+        ComponentModel model;
+        try {
+            model = KeycloakModelUtils.runJobInTransactionWithResult(sessionFactory, session -> {
+                var realm = session.realms().getRealm(realmId);
+                if (realm == null) {
+                    return null;
+                }
+                var component = realm.getComponent(componentId);
+                return refreshable(component) ? component : null;
+            });
+        } catch (RuntimeException e) {
+            // Nothing was read or sent yet, so try again, as for a lease error.
+            LOGGER.warnf(e, "SCIM role refresh could not read component %s, will retry", componentId);
+            return RoleRefreshResult.REFUSED;
+        }
         if (model == null) {
             return RoleRefreshResult.SKIPPED;
         }

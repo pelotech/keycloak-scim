@@ -351,9 +351,7 @@ public class ScimDispatcher implements AutoCloseable {
         var realm = session.getContext().getRealm();
         var realmId = realm.getId();
         List<String> componentIds = realm.getComponentsStream()
-            .filter(m -> ScimStorageProviderFactory.ID.equals(m.getProviderId())
-                && m.get("enabled", true)
-                && m.get("propagation-user", false))
+            .filter(RoleRefreshScheduler::refreshable)
             .map(ComponentModel::getId)
             .toList();
         if (componentIds.isEmpty()) {

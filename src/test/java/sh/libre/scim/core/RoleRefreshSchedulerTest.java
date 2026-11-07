@@ -1,6 +1,7 @@
 package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -8,6 +9,9 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.keycloak.common.util.MultivaluedHashMap;
+import org.keycloak.component.ComponentModel;
+import org.keycloak.models.KeycloakSessionFactory;
 
 class RoleRefreshSchedulerTest {
 
@@ -28,6 +32,20 @@ class RoleRefreshSchedulerTest {
 
     private void runNext() {
         scheduled.pop().run();
+    }
+
+    private static ComponentModel component(String providerId, String enabled, String propagationUser) {
+        var m = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        if (enabled != null) {
+            config.putSingle("enabled", enabled);
+        }
+        if (propagationUser != null) {
+            config.putSingle("propagation-user", propagationUser);
+        }
+        m.setConfig(config);
+        m.setProviderId(providerId);
+        return m;
     }
 
     @Test
@@ -130,21 +148,6 @@ class RoleRefreshSchedulerTest {
         assertThat(scheduled).hasSize(2);
     }
 
-    private static org.keycloak.component.ComponentModel component(String providerId, String enabled,
-                                                                   String propagationUser) {
-        var m = new org.keycloak.component.ComponentModel();
-        var config = new org.keycloak.common.util.MultivaluedHashMap<String, String>();
-        if (enabled != null) {
-            config.putSingle("enabled", enabled);
-        }
-        if (propagationUser != null) {
-            config.putSingle("propagation-user", propagationUser);
-        }
-        m.setConfig(config);
-        m.setProviderId(providerId);
-        return m;
-    }
-
     @Test
     void onlyAnEnabledScimComponentWithUserPropagationIsRefreshable() {
         assertThat(RoleRefreshScheduler.refreshable(component("scim", null, "true"))).isTrue();
@@ -179,5 +182,38 @@ class RoleRefreshSchedulerTest {
         scheduler.request("r", "d");
 
         assertThat(scheduled).isEmpty();
+        assertThat(scheduler.state("c")).isNull();
+        assertThat(scheduler.state("d")).isNull();
+    }
+
+    @Test
+    void aSecondStartKeepsTheSameInstanceAndStopClearsIt() {
+        var factory = mock(KeycloakSessionFactory.class);
+        try {
+            RoleRefreshScheduler.start(factory);
+            var first = RoleRefreshScheduler.current();
+            RoleRefreshScheduler.start(factory);
+
+            assertThat(first).isNotNull();
+            assertThat(RoleRefreshScheduler.current()).isSameAs(first);
+
+            RoleRefreshScheduler.stop();
+
+            assertThat(RoleRefreshScheduler.current()).isNull();
+            first.request("r", "c");
+            assertThat(first.state("c")).isNull();
+        } finally {
+            RoleRefreshScheduler.stop();
+        }
+    }
+
+    @Test
+    void aFailureToReadTheComponentIsRefusedSoItRetries() {
+        // A mock factory gives a null session, so the read throws.
+        var factory = mock(KeycloakSessionFactory.class);
+
+        var result = RoleRefreshScheduler.runForComponent(factory, "r", "c", () -> false);
+
+        assertThat(result).isEqualTo(RoleRefreshResult.REFUSED);
     }
 }
