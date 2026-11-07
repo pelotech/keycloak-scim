@@ -164,6 +164,11 @@ row and needs the first. The database cannot see this cycle, because the
 page thread waits in Java. It needs two rare events at once, so it is
 accepted. A database lock timeout ends it.
 
+The clear runs in the admin transaction. If that transaction rolls back
+after a successful send, the server keeps the event's body and the old hash
+stays. `rollback-strategy` rolls back only after a later failed send in the
+same request, so this is rare. The daily periodic sync corrects it.
+
 No path other than a refresh reads the hash.
 
 **With `user-patchOp=true`.** The refresh's replace sends a PATCH, as today.
