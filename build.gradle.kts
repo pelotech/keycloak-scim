@@ -127,6 +127,8 @@ tasks.register<Test>("integrationTest") {
     forkEvery = 1
     // Forward the Keycloak image override (used by the CI matrix) and
     // any other -D properties whose names we deliberately accept.
+    // A short it.roles.refreshDelaySeconds lets role refreshes leak between
+    // test classes on the shared container. Use it only for debugging.
     listOf("keycloak.image", "it.roles.refreshDelaySeconds").forEach { prop ->
         System.getProperty(prop)?.let { systemProperty(prop, it) }
     }

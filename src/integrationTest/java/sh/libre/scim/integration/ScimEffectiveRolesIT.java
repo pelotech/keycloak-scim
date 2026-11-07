@@ -1,11 +1,14 @@
 package sh.libre.scim.integration;
 
+import static com.github.tomakehurst.wiremock.client.WireMock.containing;
 import static com.github.tomakehurst.wiremock.client.WireMock.putRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathMatching;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import dasniko.testcontainers.keycloak.KeycloakContainer;
 import java.util.List;
@@ -109,6 +112,21 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         return count;
     }
 
+    /**
+     * Waits until role refreshes have ended and no more are pending. A refresh
+     * runs again when a request came during it, so wait for a quiet period.
+     */
+    private static void awaitRefreshesSettled(String componentId, int before) throws InterruptedException {
+        await().atMost(60, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
+        while (true) {
+            int count = roleRefreshLogLines(componentId);
+            Thread.sleep((DELAY_SECONDS + 2) * 1000L);
+            if (roleRefreshLogLines(componentId) == count) {
+                return;
+            }
+        }
+    }
+
     private static String scimComponentId(RealmResource realm) {
         return realm.components().query(realm.toRepresentation().getId(),
                 "org.keycloak.storage.UserStorageProvider").stream()
@@ -137,7 +155,7 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         realm.groups().group(parentId).roles().realmLevel().add(List.of(role));
         // The delay is 5 seconds, so a PUT that names the role right after
         // the admin call returns came from inside the admin request.
-        assertTrue(!newestUserPutFor("sub-member").contains("from-parent"),
+        assertFalse(newestUserPutFor("sub-member").contains("from-parent"),
             "the admin request itself sends no user");
 
         await().atMost(30, SECONDS).untilAsserted(() ->
@@ -170,18 +188,18 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
      * and removing the role brings the body back to the hashed one.
      */
     @Test
-    void removingARoleFromACompositeRemovesItFromHolders() {
+    void removingARoleFromACompositeRemovesItFromHolders() throws Exception {
         var realm = newRealm();
         String componentId = scimComponentId(realm);
+        // The user exists before any role event, so the refresh below covers it.
+        String userId = createAdminUser(realm, "holder", "holder@test.local");
+        awaitUserPostFor("holder");
+        int before = roleRefreshLogLines(componentId);
         var inner = markedRole(realm, "inner");
         var outer = plainRole(realm, "outer");
         realm.roles().get("outer").addComposites(List.of(inner));
-        String userId = createAdminUser(realm, "holder", "holder@test.local");
-        awaitUserPostFor("holder");
-        // Let a role refresh store the hash of the body without "inner".
-        int before = roleRefreshLogLines(componentId);
-        plainRole(realm, "nudge");
-        await().atMost(30, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
+        // A refresh stores the hash of the body without "inner", and none is pending at the grant.
+        awaitRefreshesSettled(componentId, before);
         realm.users().get(userId).roles().realmLevel().add(List.of(outer));
         await().atMost(30, SECONDS).untilAsserted(() ->
             assertTrue(newestUserPutFor("holder").contains("inner"), "a direct grant sends the role at once"));
@@ -189,7 +207,7 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         realm.roles().get("outer").deleteComposites(List.of(inner));
 
         await().atMost(30, SECONDS).untilAsserted(() ->
-            assertTrue(!newestUserPutFor("holder").contains("inner"),
+            assertFalse(newestUserPutFor("holder").contains("inner"),
                 "the holder loses the role that left the composite"));
     }
 
@@ -199,9 +217,14 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         String componentId = scimComponentId(realm);
         int before = roleRefreshLogLines(componentId);
 
+        long start = System.nanoTime();
         for (int i = 0; i < 10; i++) {
             plainRole(realm, "burst-" + i);
         }
+        long elapsedMillis = (System.nanoTime() - start) / 1_000_000L;
+        // On a slow runner the edits can span the delay. Then two refreshes are correct.
+        assumeTrue(elapsedMillis < DELAY_SECONDS * 1000L,
+            "ten edits took " + elapsedMillis + " ms, longer than the delay");
 
         await().atMost(30, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
         Thread.sleep((DELAY_SECONDS + 3) * 1000L);
@@ -209,11 +232,16 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
     }
 
     @Test
-    void movingAGroupGivesAndTakesItsParentsRole() {
+    void movingAGroupGivesAndTakesItsParentsRole() throws Exception {
         var realm = newRealm();
+        String componentId = scimComponentId(realm);
+        int before = roleRefreshLogLines(componentId);
         var role = markedRole(realm, "via-move");
         String parentId = createGroup(realm, "move-parent");
         realm.groups().group(parentId).roles().realmLevel().add(List.of(role));
+        // No refresh may be pending when the move starts. Otherwise it could
+        // send the role even if the move requested nothing.
+        awaitRefreshesSettled(componentId, before);
         String movedId = createGroup(realm, "moved");
         String userId = createAdminUser(realm, "mover", "mover@test.local");
         awaitUserPostFor("mover");
@@ -226,7 +254,7 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
 
         realm.groups().add(realm.groups().group(movedId).toRepresentation()).close();
         await().atMost(30, SECONDS).untilAsserted(() ->
-            assertTrue(!newestUserPutFor("mover").contains("via-move"), "a move to the top level takes it away"));
+            assertFalse(newestUserPutFor("mover").contains("via-move"), "a move to the top level takes it away"));
     }
 
     @Test
@@ -237,12 +265,15 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
         realm.components().component(scim.getId()).update(scim);
         createAdminUser(realm, "steady", "steady@test.local");
         awaitUserPostFor("steady");
-        int before = wireMock.countRequestsMatching(putRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
+        // Count only the PUTs that name this user. Other tests' users are not in this realm.
+        var steadyPut = putRequestedFor(urlPathMatching("/Users/.*"))
+            .withRequestBody(containing("\"steady\""));
+        int before = wireMock.countRequestsMatching(steadyPut.build()).getCount();
 
         realm.userStorage().syncUsers(scim.getId(), "triggerFullSync");
         realm.userStorage().syncUsers(scim.getId(), "triggerFullSync");
 
-        int after = wireMock.countRequestsMatching(putRequestedFor(urlPathMatching("/Users/.*")).build()).getCount();
-        assertTrue(after - before >= 2, "each manual sync sends the unchanged user");
+        int after = wireMock.countRequestsMatching(steadyPut.build()).getCount();
+        assertEquals(2, after - before, "each manual sync sends the unchanged user once");
     }
 }
