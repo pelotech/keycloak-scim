@@ -65,7 +65,7 @@ A change to one user still sends that user at once, as today.
   [Alternatives considered](#alternatives-considered).
 - An existing bug is out of scope: for a subgroup create, the event path is
   `groups/{parentId}/children`, so the existing group create handles the
-  parent, not the new subgroup. It is tracked separately.
+  parent, not the new subgroup. It is not tracked yet.
 
 ## Design
 
@@ -387,7 +387,7 @@ request. Also time a manual sync, which now writes a hash for each user.
 Measured so far, at 1,000 and 5,000 users: see `docs/performance.md`,
 "Role refresh". A run at 10,000 users is blocked today: a manual sync
 aborts after about 6,300 updates with `NoHttpResponseException`, on the
-code before this feature too. That abort is tracked separately.
+code before this feature too. That abort is not tracked yet.
 
 ## Alternatives considered
 

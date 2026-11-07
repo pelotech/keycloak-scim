@@ -497,15 +497,15 @@ it maps 2 more users than the count in the first column.
 | 5,000 | 4,411 ms | 0 | 10,098 ms |
 
 The test counts the PUT requests in WireMock before and after the refresh.
-The count did not change. The test also checks that the manual sync replaced
-each mapped user once and reported no failure. So every mapped user had a
+The count did not change. The test also checks that the manual sync sent
+one PUT for each mapped user and reported no failure. So every mapped user had a
 hash before the refresh ran.
 
 The manual sync sends every user once. With this feature it also writes one
 body hash for each user, in its own short transaction. To see what this
 feature adds to a manual sync, the same steps ran without the role refresh
 on the code before this feature (the 1.8.0 release plus the earlier 2.0
-fixes). That baseline used a temporary copy of this test.
+changes). That baseline used a temporary copy of this test.
 It compares the whole feature, not only the hash write.
 
 | Users | Manual sync, before this feature | Manual sync, with this feature |
