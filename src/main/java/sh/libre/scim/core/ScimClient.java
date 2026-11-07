@@ -401,7 +401,11 @@ public class ScimClient {
         if (!existing.isEmpty()) {
             if (isDeactivatedTombstone(existing)) {
                 LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
-                return replaceApplied(adapter);
+                boolean pushed = replaceApplied(adapter);
+                if (pushed) {
+                    clearBodyHash(adapter);
+                }
+                return pushed;
             }
             return false;
         }
@@ -589,7 +593,28 @@ public class ScimClient {
         var adapter = getAdapter(factory);
         // The model is applied inside the span, so a fault there is traced and
         // handled the way it always has been.
-        replaceBody(adapter, () -> adapter.apply(kcModel));
+        if (replaceBody(adapter, () -> adapter.apply(kcModel))) {
+            clearBodyHash(adapter);
+        }
+    }
+
+    /**
+     * Clears a user's body hash after an event sent that user. The event's
+     * body may differ from the one the hash describes, so the next role
+     * refresh must send the user. Runs in the caller's transaction. A null
+     * hash never matches, so a clear is always safe.
+     */
+    // package-private so a test can stub it
+    void clearBodyHash(Adapter<?, ?> adapter) {
+        if (!"User".equals(adapter.getType())) {
+            return;
+        }
+        getEM().createNamedQuery("clearBodyHash")
+            .setParameter("realmId", session.getContext().getRealm().getId())
+            .setParameter("componentId", model.getId())
+            .setParameter("type", adapter.getType())
+            .setParameter("id", adapter.getId())
+            .executeUpdate();
     }
 
     /**

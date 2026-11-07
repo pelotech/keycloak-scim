@@ -187,4 +187,41 @@ class ScimClientRoleRefreshTest {
 
         verify(client, never()).writeBodyHash(any(), anyString(), anyString());
     }
+
+    @Test
+    void anEventReplaceClearsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        doReturn(true).when(client).replaceBody(any(), any());
+        doNothing().when(client).clearBodyHash(any());
+
+        client.replace(UserAdapter::new, user);
+
+        verify(client).clearBodyHash(any());
+    }
+
+    @Test
+    void aFailedEventReplaceKeepsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        doReturn(false).when(client).replaceBody(any(), any());
+        doNothing().when(client).clearBodyHash(any());
+
+        client.replace(UserAdapter::new, user);
+
+        verify(client, never()).clearBodyHash(any());
+    }
+
+    @Test
+    void aReactivationThroughCreateClearsTheHash() {
+        var client = spy(new ScimClient(model, session));
+        var tombstone = mapping(null);
+        tombstone.setDeactivatedAt(1L);
+        doReturn(true).when(client).replaceApplied(any());
+        doNothing().when(client).clearBodyHash(any());
+        var adapter = new UserAdapter(session, "comp-1");
+        adapter.apply(user);
+
+        client.createApplied(adapter);
+
+        verify(client).clearBodyHash(adapter);
+    }
 }

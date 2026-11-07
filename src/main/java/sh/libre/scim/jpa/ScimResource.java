@@ -16,7 +16,8 @@ import jakarta.persistence.Table;
                 @NamedQuery(name = "findByExternalId", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id"),
                 @NamedQuery(name = "findByComponentAndType", query = "from ScimResource where realmId = :realmId and componentId = :componentId and type = :type"),
                 @NamedQuery(name = "deleteDeactivatedByExternalId", query = "delete from ScimResource where realmId = :realmId and componentId = :componentId and type = :type and externalId = :id and deactivatedAt is not null"),
-                @NamedQuery(name = "updateBodyHash", query = "update ScimResource set bodyHash = :hash where realmId = :realmId and componentId = :componentId and type = :type and id = :id and externalId = :externalId")})
+                @NamedQuery(name = "updateBodyHash", query = "update ScimResource set bodyHash = :hash where realmId = :realmId and componentId = :componentId and type = :type and id = :id and externalId = :externalId"),
+                @NamedQuery(name = "clearBodyHash", query = "update ScimResource set bodyHash = null where realmId = :realmId and componentId = :componentId and type = :type and id = :id")})
 public class ScimResource {
         @Id
         @Column(name = "ID", nullable = false)
