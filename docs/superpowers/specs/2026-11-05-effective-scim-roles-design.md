@@ -252,7 +252,10 @@ visible.
 `RoleRefreshScheduler` is one object per node. `ScimEventListenerProviderFactory`
 creates it in `postInit`, which receives the `KeycloakSessionFactory` that a
 run needs, and shuts it down in `close`. It owns a single-thread scheduled
-executor.
+executor. One thread serves every component on the node, so a long refresh
+of one component delays the others and their retries. This is on purpose:
+it keeps the load on the database and on the SCIM servers bounded, and a
+realm has few SCIM components.
 
 For each component id, it keeps one state, changed atomically
 (`ConcurrentHashMap.compute`):
@@ -287,7 +290,7 @@ For each component id, it keeps one state, changed atomically
 | Run result | State was `RUNNING` | State was `RUNNING_AGAIN` |
 | --- | --- | --- |
 | Finished, with or without per-user failures | `IDLE` | `SCHEDULED`, and schedule a run after the delay. |
-| Refused: the lease is held by another run, or the lease could not be taken because of an error | `SCHEDULED`, and schedule a run after the delay. | `SCHEDULED`, and schedule a run after the delay. |
+| Refused: the lease is held by another run, the lease could not be taken because of an error, or the component could not be read because of an error | `SCHEDULED`, and schedule a run after the delay. | `SCHEDULED`, and schedule a run after the delay. |
 | Stopped early: any run that did not complete (`outcome.completed()` is false), including stop-on-error, a throttle streak, a failed page transaction, a lost lease, or shutdown | `IDLE` | `SCHEDULED`, and schedule a run after the delay. On shutdown, nothing is scheduled. |
 
 So a newer request is never dropped while the node runs. A refused run tries
