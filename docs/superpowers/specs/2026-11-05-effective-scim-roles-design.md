@@ -110,7 +110,10 @@ SHA-256 in hex. A Liquibase change in `scim-resource-changelog.xml` adds it.
 **Who writes it.** Only a refresh writes a hash, of either kind:
 
 - After a successful user replace in a refresh, the refresh writes the hash
-  of the body it computed for that user.
+  of the body it computed for that user. The write is a compare-and-set:
+  it changes the row only if the stored value is still the one the refresh
+  read before it sent. If an event cleared the hash in between, the write
+  changes nothing.
 - The write runs in its own short transaction, right after the request. So
   the refresh page does not hold a lock on the mapping row while it pushes
   other users. An event that deletes or deactivates the same user waits at
@@ -122,9 +125,12 @@ SHA-256 in hex. A Liquibase change in `scim-resource-changelog.xml` adds it.
   same row would wait on that lock. The next role refresh sends the user
   once more.
 
-**Who clears it.** An event path that sends an existing user sets that
-user's hash to null, in the event's own transaction, after a successful
-send. These paths are `ScimClient.replace` (user events and the group
+**Who clears it.** An event path that sends an existing user replaces that
+user's hash with a fresh marker, `cleared-` followed by a random UUID, in
+the event's own transaction, after a successful send. The marker is set on
+the managed mapping rows, so a later flush in the same transaction cannot
+put the old value back. The marker is never a hex hash, so it never
+matches. These paths are `ScimClient.replace` (user events and the group
 membership path) and the reactivation branch of `createApplied`. A new
 mapping row starts with a null hash, so creates and bulk creates need no
 clear.
@@ -140,15 +146,23 @@ hash does describe. Example:
    `{a}`. Without the clear, this matches the stored hash, and the server
    keeps `b` until the daily sync.
 
-A null hash never matches, so clearing can only cause one extra request. A
-race between an event and a refresh cannot make the stored hash describe a
-body the server does not have: the event's clear and the refresh's write
-each run after their own send, and a null left by either is safe.
+A cleared hash never matches, so clearing can only cause one extra request.
+The marker is fresh on every clear, and the refresh's write is a
+compare-and-set, so a race cannot leave a hash that describes a body the
+server does not have. Example: a refresh sends body A, an event sends body
+B and clears the hash, and then the refresh tries to store the hash of A.
+The stored value is no longer the one the refresh read, so its write
+changes nothing. The marker cannot be null for this reason: a refresh that
+read null would still match a clear to null.
 
 The refresh page does not lock mapping rows, because it writes hashes in
 their own short transactions. So the event's clear waits at most for one of
 those, and a refresh's hash write waits at most for the event's
-transaction.
+transaction. One case can wait with no time limit: a page that re-created
+one user holds that row, while an admin transaction holds another user's
+row and needs the first. The database cannot see this cycle, because the
+page thread waits in Java. It needs two rare events at once, so it is
+accepted. A database lock timeout ends it.
 
 No path other than a refresh reads the hash.
 
