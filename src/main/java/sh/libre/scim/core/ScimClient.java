@@ -8,6 +8,7 @@ import jakarta.ws.rs.ProcessingException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
@@ -31,6 +32,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.storage.StorageId;
 import org.keycloak.storage.user.SynchronizationResult;
 
@@ -1130,6 +1132,19 @@ public class ScimClient {
     // package-private: shared by the paged user path and the unpaged group path
     <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
+        return refreshOne(factory, resource, syncRes, policy, false);
+    }
+
+    /**
+     * Like the 4-argument form, with a role-refresh switch.
+     *
+     * @param roleRefresh true for a role refresh: skip a resource with no
+     *     mapping, and skip a user whose body hash matches the stored one.
+     *     False for a periodic or manual sync, which sends every resource.
+     */
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
+            AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy,
+            boolean roleRefresh) {
         var adapter = getAdapter(factory);
         try {
             // This timing covers the apply alone. The create entry point times
@@ -1159,6 +1174,11 @@ public class ScimClient {
             boolean pushed;
             String branch;
             if (mapping == null) {
+                if (roleRefresh) {
+                    // A role refresh only updates users that were already
+                    // sent. It never creates one.
+                    return RefreshOutcome.CONTINUE;
+                }
                 LOGGER.info("Creating it");
                 // The meter reports the cost of a create, so only this branch
                 // adds the apply it paid for.
@@ -1166,11 +1186,25 @@ public class ScimClient {
                 branch = "create";
                 pushed = createApplied(adapter);
             } else {
+                String hash = bodyHashOf(adapter);
+                if (roleRefresh && hash != null && hash.equals(mapping.getBodyHash())) {
+                    LOGGER.debugf("Skipping unchanged resource %s", adapter.getId());
+                    return RefreshOutcome.CONTINUE;
+                }
                 LOGGER.info("Replacing it");
                 branch = "replace";
+                // A 404 re-create edits this same managed row and can change
+                // its external id, which is part of the key. Read it first.
+                String externalIdBefore = mapping.getExternalId();
                 // Hand over the row read above. A second read of it would take
                 // page capacity and return the same row.
                 pushed = replaceApplied(adapter, mapping);
+                if (pushed && hash != null && Objects.equals(externalIdBefore, mapping.getExternalId())) {
+                    // A re-create that changed the row's key holds a lock on
+                    // it in the page transaction, so it skips this write. The
+                    // next role refresh sends that user once more.
+                    writeBodyHash(mapping, externalIdBefore, hash);
+                }
             }
             if (!pushed) {
                 // The push did not happen and raised nothing. Count it as a
@@ -1202,6 +1236,36 @@ public class ScimClient {
                 return RefreshOutcome.STOP;
             }
             return e.isThrottled() ? RefreshOutcome.THROTTLED : RefreshOutcome.CONTINUE;
+        }
+    }
+
+    /** The body hash for a user, or null for any other resource type. */
+    // package-private so a test can compute the expected value
+    static String bodyHashOf(Adapter<?, ?> adapter) {
+        return adapter instanceof UserAdapter user ? ScimBodyHash.of(user.toSCIM(false)) : null;
+    }
+
+    /**
+     * Stores a body hash in its own short transaction, so the page does not
+     * hold a lock on the mapping row while it pushes other users. A failure
+     * only means the next role refresh sends the user again.
+     */
+    // package-private so a test can stub it
+    void writeBodyHash(ScimResource mapping, String externalId, String hash) {
+        try {
+            KeycloakModelUtils.runJobInTransaction(session.getKeycloakSessionFactory(), s ->
+                s.getProvider(JpaConnectionProvider.class).getEntityManager()
+                    .createNamedQuery("updateBodyHash")
+                    .setParameter("hash", hash)
+                    .setParameter("realmId", mapping.getRealmId())
+                    .setParameter("componentId", mapping.getComponentId())
+                    .setParameter("type", mapping.getType())
+                    .setParameter("id", mapping.getId())
+                    .setParameter("externalId", externalId)
+                    .executeUpdate());
+        } catch (RuntimeException e) {
+            LOGGER.warnf(e, "Could not store the body hash of %s %s; the next role refresh sends it again",
+                mapping.getType(), mapping.getId());
         }
     }
 
