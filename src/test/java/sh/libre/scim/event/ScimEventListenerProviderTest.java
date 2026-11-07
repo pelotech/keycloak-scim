@@ -190,6 +190,13 @@ class ScimEventListenerProviderTest {
     }
 
     @Test
+    void aGroupIdWithADotIsAccepted() {
+        var d = routed(event(ResourceType.GROUP, OperationType.DELETE, "groups/abc.def"));
+        verify(d).run(eq(ScimDispatcher.SCOPE_GROUP), any());
+        verify(d).requestRoleRefresh();
+    }
+
+    @Test
     void aTopLevelGroupCreateIsUnchanged() {
         var d = routed(event(ResourceType.GROUP, OperationType.CREATE, "groups/g1"));
         verify(d).run(eq(ScimDispatcher.SCOPE_GROUP), any());

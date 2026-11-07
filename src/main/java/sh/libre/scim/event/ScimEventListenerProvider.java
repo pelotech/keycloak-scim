@@ -34,7 +34,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         // With CREATE, "groups/{id}/children" names the parent. The code
         // creates the parent, not the new subgroup. This is a known gap. It
         // is tracked separately and not changed here.
-        patterns.put(ResourceType.GROUP, Pattern.compile("^groups(?:/([\\w-]+)(/children)?)?$"));
+        patterns.put(ResourceType.GROUP, Pattern.compile("^groups(?:/([^/]+)(/children)?)?$"));
         patterns.put(ResourceType.GROUP_MEMBERSHIP, Pattern.compile("users/(.+)/groups/(.+)"));
         patterns.put(ResourceType.REALM_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
         patterns.put(ResourceType.CLIENT_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
