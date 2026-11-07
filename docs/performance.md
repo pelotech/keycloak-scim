@@ -475,3 +475,45 @@ very-low-latency servers, the per-op lane is already faster, so
 WireMock models round trips only, these wins are a floor. A real
 server's per-request overhead would push the crossover lower, and
 widen the slow-server advantage.
+
+## Role refresh
+
+A role refresh reads every mapped user of a component. It sends only the
+users whose SCIM body hash changed. These numbers are for a refresh with no
+change. The test is `RoleRefreshPerfTest`.
+
+Setup: Keycloak 25.0.6, Apple M4 Max with 36 GiB of memory, Docker through
+OrbStack, embedded WireMock SCIM server with 0 ms latency. One run per row.
+
+| Users | Role refresh, no change | Requests sent | Manual sync with hash write |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 1,349 ms | 0 | 3,745 ms |
+| 5,000 | 4,582 ms | 0 | 10,512 ms |
+
+The manual sync sends every user once. It also writes one body hash for each
+user, in its own short transaction. To see what the hash write adds, the same
+manual sync ran on commit `0e09392`, which is before this feature. It used
+the same rig and the same steps, except the role refresh.
+
+| Users | Manual sync, before the feature | Manual sync, with hash write |
+| ---: | ---: | ---: |
+| 1,000 | 2,790 ms | 3,745 ms |
+| 5,000 | 11,235 ms | 10,512 ms |
+
+The two sets are one run each and they do not agree on the sign of the
+difference. At 5,000 users the run with the hash write is faster. The hash
+write cost is smaller than the run-to-run noise of this rig. It is not
+measured as a separate number.
+
+### 10,000 users: not measured
+
+The 10,000-user run did not complete. The manual sync stopped after about
+6,300 replaces with `NoHttpResponseException: host.testcontainers.internal
+failed to respond`. The sync then did not write the remaining hashes, so the
+following role refresh sent 3,690 users. The run on `0e09392` stopped at the
+same point (6,296 replaces). So the stop is not caused by this feature. It
+comes from the test rig or from the SCIM client, and we did not find out
+which. Clearing the WireMock request journal before the sync did not help.
+The 1,000-user and 5,000-user rows above are the measured values. The
+duration of a refresh grows with the user count. Do not extrapolate it to
+10,000 users from two points.
