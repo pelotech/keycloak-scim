@@ -613,7 +613,8 @@ public class ScimClient {
         if (!"User".equals(adapter.getType())) {
             return;
         }
-        // A SHA-256 hex hash has no '-', so this never equals one.
+        // ScimBodyHash gives 64 lowercase hex characters. The marker has a '-',
+        // so it never equals one.
         for (var row : adapter.query("findById", adapter.getId()).getResultList()) {
             row.setBodyHash("cleared-" + UUID.randomUUID());
         }
