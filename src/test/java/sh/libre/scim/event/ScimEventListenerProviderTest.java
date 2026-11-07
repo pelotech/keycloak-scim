@@ -164,10 +164,22 @@ class ScimEventListenerProviderTest {
     }
 
     @Test
-    void aGroupRenameUpdatesTheGroupAndRequestsARoleRefresh() {
+    void aGroupRenameUpdatesTheGroupAndRequestsNoRoleRefresh() {
         var d = routed(event(ResourceType.GROUP, OperationType.UPDATE, "groups/g1"));
         verify(d).run(eq(ScimDispatcher.SCOPE_GROUP), any());
-        verify(d).requestRoleRefresh();
+        verify(d, never()).requestRoleRefresh();
+    }
+
+    @Test
+    void aGroupDeleteOnADefaultGroupsPathDoesNothing() {
+        var d = routed(event(ResourceType.GROUP, OperationType.DELETE, "default-groups/g1"));
+        verifyNoInteractions(d);
+    }
+
+    @Test
+    void aGroupUpdateOnAPermissionsPathDoesNothing() {
+        var d = routed(event(ResourceType.GROUP, OperationType.UPDATE, "groups/g1/management/permissions"));
+        verifyNoInteractions(d);
     }
 
     @Test

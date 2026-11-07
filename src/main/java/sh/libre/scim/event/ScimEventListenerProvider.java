@@ -29,9 +29,12 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         this.session = session;
         dispatcher = new ScimDispatcher(session);
         patterns.put(ResourceType.USER, Pattern.compile("users/(.+)"));
-        // "groups" (a move to the top level), "groups/{id}", or
-        // "groups/{id}/children" (a subgroup create, or a move under {id}).
-        patterns.put(ResourceType.GROUP, Pattern.compile("^groups(?:/([\\w-]+)(/children)?)?"));
+        // Only three paths: "groups" (a move to the top level), "groups/{id}",
+        // and "groups/{id}/children" (a move under {id}, or a subgroup create).
+        // With CREATE, "groups/{id}/children" names the parent. The code
+        // creates the parent, not the new subgroup. This is a known gap. It
+        // is tracked separately and not changed here.
+        patterns.put(ResourceType.GROUP, Pattern.compile("^groups(?:/([\\w-]+)(/children)?)?$"));
         patterns.put(ResourceType.GROUP_MEMBERSHIP, Pattern.compile("users/(.+)/groups/(.+)"));
         patterns.put(ResourceType.REALM_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
         patterns.put(ResourceType.CLIENT_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
@@ -70,7 +73,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             dispatcher.requestRoleRefresh();
             return;
         }
-        var pattern = patterns.get(event.getResourceType());
+        var pattern = patterns.get(type);
         if (pattern == null) {
             return;
         }
@@ -78,7 +81,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         if (!matcher.find()) {
             return;
         }
-        if (event.getResourceType() == ResourceType.USER) {
+        if (type == ResourceType.USER) {
             var userId = matcher.group(1);
             LOGGER.infof("%s %s", userId, event.getOperationType());
             if (event.getOperationType() == OperationType.CREATE) {
@@ -102,7 +105,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter::new, userId));
             }
         }
-        if (event.getResourceType() == ResourceType.GROUP) {
+        if (type == ResourceType.GROUP) {
             var groupId = matcher.group(1);
             boolean children = matcher.group(2) != null;
             var op = event.getOperationType();
@@ -124,9 +127,6 @@ public class ScimEventListenerProvider implements EventListenerProvider {
             if (op == OperationType.UPDATE) {
                 var group = getGroup(groupId);
                 dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter::new, group));
-                // The event does not say whether this was a rename. A role
-                // refresh that finds no change sends nothing.
-                dispatcher.requestRoleRefresh();
             }
             if (op == OperationType.DELETE) {
                 dispatcher.run(ScimDispatcher.SCOPE_GROUP,
@@ -134,7 +134,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 dispatcher.requestRoleRefresh();
             }
         }
-        if (event.getResourceType() == ResourceType.GROUP_MEMBERSHIP) {
+        if (type == ResourceType.GROUP_MEMBERSHIP) {
             var userId = matcher.group(1);
             var groupId = matcher.group(2);
             LOGGER.infof("%s %s from %s", event.getOperationType(), userId, groupId);
@@ -152,8 +152,8 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
             }
         }
-        if (event.getResourceType() == ResourceType.REALM_ROLE_MAPPING
-                || event.getResourceType() == ResourceType.CLIENT_ROLE_MAPPING) {
+        if (type == ResourceType.REALM_ROLE_MAPPING
+                || type == ResourceType.CLIENT_ROLE_MAPPING) {
             var kind = matcher.group(1);
             var id = matcher.group(2);
             LOGGER.infof("%s %s %s roles", event.getOperationType(), kind, id);
