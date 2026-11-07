@@ -2,6 +2,7 @@ package sh.libre.scim.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -11,7 +12,9 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.keycloak.common.util.MultivaluedHashMap;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
+import org.keycloak.models.KeycloakTransactionManager;
 
 class RoleRefreshSchedulerTest {
 
@@ -209,8 +212,12 @@ class RoleRefreshSchedulerTest {
 
     @Test
     void aFailureToReadTheComponentIsRefusedSoItRetries() {
-        // A mock factory gives a null session, so the read throws.
+        // The session has a working transaction manager. Its realm lookup fails.
+        var session = mock(KeycloakSession.class);
+        when(session.getTransactionManager()).thenReturn(mock(KeycloakTransactionManager.class));
+        when(session.realms()).thenThrow(new IllegalStateException("db down"));
         var factory = mock(KeycloakSessionFactory.class);
+        when(factory.create()).thenReturn(session);
 
         var result = RoleRefreshScheduler.runForComponent(factory, "r", "c", () -> false);
 
