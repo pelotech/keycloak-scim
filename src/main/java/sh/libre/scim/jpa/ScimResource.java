@@ -8,7 +8,12 @@ import jakarta.persistence.NamedQuery;
 import jakarta.persistence.NamedQueries;
 import jakarta.persistence.Table;
 
+import org.hibernate.annotations.DynamicUpdate;
+
 @Entity
+// An event's hash clear must write only BODY_HASH, so it cannot undo a
+// deactivation that another transaction made at the same time.
+@DynamicUpdate
 @IdClass(ScimResourceId.class)
 @Table(name = "SCIM_RESOURCE")
 @NamedQueries({
