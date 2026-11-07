@@ -8,6 +8,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import dasniko.testcontainers.keycloak.KeycloakContainer;
@@ -113,18 +114,23 @@ class ScimEffectiveRolesIT extends IntegrationTestBase {
     }
 
     /**
-     * Waits until role refreshes have ended and no more are pending. A refresh
-     * runs again when a request came during it, so wait for a quiet period.
+     * Waits for one new end line, then until no further end line appears for
+     * {@code DELAY_SECONDS + 2} seconds. It checks at most 5 times, then fails.
+     * This does not prove the scheduler is idle. A follow-up run that takes
+     * longer than about 2 seconds could still end later.
      */
     private static void awaitRefreshesSettled(String componentId, int before) throws InterruptedException {
         await().atMost(60, SECONDS).until(() -> roleRefreshLogLines(componentId) > before);
-        while (true) {
+        final int maxChecks = 5;
+        for (int check = 0; check < maxChecks; check++) {
             int count = roleRefreshLogLines(componentId);
             Thread.sleep((DELAY_SECONDS + 2) * 1000L);
             if (roleRefreshLogLines(componentId) == count) {
                 return;
             }
         }
+        fail("role refresh end lines kept appearing after " + maxChecks + " checks of "
+            + (DELAY_SECONDS + 2) + " seconds each");
     }
 
     private static String scimComponentId(RealmResource realm) {
