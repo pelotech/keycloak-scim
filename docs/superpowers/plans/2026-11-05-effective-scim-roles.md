@@ -2400,7 +2400,7 @@ git commit -m "test: measure a role refresh with no change"
 Rewrite `### SCIM roles` in `docs/configuration.md` to say:
 - The plugin sends every marked role a user has: direct mappings, roles from every group and its parent groups, and roles inside composite roles. Realm and client roles both count. A name appears once.
 - A change to one user's roles, or a user joining or leaving a group, sends that user at once.
-- These changes request a **role refresh** of each component with `propagation-user=true`, about 60 seconds later: a role granted to or removed from a group, any change to a realm or client role, a group moved, renamed or deleted, and a client deleted.
+- These changes request a **role refresh** of each component with `propagation-user=true`, about 60 seconds later: a role granted to or removed from a group, any change to a realm or client role, a group moved or deleted, and a client deleted. A group rename does not, because roles are sent by name.
 - A role refresh reads every mapped user of the component. It sends only users whose SCIM body changed since the last refresh. It never creates users.
 - Changes that make no admin event (LDAP mappers, identity provider mappers, imports) reach the server at the user's next write or the next periodic sync.
 - With `user-patchOp=true`, `roles` is not sent. Keep `user-patchOp=false` for a component that sends SCIM roles.

@@ -217,15 +217,17 @@ server, so a stale role on that user grants nothing.
 | Any change to a realm role or a client role | `REALM_ROLE` or `CLIENT_ROLE` | Request a role refresh. |
 | A group moved to a new parent | `GROUP` `UPDATE`, path `groups/{newParentId}/children` | Request a role refresh only. Do not run a group update: the path names the new parent, not the moved group, and a move does not change the group's SCIM body. Today this event replaces the parent group by mistake. |
 | A group moved to the top level | `GROUP` `UPDATE`, path `groups` | Request a role refresh only. The path has no group id. |
-| A group renamed, or its attributes changed | `GROUP` `UPDATE`, path `groups/{id}` | The existing group update, then request a role refresh. The event does not say which change it was. A role refresh that finds no change sends nothing. |
+| A group renamed, or its attributes changed | `GROUP` `UPDATE`, path `groups/{id}` | The existing group update only. Roles are sent by name, and group names and attributes are not in the user body, so this cannot change any user's roles. |
 | A group deleted | `GROUP` `DELETE` | The existing group delete, then request a role refresh. |
 | A client deleted | `CLIENT` `DELETE` | Request a role refresh. Deleting a client removes its roles from users and sends no role event. |
 
 `ScimEventListenerProvider` drops an event when its resource type has no
 pattern (`patterns.get` returns null). So:
 
-- The `GROUP` handling must tell the three `UPDATE` paths apart, and must
-  match the path `groups`, which today matches nothing.
+- The `GROUP` pattern matches exactly `groups`, `groups/{id}`, and
+  `groups/{id}/children`, anchored at both ends. It tells the three
+  `UPDATE` paths apart. Any other path, such as `default-groups/{id}`, is
+  ignored.
 - `CLIENT_ROLE_MAPPING`, `REALM_ROLE`, `CLIENT_ROLE`, and `CLIENT` have no
   pattern today. Each one needs a pattern, or a branch before the pattern
   check. For `REALM_ROLE`, `CLIENT_ROLE`, and `CLIENT`, the path does not
