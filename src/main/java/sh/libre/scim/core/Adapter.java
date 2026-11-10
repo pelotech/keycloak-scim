@@ -66,6 +66,10 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
         }
     }
 
+    public void replaceExternalId(String externalId) {
+        this.externalId = externalId;
+    }
+
     public String getSCIMEndpoint() {
         return type + "s";
     }

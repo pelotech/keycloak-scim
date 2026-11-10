@@ -638,6 +638,36 @@ public class ScimClient {
     }
 
     /**
+     * Records a successful re-create. The server gave the resource a new
+     * remote id. The adapter still holds the old one and keeps it on apply.
+     * So this sets the new id on purpose, drops the old mapping row and saves
+     * a new one. The remote id is part of the row key, so the row cannot be
+     * updated in place.
+     *
+     * @throws InvalidResponseFromScimEndpointException if the response has no id
+     */
+    // package-private for tests
+    <S extends ResourceNode> void applyRecreate(
+            Adapter<?, S> adapter, ScimResource oldRow, ServerResponse<S> createResponse) {
+        var created = createResponse.getResource();
+        var newId = created == null ? null : created.getId().orElse(null);
+        if (newId == null || newId.isBlank()) {
+            throw new InvalidResponseFromScimEndpointException(
+                createResponse.getHttpStatus(),
+                "re-create " + adapter.getId() + ": the response has no id");
+        }
+        var oldId = adapter.getExternalId();
+        adapter.apply(created);
+        adapter.replaceExternalId(newId);
+        if (oldRow != null) {
+            getEM().remove(oldRow);
+        }
+        adapter.saveMapping();
+        LOGGER.infof("Re-created %s %s: remote id changed from %s to %s",
+            adapter.getType(), adapter.getId(), oldId, newId);
+    }
+
+    /**
      * The body of a replace. {@code applyModel} carries the work the public
      * entry point must still do, so both entry points share one span and one
      * set of error handlers. An applied adapter passes an empty step.
@@ -669,6 +699,7 @@ public class ScimClient {
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
                 ServerResponse<S> response;
+                boolean recreated = false;
                 try {
                     response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                         try {
@@ -705,14 +736,8 @@ public class ScimClient {
                                 .setResource(adapter.toSCIM(false))
                                 .sendRequest();
                             if (createResponse.isSuccess()) {
-                                adapter.apply(createResponse.getResource());
-                                var existingMapping = adapter.getMapping();
-                                if (existingMapping != null) {
-                                    existingMapping.setExternalId(adapter.getExternalId());
-                                    getEM().merge(existingMapping);
-                                } else {
-                                    adapter.saveMapping();
-                                }
+                                applyRecreate(adapter, resource, createResponse);
+                                recreated = true;
                             }
                             response = createResponse;
                         }
@@ -723,7 +748,8 @@ public class ScimClient {
                             "replace " + adapter.getId() + ": " + response.getResponseBody());
                     }
                 }
-                if (resource.getDeactivatedAt() != null) {
+                // A re-create removed the old row. The new row has no flag.
+                if (!recreated && resource.getDeactivatedAt() != null) {
                     // A successful replace means the user is back (re-import or
                     // an explicit admin action). Sync-refresh skips flagged
                     // rows, so it never lands here.
