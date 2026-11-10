@@ -26,6 +26,18 @@ changed, who it affects, and how to keep the 1.8.0 behavior.
 3. Read each section below for the changes that apply to your
    components and your SCIM server.
 
+## After you upgrade
+
+1. Start one manual sync of each SCIM provider component, with
+   `sync-refresh=true`. This sends every user once with the new
+   [effective SCIM roles](#scim-roles-include-composites-and-parent-groups).
+   Until a sync or a role change sends a user, the SCIM server keeps the
+   roles that 1.8.0 sent for that user.
+2. Set a periodic sync of each SCIM provider component, once a day, with
+   `sync-refresh=true`. It sends the changes that make no admin event, and
+   the role changes that a node did not send before it stopped. See
+   [Sync behavior](configuration.md#sync-behavior).
+
 ## Changes in behavior
 
 ### Keycloak version
@@ -124,6 +136,59 @@ component with `sync-refresh=true`.
 `"true"` on that user. This keeps the user off the SCIM server on every
 path.
 
+### SCIM roles include composites and parent groups
+
+**What changed.** The SCIM `roles` attribute now holds every role marked
+`scim="true"` that a user has:
+
+- roles mapped to the user directly,
+- roles of every group of the user, and of each parent group,
+- roles inside a composite role that the user has.
+
+Realm roles and client roles both count. A name appears once. In 1.8.0,
+`roles` held only the user's direct mappings and the roles of the user's
+direct groups.
+
+**Who it affects.** Components that send users who get a marked role
+through a composite role or a parent group. These users get more roles on
+the SCIM server.
+
+**What to check.** Look at which roles carry `scim="true"`. A marked role
+inside a composite, or on a parent group, now reaches every user who has
+it that way.
+
+**To keep the 1.8.0 behavior.** There is no setting for this. Remove the
+`scim` marker from a role that must not be sent this way.
+
+### Role changes on groups and roles reach the server after a delay
+
+**What changed.** In 1.8.0, a role granted to or removed from a group sent
+a PUT for each member of the group, inside the admin's request. Other
+changes to roles and groups sent nothing until the next sync.
+
+Now these changes request one **role refresh** of each SCIM component,
+about 60 seconds later:
+
+- a role granted to or removed from a group,
+- any change to a realm role or a client role, including its composites
+  and its `scim` marker, and its deletion,
+- a group moved to a new parent or to the top level,
+- a group deleted,
+- a client deleted.
+
+A role refresh reads every mapped user of the component. It sends only
+the users whose SCIM body changed. It never creates a user. A change to
+one user's roles still sends that user at once.
+
+**Who it affects.** Every component with `propagation-user=true`.
+
+**What to check.** A role removed from a group reaches the SCIM server
+about one minute later, not during the admin's request. The JVM property
+`scim.roles.refreshDelaySeconds` sets the delay. See
+[SCIM roles](configuration.md#scim-roles).
+
+**To keep the 1.8.0 behavior.** There is no setting for this.
+
 ## Other changes to know about
 
 These changes fix bugs. They have no setting, but they change what the
@@ -144,3 +209,11 @@ plugin sends.
 - **A 400 on an update no longer re-creates the resource.** In 1.8.0, a
   404 or a 400 on an update made the plugin send a POST. Now, only a
   404 does. A 400 means that the server rejected the request body.
+- **A re-created resource keeps its new remote id.** In 1.8.0, after a 404
+  on an update, the plugin created the resource again but kept the old
+  remote id in its mapping. Each later update then got a 404 and created
+  the resource again. On a server that rejects duplicate user names, each
+  later update failed instead. Now the mapping takes the new id. This fix
+  does not repair a mapping that already holds a stale id. To repair one,
+  delete the resource on the SCIM server. The next update of the user or
+  group then creates it again with a correct mapping.
