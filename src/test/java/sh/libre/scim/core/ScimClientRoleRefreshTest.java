@@ -85,7 +85,13 @@ class ScimClientRoleRefreshTest {
 
     private ScimClient client() {
         var client = spy(new ScimClient(model, session));
-        doReturn(true).when(client).replaceApplied(any(), any());
+        // As replaceBody does, the adapter takes the row's remote id.
+        doAnswer(i -> {
+            Adapter<?, ?> adapter = i.getArgument(0);
+            ScimResource row = i.getArgument(1);
+            adapter.setExternalId(row.getExternalId());
+            return true;
+        }).when(client).replaceApplied(any(), any());
         doReturn(true).when(client).createApplied(any());
         doNothing().when(client).writeBodyHash(any(), anyString(), any(), anyString());
         return client;
@@ -177,16 +183,18 @@ class ScimClientRoleRefreshTest {
     }
 
     /**
-     * A 404 re-create changes the mapping row's external id inside the page
-     * transaction. The re-create path edits the same managed row that
-     * refreshOne passed in.
+     * A 404 re-create gives the adapter a new remote id, and the page
+     * transaction removes the old row. The hash write must skip it.
      */
     @Test
     void aReCreateStoresNoHash() {
         var client = client();
         var m = mapping(null);
         doAnswer(i -> {
-            m.setExternalId("ext-2");
+            Adapter<?, ?> adapter = i.getArgument(0);
+            adapter.setExternalId(m.getExternalId());
+            // A 404 re-create gives the adapter the server's new id.
+            adapter.replaceExternalId("ext-2");
             return true;
         }).when(client).replaceApplied(any(), any());
 

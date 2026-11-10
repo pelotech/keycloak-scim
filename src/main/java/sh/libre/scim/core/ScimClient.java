@@ -1257,18 +1257,18 @@ public class ScimClient {
                 }
                 LOGGER.info("Replacing it");
                 branch = "replace";
-                // A 404 re-create edits this same managed row and can change
-                // its external id, which is part of the key. Read it first.
+                // A 404 re-create gives the adapter a new remote id and
+                // replaces this row with a new one. Read the old id first.
                 String externalIdBefore = mapping.getExternalId();
                 // The hash write only succeeds if the hash is still this value.
                 String hashBefore = mapping.getBodyHash();
                 // Hand over the row read above. A second read of it would take
                 // page capacity and return the same row.
                 pushed = replaceApplied(adapter, mapping);
-                if (pushed && hash != null && Objects.equals(externalIdBefore, mapping.getExternalId())) {
-                    // A re-create that changed the row's key holds a lock on
-                    // it in the page transaction, so it skips this write. The
-                    // next role refresh sends that user once more.
+                if (pushed && hash != null && Objects.equals(externalIdBefore, adapter.getExternalId())) {
+                    // After a re-create, the page transaction is removing the
+                    // old row, so this write skips it. The new row starts with
+                    // no hash, and the next role refresh sends the user once more.
                     writeBodyHash(mapping, externalIdBefore, hashBefore, hash);
                 }
             }
