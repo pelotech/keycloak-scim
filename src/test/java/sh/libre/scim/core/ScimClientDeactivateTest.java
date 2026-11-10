@@ -178,7 +178,6 @@ class ScimClientDeactivateTest {
         Adapter<TestModel, User> adapter = mock(Adapter.class);
         when(adapter.getType()).thenReturn("User");
         when(adapter.getId()).thenReturn("user-1");
-        when(adapter.skipRefresh()).thenReturn(false);
         var kcModel = mock(TestModel.class);
         when(adapter.getResourceStream()).thenReturn(Stream.of(kcModel));
         when(adapter.getMapping()).thenReturn(tombstone);
@@ -203,7 +202,6 @@ class ScimClientDeactivateTest {
         Adapter<TestModel, User> adapter = mock(Adapter.class);
         when(adapter.getType()).thenReturn("User");
         when(adapter.getId()).thenReturn("user-1");
-        when(adapter.skipRefresh()).thenReturn(false);
         var kcModel = mock(TestModel.class);
         when(adapter.getResourceStream()).thenReturn(Stream.of(kcModel));
         var live = new ScimResource();

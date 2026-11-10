@@ -146,8 +146,6 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
 
     public abstract Stream<M> getResourceStream();
 
-    public abstract Boolean skipRefresh();
-
     protected ComponentModel getModel() {
         return realm.getComponent(componentId);
     }

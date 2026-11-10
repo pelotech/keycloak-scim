@@ -284,11 +284,6 @@ public class UserAdapter extends Adapter<UserModel, User> {
         return session.users().searchForUserStream(realm, Map.of(UserModel.ENABLED, "true"));
     }
 
-    @Override
-    public Boolean skipRefresh() {
-        return "admin".equals(getUsername());
-    }
-
     /**
      * Builds the PATCH that replaces the same attributes {@link #toSCIM} sends
      * in a PUT, so user-patchOp=true and false give the same remote state. An
