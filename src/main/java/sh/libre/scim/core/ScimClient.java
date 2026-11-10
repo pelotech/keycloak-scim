@@ -657,10 +657,19 @@ public class ScimClient {
                 "re-create " + adapter.getId() + ": the response has no id");
         }
         var oldId = adapter.getExternalId();
-        adapter.apply(created);
+        if (oldRow != null && newId.equals(oldRow.getExternalId())) {
+            // The server gave the same id back. The row is still right.
+            oldRow.setDeactivatedAt(null);
+            LOGGER.infof("Re-created %s %s: the remote id is the same, %s",
+                adapter.getType(), adapter.getId(), newId);
+            return;
+        }
+        // The response is not applied to the adapter. Only the id is needed,
+        // and a partial response must not stop the new id from being kept.
         adapter.replaceExternalId(newId);
         if (oldRow != null) {
-            getEM().remove(oldRow);
+            // remove() needs a managed entity, so merge a detached row first.
+            getEM().remove(getEM().contains(oldRow) ? oldRow : getEM().merge(oldRow));
         }
         adapter.saveMapping();
         LOGGER.infof("Re-created %s %s: remote id changed from %s to %s",

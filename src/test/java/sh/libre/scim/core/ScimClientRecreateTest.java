@@ -63,6 +63,7 @@ class ScimClientRecreateTest {
         oldRow.setRealmId("realm-id");
         oldRow.setComponentId(COMPONENT_ID);
         oldRow.setType("User");
+        when(em.contains(oldRow)).thenReturn(true);
 
         // The adapter holds the old remote id, as replaceBody leaves it.
         adapter = new UserAdapter(session, COMPONENT_ID);
@@ -121,6 +122,56 @@ class ScimClientRecreateTest {
 
         verify(em, never()).remove(any());
         verify(em, never()).persist(any());
+    }
+
+    /** A partial response must not stop the new id from being kept. */
+    @Test
+    void recreateKeepsTheNewIdWhenTheResponseIsPartial() {
+        var partial = new User();
+        partial.setId("new-id");
+
+        client.applyRecreate(adapter, oldRow, createResponse(partial));
+
+        verify(em).remove(oldRow);
+        var saved = ArgumentCaptor.forClass(ScimResource.class);
+        verify(em).persist(saved.capture());
+        assertThat(saved.getValue().getExternalId()).isEqualTo("new-id");
+    }
+
+    /** Some servers derive the id from the user name, so the id can come back the same. */
+    @Test
+    void sameIdKeepsTheRowAndClearsTheFlag() {
+        oldRow.setDeactivatedAt(123L);
+
+        client.applyRecreate(adapter, oldRow, createResponse(user("old-id")));
+
+        verify(em, never()).remove(any());
+        verify(em, never()).persist(any());
+        assertThat(oldRow.getDeactivatedAt()).isNull();
+        assertThat(adapter.getExternalId()).isEqualTo("old-id");
+    }
+
+    /** A row that is not managed is merged first, because remove needs a managed entity. */
+    @Test
+    void removeMergesAnUnmanagedRowFirst() {
+        var managed = new ScimResource();
+        when(em.contains(oldRow)).thenReturn(false);
+        when(em.merge(oldRow)).thenReturn(managed);
+
+        client.applyRecreate(adapter, oldRow, createResponse(user("new-id")));
+
+        verify(em).remove(managed);
+        verify(em, never()).remove(oldRow);
+    }
+
+    @Test
+    void removeSkipsTheMergeForAManagedRow() {
+        when(em.contains(oldRow)).thenReturn(true);
+
+        client.applyRecreate(adapter, oldRow, createResponse(user("new-id")));
+
+        verify(em).remove(oldRow);
+        verify(em, never()).merge(any());
     }
 
     @Test
