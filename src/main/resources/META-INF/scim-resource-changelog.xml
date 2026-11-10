@@ -75,4 +75,15 @@
         <addForeignKeyConstraint baseTableName="SCIM_SYNC_LEASE" baseColumnNames="COMPONENT_ID" constraintName="FK_SCIM_SYNC_LEASE_COMPONENT" referencedTableName="COMPONENT" referencedColumnNames="ID" onDelete="CASCADE" onUpdate="CASCADE" />
     </changeSet>
 
+    <changeSet author="keycloak-scim" id="scim-resource-body-hash-2.0">
+        <!-- SHA-256 (hex) of the SCIM body the last refresh sent. A role
+             refresh skips a user whose current body has the same hash.
+             Null means "not sent by a refresh yet", which never matches. -->
+        <addColumn tableName="SCIM_RESOURCE">
+            <column name="BODY_HASH" type="VARCHAR(64)">
+                <constraints nullable="true" />
+            </column>
+        </addColumn>
+    </changeSet>
+
 </databaseChangeLog>

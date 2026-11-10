@@ -13,6 +13,7 @@ import org.keycloak.events.admin.ResourceType;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.RoleUtils;
 
 import sh.libre.scim.core.GroupAdapter;
 import sh.libre.scim.core.ScimDispatcher;
@@ -28,9 +29,15 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         this.session = session;
         dispatcher = new ScimDispatcher(session);
         patterns.put(ResourceType.USER, Pattern.compile("users/(.+)"));
-        patterns.put(ResourceType.GROUP, Pattern.compile("groups/([\\w-]+)(/children)?"));
+        // Only three paths: "groups" (a move to the top level), "groups/{id}",
+        // and "groups/{id}/children" (a move under {id}, or a subgroup create).
+        // With CREATE, "groups/{id}/children" names the parent. The code
+        // creates the parent, not the new subgroup. This is a known gap. It
+        // is tracked separately and not changed here.
+        patterns.put(ResourceType.GROUP, Pattern.compile("^groups(?:/([^/]+)(/children)?)?$"));
         patterns.put(ResourceType.GROUP_MEMBERSHIP, Pattern.compile("users/(.+)/groups/(.+)"));
         patterns.put(ResourceType.REALM_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
+        patterns.put(ResourceType.CLIENT_ROLE_MAPPING, Pattern.compile("^(.+)/(.+)/role-mappings"));
     }
 
     @Override
@@ -58,7 +65,15 @@ public class ScimEventListenerProvider implements EventListenerProvider {
 
     @Override
     public void onEvent(AdminEvent event, boolean includeRepresentation) {
-        var pattern = patterns.get(event.getResourceType());
+        // A change to a role, or a deleted client, can change the roles of
+        // any number of users. The path does not matter.
+        var type = event.getResourceType();
+        if (type == ResourceType.REALM_ROLE || type == ResourceType.CLIENT_ROLE
+                || (type == ResourceType.CLIENT && event.getOperationType() == OperationType.DELETE)) {
+            dispatcher.requestRoleRefresh();
+            return;
+        }
+        var pattern = patterns.get(type);
         if (pattern == null) {
             return;
         }
@@ -66,7 +81,7 @@ public class ScimEventListenerProvider implements EventListenerProvider {
         if (!matcher.find()) {
             return;
         }
-        if (event.getResourceType() == ResourceType.USER) {
+        if (type == ResourceType.USER) {
             var userId = matcher.group(1);
             LOGGER.infof("%s %s", userId, event.getOperationType());
             if (event.getOperationType() == OperationType.CREATE) {
@@ -90,23 +105,36 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.delete(UserAdapter::new, userId));
             }
         }
-        if (event.getResourceType() == ResourceType.GROUP) {
+        if (type == ResourceType.GROUP) {
             var groupId = matcher.group(1);
-            LOGGER.infof("group %s %s", groupId, event.getOperationType());
-            if (event.getOperationType() == OperationType.CREATE) {
+            boolean children = matcher.group(2) != null;
+            var op = event.getOperationType();
+            LOGGER.infof("group %s %s", groupId, op);
+            if (op == OperationType.UPDATE && (groupId == null || children)) {
+                // A move. The path names the new parent, or no group, and a
+                // move does not change the moved group's SCIM body. Only the
+                // members' roles can change.
+                dispatcher.requestRoleRefresh();
+                return;
+            }
+            if (groupId == null) {
+                return;
+            }
+            if (op == OperationType.CREATE) {
                 var group = getGroup(groupId);
                 dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.create(GroupAdapter::new, group));
             }
-            if (event.getOperationType() == OperationType.UPDATE) {
+            if (op == OperationType.UPDATE) {
                 var group = getGroup(groupId);
                 dispatcher.run(ScimDispatcher.SCOPE_GROUP, client -> client.replace(GroupAdapter::new, group));
             }
-            if (event.getOperationType() == OperationType.DELETE) {
+            if (op == OperationType.DELETE) {
                 dispatcher.run(ScimDispatcher.SCOPE_GROUP,
                         client -> client.delete(GroupAdapter::new, groupId));
+                dispatcher.requestRoleRefresh();
             }
         }
-        if (event.getResourceType() == ResourceType.GROUP_MEMBERSHIP) {
+        if (type == ResourceType.GROUP_MEMBERSHIP) {
             var userId = matcher.group(1);
             var groupId = matcher.group(2);
             LOGGER.infof("%s %s from %s", event.getOperationType(), userId, groupId);
@@ -124,18 +152,19 @@ public class ScimEventListenerProvider implements EventListenerProvider {
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
             }
         }
-        if (event.getResourceType() == ResourceType.REALM_ROLE_MAPPING) {
-            var type = matcher.group(1);
+        if (type == ResourceType.REALM_ROLE_MAPPING
+                || type == ResourceType.CLIENT_ROLE_MAPPING) {
+            var kind = matcher.group(1);
             var id = matcher.group(2);
-            LOGGER.infof("%s %s %s roles", event.getOperationType(), type, id);
-            if ("users".equals(type)) {
+            LOGGER.infof("%s %s %s roles", event.getOperationType(), kind, id);
+            if ("users".equals(kind)) {
                 var user = getUser(id);
                 dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
-            } else if ("groups".equals(type)) {
-                var group = getGroup(id);
-                session.users().getGroupMembersStream(session.getContext().getRealm(), group).forEach(user -> {
-                    dispatcher.run(ScimDispatcher.SCOPE_USER, client -> client.replace(UserAdapter::new, user));
-                });
+            } else if ("groups".equals(kind)) {
+                // Was a PUT for every member, inside this request. A role
+                // refresh after commit reaches members of subgroups too, and
+                // sends only users whose roles changed.
+                dispatcher.requestRoleRefresh();
             }
         }
     }
@@ -149,14 +178,20 @@ public class ScimEventListenerProvider implements EventListenerProvider {
     }
 
     /**
-     * Whether the group carries a role mapping to a {@code scim="true"} role —
-     * the same mark {@code UserAdapter} uses to decide which roles reach the
-     * SCIM {@code roles} field. If false, a membership change on this group
-     * cannot alter any member's SCIM representation.
+     * Whether the group, or any parent group, has a role mapping whose
+     * composite expansion includes a role marked scim="true". This is the
+     * same set of roles UserAdapter sends. If false, a membership change on
+     * this group cannot change any member's SCIM roles.
      */
     // package-private for tests
     boolean groupConfersScimRole(GroupModel group) {
-        return group.getRoleMappingsStream()
-                .anyMatch(r -> "true".equals(r.getFirstAttribute("scim")));
+        for (var g = group; g != null; g = g.getParent()) {
+            boolean marked = RoleUtils.expandCompositeRolesStream(g.getRoleMappingsStream())
+                    .anyMatch(r -> "true".equals(r.getFirstAttribute("scim")));
+            if (marked) {
+                return true;
+            }
+        }
+        return false;
     }
 }

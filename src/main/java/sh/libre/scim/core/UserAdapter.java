@@ -3,7 +3,6 @@ package sh.libre.scim.core;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
@@ -25,6 +24,7 @@ import org.jboss.logging.Logger;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.utils.RoleUtils;
 
 public class UserAdapter extends Adapter<UserModel, User> {
 
@@ -125,21 +125,15 @@ public class UserAdapter extends Adapter<UserModel, User> {
         setDisplayName(displayName);
         setEmail(user.getEmail());
         setActive(user.isEnabled());
-        var rolesSet = new HashSet<String>();
-        user.getGroupsStream().flatMap(g -> g.getRoleMappingsStream())
-                .filter(r -> "true".equals(r.getFirstAttribute("scim"))).map(r -> r.getName())
-                .forEach(r -> rolesSet.add(r));
-
-        user.getRoleMappingsStream().filter(r -> {
-            var attr = r.getFirstAttribute("scim");
-            if (attr == null) {
-                return false;
-            }
-            return "true".equals(attr);
-        }).map(r -> r.getName()).forEach(r -> rolesSet.add(r));
-
-        var roles = new String[rolesSet.size()];
-        rolesSet.toArray(roles);
+        // Effective roles: direct mappings, every group and its parents, and
+        // composites expanded. Only roles marked scim="true" are sent. One
+        // name appears once, and the list is sorted so the body is stable.
+        var roles = RoleUtils.getDeepUserRoleMappings(user).stream()
+                .filter(r -> "true".equals(r.getFirstAttribute("scim")))
+                .map(RoleModel::getName)
+                .distinct()
+                .sorted()
+                .toArray(String[]::new);
         setRoles(roles);
         boolean scimSkip = StringUtils.equals(user.getFirstAttribute("scim-skip"), "true");
         this.skip = scimSkip || skippedByPropagationRole(user);

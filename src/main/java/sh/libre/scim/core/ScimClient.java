@@ -8,6 +8,8 @@ import jakarta.ws.rs.ProcessingException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
@@ -31,6 +33,7 @@ import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RoleMapperModel;
+import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.storage.StorageId;
 import org.keycloak.storage.user.SynchronizationResult;
 
@@ -399,7 +402,11 @@ public class ScimClient {
         if (!existing.isEmpty()) {
             if (isDeactivatedTombstone(existing)) {
                 LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
-                return replaceApplied(adapter);
+                boolean pushed = replaceApplied(adapter);
+                if (pushed) {
+                    clearBodyHash(adapter);
+                }
+                return pushed;
             }
             return false;
         }
@@ -587,7 +594,30 @@ public class ScimClient {
         var adapter = getAdapter(factory);
         // The model is applied inside the span, so a fault there is traced and
         // handled the way it always has been.
-        replaceBody(adapter, () -> adapter.apply(kcModel));
+        if (replaceBody(adapter, () -> adapter.apply(kcModel))) {
+            clearBodyHash(adapter);
+        }
+    }
+
+    /**
+     * Clears a user's body hash after an event sent that user. The event's
+     * body may differ from the one the hash describes. The hash becomes a
+     * fresh value that never equals a real hash, so the next role refresh
+     * sends the user. The value is not null, because a refresh that read null
+     * could then write over the clear. The write goes to the managed row, so
+     * a later flush in this transaction cannot restore the old value. Runs in
+     * the caller's transaction.
+     */
+    // package-private so a test can stub it
+    void clearBodyHash(Adapter<?, ?> adapter) {
+        if (!"User".equals(adapter.getType())) {
+            return;
+        }
+        // ScimBodyHash gives 64 lowercase hex characters. The marker has a '-',
+        // so it never equals one.
+        for (var row : adapter.query("findById", adapter.getId()).getResultList()) {
+            row.setBodyHash("cleared-" + UUID.randomUUID());
+        }
     }
 
     /**
@@ -1166,6 +1196,19 @@ public class ScimClient {
     // package-private: shared by the paged user path and the unpaged group path
     <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
             AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy) {
+        return refreshOne(factory, resource, syncRes, policy, false);
+    }
+
+    /**
+     * Like the 4-argument form, with a role-refresh switch.
+     *
+     * @param roleRefresh true for a role refresh: skip a resource with no
+     *     mapping, and skip a user whose body hash matches the stored one.
+     *     False for a periodic or manual sync, which sends every resource.
+     */
+    <M extends RoleMapperModel, S extends ResourceNode, A extends Adapter<M, S>> RefreshOutcome refreshOne(
+            AdapterFactory<M, S, A> factory, M resource, SynchronizationResult syncRes, SyncErrorPolicy policy,
+            boolean roleRefresh) {
         var adapter = getAdapter(factory);
         try {
             // This timing covers the apply alone. The create entry point times
@@ -1195,6 +1238,11 @@ public class ScimClient {
             boolean pushed;
             String branch;
             if (mapping == null) {
+                if (roleRefresh) {
+                    // A role refresh only updates users that were already
+                    // sent. It never creates one.
+                    return RefreshOutcome.CONTINUE;
+                }
                 LOGGER.info("Creating it");
                 // The meter reports the cost of a create, so only this branch
                 // adds the apply it paid for.
@@ -1202,11 +1250,27 @@ public class ScimClient {
                 branch = "create";
                 pushed = createApplied(adapter);
             } else {
+                String hash = bodyHashOf(adapter);
+                if (roleRefresh && hash != null && hash.equals(mapping.getBodyHash())) {
+                    LOGGER.debugf("Skipping unchanged resource %s", adapter.getId());
+                    return RefreshOutcome.CONTINUE;
+                }
                 LOGGER.info("Replacing it");
                 branch = "replace";
+                // A 404 re-create edits this same managed row and can change
+                // its external id, which is part of the key. Read it first.
+                String externalIdBefore = mapping.getExternalId();
+                // The hash write only succeeds if the hash is still this value.
+                String hashBefore = mapping.getBodyHash();
                 // Hand over the row read above. A second read of it would take
                 // page capacity and return the same row.
                 pushed = replaceApplied(adapter, mapping);
+                if (pushed && hash != null && Objects.equals(externalIdBefore, mapping.getExternalId())) {
+                    // A re-create that changed the row's key holds a lock on
+                    // it in the page transaction, so it skips this write. The
+                    // next role refresh sends that user once more.
+                    writeBodyHash(mapping, externalIdBefore, hashBefore, hash);
+                }
             }
             if (!pushed) {
                 // The push did not happen and raised nothing. Count it as a
@@ -1238,6 +1302,52 @@ public class ScimClient {
                 return RefreshOutcome.STOP;
             }
             return e.isThrottled() ? RefreshOutcome.THROTTLED : RefreshOutcome.CONTINUE;
+        }
+    }
+
+    /** The body hash for a user, or null for any other resource type. */
+    // package-private so a test can compute the expected value
+    static String bodyHashOf(Adapter<?, ?> adapter) {
+        return adapter instanceof UserAdapter user ? ScimBodyHash.of(user.toSCIM(false)) : null;
+    }
+
+    /**
+     * Stores a body hash in its own short transaction, so the page does not
+     * hold a lock on the mapping row while it pushes other users. A failure
+     * only means the next role refresh sends the user again.
+     *
+     * <p>The write is a compare-and-set. An event can send a newer body and
+     * clear the hash while this send is in flight. The write then waits for
+     * the event's lock, and it must not store the hash of the older body. It
+     * changes the row only if the hash still equals {@code expected}, the
+     * value the row had before the send.
+     *
+     * @param expected the hash the row had before the send; null if it had none
+     */
+    // package-private so a test can stub it
+    void writeBodyHash(ScimResource mapping, String externalId, String expected, String hash) {
+        try {
+            int changed = KeycloakModelUtils.runJobInTransactionWithResult(session.getKeycloakSessionFactory(), s -> {
+                var query = s.getProvider(JpaConnectionProvider.class).getEntityManager()
+                    .createNamedQuery(expected == null ? "updateBodyHashIfNull" : "updateBodyHashIfEquals")
+                    .setParameter("hash", hash)
+                    .setParameter("realmId", mapping.getRealmId())
+                    .setParameter("componentId", mapping.getComponentId())
+                    .setParameter("type", mapping.getType())
+                    .setParameter("id", mapping.getId())
+                    .setParameter("externalId", externalId);
+                if (expected != null) {
+                    query.setParameter("expected", expected);
+                }
+                return query.executeUpdate();
+            });
+            if (changed == 0) {
+                LOGGER.debugf("The body hash of %s %s changed during the send; left it alone",
+                    mapping.getType(), mapping.getId());
+            }
+        } catch (RuntimeException e) {
+            LOGGER.warnf(e, "Could not store the body hash of %s %s; the next role refresh sends it again",
+                mapping.getType(), mapping.getId());
         }
     }
 

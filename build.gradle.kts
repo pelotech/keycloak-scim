@@ -127,7 +127,9 @@ tasks.register<Test>("integrationTest") {
     forkEvery = 1
     // Forward the Keycloak image override (used by the CI matrix) and
     // any other -D properties whose names we deliberately accept.
-    listOf("keycloak.image").forEach { prop ->
+    // A short it.roles.refreshDelaySeconds lets role refreshes leak between
+    // test classes on the shared container. Use it only for debugging.
+    listOf("keycloak.image", "it.roles.refreshDelaySeconds").forEach { prop ->
         System.getProperty(prop)?.let { systemProperty(prop, it) }
     }
     doFirst {
@@ -157,8 +159,15 @@ tasks.register<Test>("performanceTest") {
     // Forward selected -D system properties from the gradle invocation to
     // the test JVM. Without this, `-Dperf.userCount=10000` would be set on
     // the gradle daemon but invisible to Integer.getInteger() inside tests.
-    listOf("perf.userCount", "perf.scimSinkLatencyMs", "perf.membershipCount").forEach { prop ->
+    listOf(
+        "perf.userCount", "perf.scimSinkLatencyMs", "perf.membershipCount", "it.roles.refreshDelaySeconds",
+    ).forEach { prop ->
         System.getProperty(prop)?.let { systemProperty(prop, it) }
+    }
+    // A perf run measures role refreshes on the shared container, so the
+    // delay is short there unless the caller sets it.
+    if (System.getProperty("it.roles.refreshDelaySeconds") == null) {
+        systemProperty("it.roles.refreshDelaySeconds", "1")
     }
     // Always re-run perf tests (their inputs are wall-clock-sensitive,
     // not source-driven, and gradle's UP-TO-DATE check would otherwise

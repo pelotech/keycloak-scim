@@ -477,3 +477,58 @@ very-low-latency servers, the per-op lane is already faster, so
 WireMock models round trips only, these wins are a floor. A real
 server's per-request overhead would push the crossover lower, and
 widen the slow-server advantage.
+
+## Role refresh
+
+A role refresh reads every mapped user of a component. It sends only the
+users whose SCIM body hash changed. These numbers are for a refresh with no
+change. The test is `RoleRefreshPerfTest`. The rows came from:
+
+```
+./gradlew performanceTest --tests '*RoleRefreshPerfTest' -Dperf.userCount=<users>
+```
+
+Setup: Keycloak 25.0.6, Apple M4 Max with 36 GiB of memory, Docker through
+OrbStack, embedded WireMock SCIM server with 0 ms latency. One run per row.
+The realm holds the seeded users plus two users from the LDAP seed file, so
+it maps 2 more users than the count in the first column.
+
+| Users | Role refresh, no change | PUT requests during the refresh | Manual sync with this feature |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 1,203 ms | 0 | 3,164 ms |
+| 5,000 | 4,411 ms | 0 | 10,098 ms |
+
+The test counts the PUT requests in WireMock before and after the refresh.
+The count did not change. The test also checks that the manual sync sent
+one PUT for each mapped user and reported no failure. So every mapped user had a
+hash before the refresh ran.
+
+The manual sync sends every user once. With this feature it also writes one
+body hash for each user, in its own short transaction. To see what this
+feature adds to a manual sync, the same steps ran without the role refresh
+on the code before this feature (the 1.8.0 release plus the changes made
+since). That baseline used a temporary copy of this test.
+It compares the whole feature, not only the hash write.
+
+| Users | Manual sync, before this feature | Manual sync, with this feature |
+| ---: | ---: | ---: |
+| 1,000 | 2,790 ms | 3,164 ms (3,745 ms in an earlier run) |
+| 5,000 | 11,235 ms | 10,098 ms (10,512 ms in an earlier run) |
+
+One run each cannot separate the cost of this feature on a manual sync from
+the run-to-run noise of this rig. The two runs with the feature differ from
+each other by up to 0.6 s. At 5,000 users the runs with the feature were
+faster than the baseline. At 1,000 users they were slower.
+
+### 10,000 users: not measured
+
+The 10,000-user run did not complete. The manual sync stopped after about
+6,300 replaces with `NoHttpResponseException: host.testcontainers.internal
+failed to respond`. The sync then did not write the remaining hashes, so the
+following role refresh sent 3,690 users. The baseline run stopped at the
+same point (6,296 replaces). So the stop is not caused by this feature. It
+comes from the test rig or from the SCIM client, and we did not find out
+which. Clearing the WireMock request journal before the sync did not help.
+The 1,000-user and 5,000-user rows above are the measured values. The
+duration of a refresh grows with the user count. Do not extrapolate it to
+10,000 users from two points.
