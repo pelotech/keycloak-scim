@@ -639,10 +639,11 @@ public class ScimClient {
 
     /**
      * Records a successful re-create. The server gave the resource a new
-     * remote id. The adapter still holds the old one and keeps it on apply.
-     * So this sets the new id on purpose, drops the old mapping row and saves
-     * a new one. The remote id is part of the row key, so the row cannot be
-     * updated in place.
+     * remote id, and the adapter still holds the old one. So this sets the
+     * new id on purpose, drops the old mapping row and saves a new one. The
+     * remote id is part of the row key, so the row cannot be updated in
+     * place. Only the id is read from the response, so a partial response
+     * cannot stop the row from moving to the new id.
      *
      * @throws InvalidResponseFromScimEndpointException if the response has no id
      */
