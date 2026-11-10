@@ -67,7 +67,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Shared scaffolding for end-to-end integration tests against the full stack:
- * Keycloak 25.0.6 + osixia/openldap + an embedded WireMock SCIM sink.
+ * Keycloak 26.0.8 + osixia/openldap + an embedded WireMock SCIM sink.
  *
  * <p>Lifecycle: WireMock starts once per test class. Each container starts on
  * first use instead, through {@link #keycloak()}, {@link #admin()} and
@@ -107,7 +107,7 @@ public abstract class IntegrationTestBase {
      *  across supported Keycloak majors. Default tracks our minimum
      *  supported version. */
     protected static final String KEYCLOAK_IMAGE =
-        System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:25.0.6");
+        System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:26.0.8");
 
     /** The SCIM sink. It runs in this JVM, so every class can afford it. */
     protected static WireMockServer wireMock;

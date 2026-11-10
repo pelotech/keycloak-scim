@@ -32,11 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Verify both the minimum-supported and the next-major Keycloak
-      # versions. We compile against 25.0.6 and ship binary
-      # compatibility for 26.x; this matrix catches drift.
+      # Verify both the minimum-supported and the latest tested Keycloak
+      # versions. We compile against 26.0.8 and ship binary
+      # compatibility for later 26.x releases; this matrix catches drift.
       matrix:
-        keycloak: ["25.0.6", "26.7.4"]
+        keycloak: ["26.0.8", "26.7.4"]
     name: Java 21 / Keycloak ${{ matrix.keycloak }}
     steps:
       - uses: actions/checkout@v4

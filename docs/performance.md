@@ -8,9 +8,11 @@ scaffolding is in `src/perfTest/`. Reports land in
 ## Measurement environment
 
 Measurements run on local Docker Desktop, on a developer machine.
-Each run boots Keycloak 25.0.6, osixia/openldap 1.5.0, and an embedded
-WireMock SCIM server with 0 ms simulated latency. Numbers below are
-from `1000`-user runs, unless noted. Throughput scales linearly to
+Each run boots Keycloak, osixia/openldap 1.5.0, and an embedded
+WireMock SCIM server with 0 ms simulated latency. The numbers below were
+measured on Keycloak 25.0.6. The harness now boots 26.0.8, the minimum
+supported version, so a new run can differ. Numbers below are from
+`1000`-user runs, unless noted. Throughput scales linearly to
 10k.
 
 Run with `./gradlew performanceTest -Dperf.userCount=N`.

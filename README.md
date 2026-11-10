@@ -35,8 +35,7 @@ What's added relative to upstream:
   [`docs/configuration.md`](docs/configuration.md) for setup.
 - **OpenTelemetry tracing.** Every outbound SCIM operation emits a
   `CLIENT` span, nested under the active Keycloak request span. This
-  works automatically on Keycloak 26 and later, when tracing is
-  enabled. On Keycloak 25.x, it falls back to a no-op. See
+  works automatically when Keycloak tracing is enabled. See
   [`docs/tracing.md`](docs/tracing.md) for setup and examples.
 - **OCI image for Kubernetes ImageVolume mounting.** Add the plugin to
   a Keycloak pod without building a custom image. See
@@ -49,7 +48,7 @@ What's added relative to upstream:
 
 | Component | Supported |
 | --- | --- |
-| Keycloak | 25.x, 26.x |
+| Keycloak | 26.x (26.0.8 or later). Plugin version 1.8.0 and earlier support 25.x. |
 | Java (build + runtime) | 21 |
 | Kubernetes (for ImageVolume mounting) | 1.33+ (image volumes beta, on by default) |
 | Architectures (OCI image) | linux/amd64, linux/arm64 |

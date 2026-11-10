@@ -1,19 +1,17 @@
 package sh.libre.scim.core;
 
 /**
- * Thin tracing facade. On Keycloak 26+ (which bundles OpenTelemetry via Quarkus)
- * {@link #create()} returns an {@link OtelTracingBridge} that emits real spans.
- * On Keycloak 25.x, where OTel is absent, it returns a no-op bridge so the plugin
- * compiles and runs against both versions without changes.
+ * Thin tracing facade over OpenTelemetry, which every supported Keycloak
+ * version (26+) bundles through Quarkus. When Keycloak tracing is off, the
+ * global OpenTelemetry instance is a no-op, so the spans cost almost nothing.
  *
- * <p>No OpenTelemetry types appear in this interface so callers never trigger a
- * {@link NoClassDefFoundError} on runtimes that don't have OTel on the classpath.
+ * <p>No OpenTelemetry types appear in this interface, so callers and their
+ * tests do not depend on the OpenTelemetry API.
  */
 interface ScimTracingBridge {
 
     /**
-     * Handle for a started span. Callers use try-with-resources; all methods are
-     * safe to call on the no-op implementation.
+     * Handle for a started span. Callers use try-with-resources.
      */
     interface SpanHandle extends AutoCloseable {
         void setHttpStatus(int code);
@@ -24,11 +22,6 @@ interface ScimTracingBridge {
     SpanHandle startSpan(String operation, String resourceType, String serverAddress);
 
     static ScimTracingBridge create() {
-        try {
-            Class.forName("io.opentelemetry.api.GlobalOpenTelemetry");
-            return new OtelTracingBridge();
-        } catch (ClassNotFoundException | NoClassDefFoundError e) {
-            return new NoopTracingBridge();
-        }
+        return new OtelTracingBridge();
     }
 }
