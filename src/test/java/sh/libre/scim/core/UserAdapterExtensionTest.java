@@ -126,29 +126,29 @@ class UserAdapterExtensionTest {
             }
         }
 
-        // The SDK serializes every PATCH op's "value" as a JSON array per RFC 7644
-        // (e.g. {"path":"...:active","op":"replace","value":[true]}). We therefore
-        // assert the JSON *type of the array element(s)* to prove typing is preserved.
+        // RFC 7643 single-valued attributes carry a scalar value, not a
+        // one-element array. A multivalued attribute carries one flat array.
 
-        // Enterprise department REPLACE op present (value wrapped as ["Eng"]).
+        // Enterprise department REPLACE op: value is the JSON string "Eng".
         assertThat(byPath).containsKey(ENT + ":department");
-        assertThat(byPath.get(ENT + ":department").get("op").asText()).isEqualToIgnoringCase("replace");
+        JsonNode deptOp = byPath.get(ENT + ":department");
+        assertThat(deptOp.get("op").asText()).isEqualToIgnoringCase("replace");
+        assertThat(deptOp.get("value").isTextual()).isTrue();
+        assertThat(deptOp.get("value").asText()).isEqualTo("Eng");
 
-        // Custom boolean op: value is [true] — a one-element array whose element is a
-        // JSON boolean true (NOT the string "true").
+        // Custom boolean op: value is the JSON boolean true, not "true" and not [true].
         JsonNode activeOp = byPath.get(CUSTOM + ":active");
         assertThat(activeOp).isNotNull();
         JsonNode activeValue = activeOp.get("value");
-        assertThat(activeValue.isArray()).isTrue();
-        assertThat(activeValue).hasSize(1);
-        assertThat(activeValue.get(0).isBoolean()).isTrue();
-        assertThat(activeValue.get(0).booleanValue()).isTrue();
+        assertThat(activeValue.isBoolean()).isTrue();
+        assertThat(activeValue.booleanValue()).isTrue();
 
-        // Custom multivalued op: value is a JSON array carrying both elements.
+        // Custom multivalued op: value is one flat JSON array with both elements.
         JsonNode labelsOp = byPath.get(CUSTOM + ":labels");
         assertThat(labelsOp).isNotNull();
         JsonNode labelsValue = labelsOp.get("value");
         assertThat(labelsValue.isArray()).isTrue();
+        assertThat(labelsValue).allSatisfy(n -> assertThat(n.isTextual()).isTrue());
         assertThat(labelsValue).extracting(JsonNode::asText).containsExactly("/a", "/b");
     }
 

@@ -11,7 +11,6 @@ import java.util.stream.Stream;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.builder.PatchBuilder;
-import de.captaingoldfish.scim.sdk.common.constants.enums.PatchOp;
 import de.captaingoldfish.scim.sdk.common.request.PatchOpRequest;
 import de.captaingoldfish.scim.sdk.common.request.PatchRequestOperation;
 import de.captaingoldfish.scim.sdk.common.resources.User;
@@ -318,11 +317,7 @@ public class UserAdapter extends Adapter<UserModel, User> {
 
         if (extensionMappings != null && !extensionMappings.isEmpty()) {
             for (var pv : extensionMappings.patchValues(extensionValues)) {
-                ops.add(PatchRequestOperation.builder()
-                    .path(pv.path())
-                    .op(PatchOp.REPLACE)
-                    .valueNode(pv.value())
-                    .build());
+                ops.add(ScimPatchOps.replace(pv.path(), pv.value()));
             }
         }
 
