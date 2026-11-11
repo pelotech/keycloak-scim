@@ -520,15 +520,30 @@ the run-to-run noise of this rig. The two runs with the feature differ from
 each other by up to 0.6 s. At 5,000 users the runs with the feature were
 faster than the baseline. At 1,000 users they were slower.
 
-### 10,000 users: not measured
+### 10,000 users
 
-The 10,000-user run did not complete. The manual sync stopped after about
-6,300 replaces with `NoHttpResponseException: host.testcontainers.internal
-failed to respond`. The sync then did not write the remaining hashes, so the
-following role refresh sent 3,690 users. The baseline run stopped at the
-same point (6,296 replaces). So the stop is not caused by this feature. It
-comes from the test rig or from the SCIM client, and we did not find out
-which. Clearing the WireMock request journal before the sync did not help.
-The 1,000-user and 5,000-user rows above are the measured values. The
-duration of a refresh grows with the user count. Do not extrapolate it to
-10,000 users from two points.
+A 10,000-user run first failed. The manual sync stopped after about 6,300
+replaces with `NoHttpResponseException: host.testcontainers.internal failed
+to respond`. The code before this feature stopped at the same point.
+
+The cause was in the SCIM client. The plugin asked for gzip responses. In the
+Keycloak JVM, the SCIM SDK closed each compressed response before the end of
+the HTTP body, so the client discarded the connection after every request. A
+sync therefore opened one TCP connection for each user. On this rig, each of
+those connections also uses a local port on the macOS host, for the
+Testcontainers tunnel to WireMock. macOS has 16,384 such ports, and a closed
+connection keeps its port for 30 seconds. The import and the sync together
+opened about 16,300 connections in that time, and new connections failed.
+
+The client now asks for uncompressed responses, so a sync page reuses one
+connection. `ScimConnectionReuseIT` checks this in a Keycloak container.
+
+Measured after that fix, on Keycloak 26.0.8, on the same machine, one run:
+
+| Users | Role refresh, no change | PUT requests during the refresh | Manual sync |
+| ---: | ---: | ---: | ---: |
+| 10,000 | 17,657 ms | 0 | 18,263 ms |
+
+This row has a different Keycloak version and the connection fix, so do not
+compare it directly with the rows above. The event and import path still
+opens one connection for each user, because each task has its own client.
