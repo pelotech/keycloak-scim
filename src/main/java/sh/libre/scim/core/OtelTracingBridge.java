@@ -7,12 +7,7 @@ import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
 import io.opentelemetry.context.Scope;
 
-/**
- * OpenTelemetry-backed tracing bridge. This class is only instantiated (and therefore
- * only loaded by the JVM) after {@link ScimTracingBridge#create()} confirms that
- * {@code io.opentelemetry.api.GlobalOpenTelemetry} is present on the classpath, which
- * is the case on Keycloak 26+ but not on 25.x.
- */
+/** OpenTelemetry-backed tracing bridge. Keycloak 26+ provides the OpenTelemetry API. */
 class OtelTracingBridge implements ScimTracingBridge {
 
     private final Tracer tracer = GlobalOpenTelemetry.getTracer("keycloak-scim");

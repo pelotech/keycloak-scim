@@ -24,10 +24,10 @@ you already rely on.
   `eventsListeners` needs no reconfiguration.
 - **JPA Entity Provider id.** `scim-resource`, used internally for ID
   mapping persistence, is the same.
-- **Java / Keycloak versions.** Both forks target Keycloak 25.x, on
-  Java 21. This fork's CI matrix runs the full integration suite
-  against Keycloak 25.0.6 and 26.7.4 on every push. It verifies 26.x
-  compatibility instead of merely claiming it.
+- **Java / Keycloak versions.** Both forks use Java 21. Upstream
+  targets Keycloak 25.x. This fork targets Keycloak 26.x after 1.8.0.
+  Version 1.8.0 and earlier support 25.x. This fork's CI matrix runs the full
+  integration suite against Keycloak 26.0.8 and 26.8.2 on every push.
 
 ## What's added
 

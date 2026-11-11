@@ -4,14 +4,13 @@ keycloak-scim emits [OpenTelemetry](https://opentelemetry.io/) spans for
 every outbound SCIM operation. On Keycloak 26 and later, Quarkus bundles
 the OTel SDK. These spans appear automatically in whatever tracing
 backend you have configured. The plugin needs no extra configuration for
-this. On Keycloak 25.x, OTel is absent. The plugin detects this and falls
-back to a no-op. Tracing stays silently disabled on 25.x.
+this.
 
 ## Requirements
 
 | Requirement | Detail |
 | --- | --- |
-| Keycloak version | 26.x or later |
+| Keycloak version | 26.0.8 or later |
 | Keycloak tracing enabled | `--tracing-enabled=true` (or `KC_TRACING_ENABLED=true`) |
 | OTel collector | Any OTLP-compatible backend (Jaeger, Tempo, Honeycomb, …) |
 
