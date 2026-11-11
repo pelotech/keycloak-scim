@@ -36,7 +36,7 @@ jobs:
       # versions. We compile against 26.0.8 and ship binary
       # compatibility for later 26.x releases; this matrix catches drift.
       matrix:
-        keycloak: ["26.0.8", "26.7.4"]
+        keycloak: ["26.0.8", "26.8.2"]
     name: Java 21 / Keycloak ${{ matrix.keycloak }}
     steps:
       - uses: actions/checkout@v4
