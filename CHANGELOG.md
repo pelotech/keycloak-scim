@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.9.0](https://github.com/pelotech/keycloak-scim/compare/v1.8.0...v1.9.0) (2026-11-11)
+
+
+### Features
+
+* default delete-mode to deactivate ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* default group-patchOp to true ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* send effective SCIM roles from composites and parent groups ([2174e83](https://github.com/pelotech/keycloak-scim/commit/2174e83889f6e17ce4c4a1542b84e1bc2fa64865))
+* send role-structure changes through a delayed role refresh ([2174e83](https://github.com/pelotech/keycloak-scim/commit/2174e83889f6e17ce4c4a1542b84e1bc2fa64865))
+
+
+### Bug fixes
+
+* re-create a resource only after a 404, and keep its new remote id ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* reject an unknown delete-mode value ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* reuse SCIM connections when the server compresses responses ([#71](https://github.com/pelotech/keycloak-scim/issues/71)) ([b0ec210](https://github.com/pelotech/keycloak-scim/commit/b0ec2107291a859662fdd76b68dbaad9adefe05d))
+* send single-valued extension values as scalars ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* send the same attributes in a user PATCH as in a PUT, and send active as a boolean ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+* stop skipping the user named admin in sync-refresh ([cff9593](https://github.com/pelotech/keycloak-scim/commit/cff95939c782b099a339fee66c9b39ccb0ecf92b))
+
+
+### Build
+
+* drop Keycloak 25 support ([#68](https://github.com/pelotech/keycloak-scim/issues/68)) ([8ade8f6](https://github.com/pelotech/keycloak-scim/commit/8ade8f636b567fc80bbd902fc28a9dc8a68f1fd7))
+
+
+### Documentation
+
+* add upgrade notes for changes after 1.8.0 ([2174e83](https://github.com/pelotech/keycloak-scim/commit/2174e83889f6e17ce4c4a1542b84e1bc2fa64865))
+
 ## [1.8.0](https://github.com/pelotech/keycloak-scim/compare/v1.7.0...v1.8.0) (2026-09-28)
 
 
