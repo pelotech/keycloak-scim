@@ -206,6 +206,20 @@ be unusable. At sync time, the plugin falls back to the default for an
 unusable stored value, and logs a warning naming the component and the
 bad value.
 
+#### Periodic sync and role refresh
+
+- Run a periodic sync of each SCIM component once a day, with
+  `sync-refresh=true`. It is the safety net for two kinds of change. One
+  kind is a role change that a node did not send before it stopped. The
+  other kind is a change that makes no admin event. See
+  [SCIM roles](#scim-roles).
+- A periodic or manual sync sends every user. It also undoes changes that
+  someone made directly on the SCIM server. It stores the hash of the
+  body for each user that it replaces.
+- A role refresh holds the lease of the component while it runs. If it
+  holds the lease when the periodic sync starts, Keycloak skips that
+  periodic sync until its next period.
+
 #### How sync-refresh pages through users
 
 `sync-refresh` commits one page of users per transaction, instead of pushing
@@ -341,29 +355,72 @@ SCIM component in the realm.
 
 - The plugin sends each marked role as `{"value": "<role name>"}`. It
   does not send `type`, `display`, or `primary`.
-- The plugin collects marked roles from the user's direct role mappings
-  and from the role mappings of the user's direct groups. It does not
-  expand composite roles, and it does not read the roles of parent
-  groups. A role that a user gets only in one of these ways is not sent.
+- The plugin sends every marked role that a user has. This includes
+  direct role mappings, roles from every group of the user and from every
+  parent group, and roles inside composite roles. Realm roles and client
+  roles both count. A role name appears once, even if two roles have the
+  same name.
 - The plugin sends `roles` only in a PUT. A PUT replaces the whole user,
   so a role that is removed in Keycloak is also removed on the server.
-  With `user-patchOp=true`, the plugin does not send `roles`.
+  With `user-patchOp=true`, the plugin does not send `roles`. Keep
+  `user-patchOp=false` for a component that sends SCIM roles.
 
-These changes send a user PUT at once:
+These changes send the user at once:
 
-- A realm role is granted to or removed from the user.
-- A realm role is granted to or removed from a group. The plugin sends
-  a PUT for each member of the group.
-- The user is added to or removed from a group that has a marked role.
+- A realm role or a client role is granted to or removed from the user.
+- The user is added to or removed from a group that gives a marked role.
+  The group can give the role directly, through a parent group, or
+  through a composite role.
 
-These changes do not send a PUT. The server gets the change at the next
-user write or the next `sync-refresh`:
+These changes can affect many users. They do not send users in the admin
+request. They request a **role refresh** instead:
 
-- A client role is granted to or removed from a user or group. The
-  plugin includes marked client roles in `roles`, but it does not act on
-  client role-mapping events. Use realm roles if a change must reach the
-  server at once.
-- The `scim` attribute is added to or removed from an existing role.
+- A role is granted to or removed from a group.
+- A realm role or a client role changes. This includes its `scim`
+  attribute, its composites, and its deletion.
+- A group is moved under a new parent, or to the top level.
+- A group is deleted.
+- A client is deleted.
+
+A group rename or an attribute change does not request a role refresh.
+The plugin sends roles by name, so these changes cannot change a role.
+
+A role refresh works as follows:
+
+- It runs about `scim.roles.refreshDelaySeconds` after the first request
+  (default 60 seconds). A request that comes before the refresh starts
+  joins it. So many changes in a short time make one refresh.
+- It runs for each SCIM component with `enabled=true` and
+  `propagation-user=true`. It runs even if `sync-refresh` is `false`.
+- It reads every mapped user of the component. It sends only the users
+  whose SCIM body changed since the last refresh. The plugin stores a
+  hash of the last body on the mapping of each user. It never creates a
+  user.
+- An event that sends a user marks that user for the next role refresh.
+  The next refresh sends that user again.
+- One thread on each node runs the refreshes for all components. The
+  refresh uses the same page settings, error handling, and lease as a
+  periodic sync.
+- It skips disabled users, as a periodic sync does.
+- A refresh that stops on an error does not try again on its own. The
+  users it did not reach wait for the next role refresh or the next
+  periodic sync.
+
+For the time a role refresh takes, see
+[Role refresh](performance.md#role-refresh) in the performance notes.
+
+These changes make no admin event:
+
+- LDAP mappers
+- identity provider mappers
+- a client deleted through dynamic client registration
+- realm imports and partial imports
+- direct database edits
+
+The server gets such a change at the next write of the user or at the next
+periodic sync. A node keeps pending role refreshes in memory. If a node
+stops before its refresh runs, that change also waits for the periodic
+sync. See [Sync behavior](#sync-behavior) for the daily periodic sync.
 
 ### Group filtering
 
@@ -686,7 +743,9 @@ including `scim` in `eventsListeners`.
 
 **It has no settings of its own.** When enabled, the listener catches
 admin-REST and self-service user, group, and membership events, and
-sends them to every configured SCIM provider component.
+sends them to every configured SCIM provider component. It also catches
+role, role mapping, and client events. These events request a
+[role refresh](#scim-roles).
 
 User propagation does not depend on email verification. A user create
 or update propagates to SCIM whether or not the email is confirmed.
@@ -758,9 +817,11 @@ runtime. Set them with `-D…` JVM flags on the Keycloak process.
 | `scim.dispatch.queueCapacity` | `256` | `ScimDispatcher` / bulk lane | Bounded queue depth between producers and the worker pool. Each lane has its own queue of this size. When the queue is full, the producer **blocks** (back-pressure) instead of buffering without limit. This is what bounds the dispatch memory footprint to roughly this many tasks, regardless of sync size. Raising it loosens the memory bound, for more burst headroom. |
 | `scim.dispatch.blockWarnMs` | `10000` | `ScimDispatcher` / bulk lane | How long a producer may stay blocked on a full queue before the plugin logs a back-pressure WARN and bumps a counter. A rising count signals a slow or wedged SCIM server that is throttling syncs. |
 | `scim.dispatch.bulkBatchSize` | `20` | bulk lane | Maximum number of SCIM operations the plugin combines into one `/Bulk` request (K). Must be at most the SCIM server's advertised `maxOperations`. An oversize batch draws a whole-request `413` or `400`, and that batch's creates are lost for that round. Set K conservatively. The plugin does not auto-discover this limit. Only relevant when a component has `bulk-enabled=true`. |
+| `scim.roles.refreshDelaySeconds` | `60` | `RoleRefreshScheduler` | Seconds between a role-structure change and the role refresh it requests. Several changes within this time make one refresh. |
 | `scim.tls.insecureHostnameVerification` | `false` | `ScimClient` | When `true`, disables TLS hostname verification on outbound SCIM requests. The plugin then accepts any certificate the SCIM server presents, regardless of CN/SAN. Use this only as an escape hatch for development environments, internal CAs with CN drift, or explicitly-trusted self-signed setups. **Leave `false` in production.** With verification off, an attacker can position itself between the plugin and the SCIM server. It can then present a valid certificate for any domain, impersonate the SCIM server, and harvest bearer tokens. |
 | `scim.sync.lease.simulateCrash` | `false` | `ScimSync` | Test aid. When `true`, a sync run takes its lease and then behaves as a crashed holder: no heartbeat, no release. Later syncs of that component are refused for 120 seconds, and a run longer than that can overlap the next one. The plugin logs a warning on every sync while it is set. Leave it unset in production. |
 | `keycloak.image` | `quay.io/keycloak/keycloak:26.0.8` | integration tests | Overrides the Keycloak container image the test harness uses. The CI matrix uses this to verify both the minimum and the latest tested 26.x release. Not relevant to production. |
+| `it.roles.refreshDelaySeconds` | `86400` (`1` in `performanceTest`) | integration and performance tests | Sets `scim.roles.refreshDelaySeconds` on the shared test Keycloak. The long default keeps a role refresh from one test out of later tests. Not relevant to production. |
 
 ## What's NOT configurable (by design)
 

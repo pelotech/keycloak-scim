@@ -109,6 +109,15 @@ public abstract class IntegrationTestBase {
     protected static final String KEYCLOAK_IMAGE =
         System.getProperty("keycloak.image", "quay.io/keycloak/keycloak:26.0.8");
 
+    /**
+     * Role-refresh delay for the shared Keycloak. Long by default, so a role
+     * refresh that one test schedules never fires inside a later test. The
+     * perf task sets it short. A test class that checks role refreshes runs
+     * its own container.
+     */
+    protected static final String ROLE_REFRESH_DELAY_SECONDS =
+        System.getProperty("it.roles.refreshDelaySeconds", "86400");
+
     /** The SCIM sink. It runs in this JVM, so every class can afford it. */
     protected static WireMockServer wireMock;
 
@@ -167,7 +176,8 @@ public abstract class IntegrationTestBase {
             if (keycloak == null) {
                 keycloak = new KeycloakContainer(KEYCLOAK_IMAGE)
                     .withProviderLibsFrom(List.of(PLUGIN_JAR))
-                    .withNetwork(network);
+                    .withNetwork(network)
+                    .withEnv("JAVA_OPTS_APPEND", "-Dscim.roles.refreshDelaySeconds=" + ROLE_REFRESH_DELAY_SECONDS);
                 keycloak.start();
             }
             return keycloak;

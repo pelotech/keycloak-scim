@@ -49,17 +49,19 @@ choose to use them.
 - **OCI image** for Kubernetes ImageVolume mounting
   (`ghcr.io/pelotech/keycloak-scim`).
 
-## New settings (backward-compatible except `group-patchOp` and `delete-mode`)
+## Settings that differ from upstream
 
-| Setting | Default | Effect if unchanged |
+Two defaults differ from upstream. A component that keeps the default
+behaves differently after the switch:
+
+| Setting | Default here | To keep upstream behavior |
 | --- | --- | --- |
-| `user-patchOp` | false | Identical to upstream (PUT for user updates). |
-| `group-patchOp` | true | **Differs from upstream.** Group updates use PATCH, and each membership change is a single-member PATCH. Set `false` to keep upstream behavior (PUT for group updates, with automatic 405→PATCH fallback). |
-| `username-source` | `username` | Identical to upstream (uses Keycloak username for SCIM userName). |
-| `delete-mode` | `deactivate` | **Differs from upstream.** User deprovisioning sets `active: false` on the remote user and keeps the mapping. Set `delete` to keep upstream behavior (`DELETE /Users/{id}`). |
-| `reconciler-enabled` | false | No reconciler activity. |
-| `reconciler-interval-seconds` | 86400 | Ignored when reconciler is disabled. |
-| `reconciler-stale-threshold-seconds` | 172800 | Ignored when reconciler is disabled. |
+| `group-patchOp` | `true` | Set `false`. |
+| `delete-mode` | `deactivate` | Set `delete`. |
+
+Every other new setting is off by default, or matches upstream. For the
+full list of settings and their defaults, see
+[`docs/configuration.md`](configuration.md).
 
 ## Behavioral differences worth knowing
 

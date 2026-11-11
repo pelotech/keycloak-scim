@@ -337,6 +337,48 @@ public class ScimDispatcher implements AutoCloseable {
         });
     }
 
+    /**
+     * Asks for one role refresh of every SCIM component in the realm that has
+     * enabled=true and propagation-user=true. The request is made after the
+     * caller's transaction commits, so the refresh reads the change it serves.
+     * A rollback makes no request.
+     */
+    public void requestRoleRefresh() {
+        var scheduler = RoleRefreshScheduler.current();
+        if (scheduler == null) {
+            return;
+        }
+        var realm = session.getContext().getRealm();
+        var realmId = realm.getId();
+        List<String> componentIds = realm.getComponentsStream()
+            .filter(RoleRefreshScheduler::refreshable)
+            .map(ComponentModel::getId)
+            .toList();
+        if (componentIds.isEmpty()) {
+            return;
+        }
+        session.getTransactionManager().enlistAfterCompletion(new KeycloakTransaction() {
+            private volatile boolean done = false;
+
+            @Override public void begin() {}
+
+            @Override
+            public void commit() {
+                componentIds.forEach(id -> scheduler.request(realmId, id));
+                done = true;
+            }
+
+            @Override
+            public void rollback() {
+                done = true;
+            }
+
+            @Override public void setRollbackOnly() {}
+            @Override public boolean getRollbackOnly() { return false; }
+            @Override public boolean isActive() { return !done; }
+        });
+    }
+
     @Override
     public void close() {
         for (var c : clients.values()) {

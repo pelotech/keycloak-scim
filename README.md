@@ -342,6 +342,9 @@ Enterprise User field constraints are in
 
 ## Documentation
 
+- [`docs/upgrading-from-1.8.md`](docs/upgrading-from-1.8.md): changes
+  after 1.8.0, and how to keep the 1.8.0 behavior. Read it before you
+  upgrade.
 - [`docs/configuration.md`](docs/configuration.md): every setting,
   attribute, endpoint, and JVM property.
 - [`docs/tracing.md`](docs/tracing.md): OpenTelemetry tracing. What is

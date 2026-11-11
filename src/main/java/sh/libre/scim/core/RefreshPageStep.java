@@ -100,6 +100,8 @@ final class RefreshPageStep implements PageStep<String> {
     private final SyncErrorPolicy policy;
     private final BooleanSupplier leaseLost;
     private final Runnable progressReporter;
+    /** True for a role refresh. See {@link ScimClient#refreshOne}. */
+    private final boolean roleRefresh;
     // The runner keeps one step for the whole run, so the count crosses pages.
     private final ThrottleStreak throttleStreak = new ThrottleStreak();
 
@@ -111,6 +113,16 @@ final class RefreshPageStep implements PageStep<String> {
      */
     RefreshPageStep(KeycloakSessionFactory sessionFactory, String realmId, ComponentModel model,
                     Duration pageBudget, Clock clock, BooleanSupplier leaseLost, Runnable progressReporter) {
+        this(sessionFactory, realmId, model, pageBudget, clock, leaseLost, progressReporter, false);
+    }
+
+    /**
+     * @param roleRefresh true for a role refresh, which skips unmapped users and
+     *     users whose body hash is unchanged
+     */
+    RefreshPageStep(KeycloakSessionFactory sessionFactory, String realmId, ComponentModel model,
+                    Duration pageBudget, Clock clock, BooleanSupplier leaseLost, Runnable progressReporter,
+                    boolean roleRefresh) {
         // Fail at wiring time. A missing argument must not surface inside the
         // first page transaction, after the run has already started.
         this.sessionFactory = Objects.requireNonNull(sessionFactory, "sessionFactory");
@@ -120,6 +132,7 @@ final class RefreshPageStep implements PageStep<String> {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.leaseLost = Objects.requireNonNull(leaseLost, "leaseLost");
         this.progressReporter = Objects.requireNonNull(progressReporter, "progressReporter");
+        this.roleRefresh = roleRefresh;
         this.policy = SyncErrorPolicy.fromConfig(model.get("sync-on-error"));
     }
 
@@ -156,7 +169,7 @@ final class RefreshPageStep implements PageStep<String> {
                         // removing such users is the reconciler's job.
                         var user = session.users().getUserById(realm, row.id());
                         return refreshLoaded(row.id(), user, counters,
-                            u -> client.refreshOne(UserAdapter::new, u, counters, policy));
+                            u -> client.refreshOne(UserAdapter::new, u, counters, policy, roleRefresh));
                     },
                     transaction::getRollbackOnly,
                     leaseLost,

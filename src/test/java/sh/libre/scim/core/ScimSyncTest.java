@@ -340,4 +340,44 @@ class ScimSyncTest {
         assertThat(result.getUpdated()).isEqualTo(10);
         assertThat(result.getFailed()).isEqualTo(7);
     }
+
+    @Test
+    void aRoleRefreshThatFindsTheLeaseHeldIsRefused() {
+        var sessionFactory = mock(KeycloakSessionFactory.class);
+        var store = new FakeLeaseStore();
+        store.ensureRow("comp-1");
+        store.inOneTransaction(l -> { l.take("comp-1", "other", 1_000_000L); return null; });
+
+        var result = ScimSync.runRoleRefresh(sessionFactory, "realm-1", model("propagation-user", "true"),
+            () -> false, store, Clock.fixed(Instant.ofEpochMilli(1_000_500L), ZoneOffset.UTC));
+
+        assertThat(result).isEqualTo(RoleRefreshResult.REFUSED);
+        verifyNoInteractions(sessionFactory);
+    }
+
+    @Test
+    void aRoleRefreshThatCannotTakeTheLeaseIsRefused() {
+        var sessionFactory = mock(KeycloakSessionFactory.class);
+        var store = new FakeLeaseStore();
+        store.ensureFailure = new IllegalStateException("database down");
+
+        var result = ScimSync.runRoleRefresh(sessionFactory, "realm-1", model("propagation-user", "true"),
+            () -> false, store, Clock.systemUTC());
+
+        assertThat(result).isEqualTo(RoleRefreshResult.REFUSED);
+        verifyNoInteractions(sessionFactory);
+    }
+
+    @Test
+    void aRoleRefreshAfterShutdownStopsBeforeTheFirstPage() {
+        var sessionFactory = mock(KeycloakSessionFactory.class);
+        var store = new FakeLeaseStore();
+
+        var result = ScimSync.runRoleRefresh(sessionFactory, "realm-1", model("propagation-user", "true"),
+            () -> true, store, Clock.systemUTC());
+
+        assertThat(result).isEqualTo(RoleRefreshResult.STOPPED);
+        verifyNoInteractions(sessionFactory);
+        assertThat(store.rows.get("comp-1").holder).isNull();
+    }
 }

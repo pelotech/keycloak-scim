@@ -118,6 +118,55 @@ public final class ScimSync {
     }
 
     /**
+     * Runs one role refresh of a component: the user refresh stage only,
+     * skipping unmapped users and users whose body hash is unchanged. It runs
+     * whatever {@code sync-refresh} says, because that setting controls the
+     * periodic and manual syncs. See {@link RoleRefreshScheduler}.
+     *
+     * @param shutdown true once the node is stopping. The run checks it with
+     *     the lease, between users.
+     */
+    static RoleRefreshResult runRoleRefresh(KeycloakSessionFactory sessionFactory, String realmId,
+                                            ComponentModel model, BooleanSupplier shutdown) {
+        return runRoleRefresh(sessionFactory, realmId, model, shutdown,
+            new JpaLeaseStore(sessionFactory), Clock.systemUTC());
+    }
+
+    // package-private so a test can pass a fake store
+    static RoleRefreshResult runRoleRefresh(KeycloakSessionFactory sessionFactory, String realmId,
+                                            ComponentModel model, BooleanSupplier shutdown,
+                                            LeaseStore store, Clock clock) {
+        var lease = new SyncLease(store, model.getId(), clock);
+        try {
+            if (lease.acquire() == SyncLease.Decision.REFUSE) {
+                return RoleRefreshResult.REFUSED;
+            }
+        } catch (RuntimeException e) {
+            LOGGER.warnf(e, "SCIM role refresh: component %s could not take its lease; it will try again",
+                model.getId());
+            return RoleRefreshResult.REFUSED;
+        }
+        BooleanSupplier lost = () -> lease.lost() || shutdown.getAsBoolean();
+        var result = new SynchronizationResult();
+        var completed = new AtomicBoolean(false);
+        long start = System.nanoTime();
+        try {
+            lease.startHeartbeat();
+            unlessLost(lost, "role refresh", result, () ->
+                runContained(model, "role refresh", result, () -> completed.set(
+                    refreshUsers(sessionFactory, realmId, model, clock, result, lost,
+                        lease::reportProgress, true))));
+        } finally {
+            lease.release();
+        }
+        long millis = (System.nanoTime() - start) / 1_000_000L;
+        LOGGER.infof("SCIM role refresh of component %s %s in %d ms: %d users sent, %d failed",
+            model.getId(), completed.get() ? "finished" : "stopped", millis,
+            result.getUpdated(), result.getFailed());
+        return completed.get() ? RoleRefreshResult.FINISHED : RoleRefreshResult.STOPPED;
+    }
+
+    /**
      * The four stages, in order. Each is checked against the lease first, so
      * a run that lost it skips what it has not started. The stages see only
      * the progress reporter and the lost check, never the lease itself.
@@ -137,7 +186,7 @@ public final class ScimSync {
             if (doRefresh) {
                 unlessLost(lost, "user refresh", result, () ->
                     runContained(model, "user refresh", result,
-                        () -> refreshUsers(sessionFactory, realmId, model, clock, result, lost, progress)));
+                        () -> refreshUsers(sessionFactory, realmId, model, clock, result, lost, progress, false)));
             }
         }
         if (groups) {
@@ -188,9 +237,9 @@ public final class ScimSync {
      * users unvisited. That counts as a failure, so the sync result shows it
      * and an operator does not have to read the log to find out.
      */
-    private static void refreshUsers(KeycloakSessionFactory sessionFactory, String realmId,
-                                     ComponentModel model, Clock clock, SynchronizationResult result,
-                                     BooleanSupplier lost, Runnable progress) {
+    private static boolean refreshUsers(KeycloakSessionFactory sessionFactory, String realmId,
+                                        ComponentModel model, Clock clock, SynchronizationResult result,
+                                        BooleanSupplier lost, Runnable progress, boolean roleRefresh) {
         progress.run();
         int pageSize = ScimStorageProviderFactory.positiveIntSetting(model,
             ScimStorageProviderFactory.SYNC_PAGE_SIZE,
@@ -199,10 +248,13 @@ public final class ScimSync {
             ScimStorageProviderFactory.SYNC_PAGE_MAX_SECONDS,
             ScimStorageProviderFactory.DEFAULT_SYNC_PAGE_MAX_SECONDS));
         // The run's clock, so the page budget and the lease read the same time.
-        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, clock, lost, progress);
-        try (var ignored = TRACING.startSpan("scim.sync.refresh", "User", model.get("endpoint"))) {
+        var step = new RefreshPageStep(sessionFactory, realmId, model, pageBudget, clock, lost, progress, roleRefresh);
+        boolean completed;
+        try (var ignored = TRACING.startSpan(roleRefresh ? "scim.sync.roleRefresh" : "scim.sync.refresh",
+                "User", model.get("endpoint"))) {
             var outcome = PagedSyncRunner.run(step, pageSize, result);
-            if (!outcome.completed()) {
+            completed = outcome.completed();
+            if (!completed) {
                 LOGGER.errorf("SCIM user refresh on component %s (%s) stopped at cursor %s because of %s; "
                     + "the users after that point were not visited",
                     model.getId(), model.getName(), outcome.cursor(), outcome.stopReason());
@@ -210,6 +262,7 @@ public final class ScimSync {
             }
         }
         progress.run();
+        return completed;
     }
 
     /**
