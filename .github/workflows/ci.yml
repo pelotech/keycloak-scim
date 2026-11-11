@@ -1,9 +1,11 @@
 name: CI
 
-# Runs unit + integration tests on every PR and on every push to a
-# non-`main` branch. Push-to-main is intentionally excluded — that
-# path is owned by release-please (which opens its release PR) and
-# any failure on main shows up in the release PR's CI run.
+# Runs unit + integration tests once for each change to a PR into
+# `main`. It does not also run on the branch push: with both triggers,
+# every push to a PR branch ran the whole matrix twice. To test a branch
+# that has no PR yet, open a draft PR or start this workflow by hand
+# (workflow_dispatch). Push-to-main is not tested here: that path is
+# owned by release-please, and its release PR runs this workflow.
 #
 # Integration tests boot real containers (Keycloak + OpenLDAP +
 # WireMock), so a CI run takes a few minutes. Worth the cost: every
@@ -14,9 +16,7 @@ on:
   pull_request:
     branches:
       - main
-  push:
-    branches-ignore:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
