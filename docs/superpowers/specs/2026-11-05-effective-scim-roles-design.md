@@ -387,10 +387,9 @@ Run one role refresh over N mapped users with no change. Record the
 duration, and prove from the SCIM server's request log that it sends no
 request. Also time a manual sync, which now writes a hash for each user.
 
-Measured so far, at 1,000 and 5,000 users: see `docs/performance.md`,
-"Role refresh". A run at 10,000 users is blocked today: a manual sync
-aborts after about 6,300 updates with `NoHttpResponseException`, on the
-code before this feature too. That abort is not tracked yet.
+Measured at 1,000, 5,000 and 10,000 users: see `docs/performance.md`,
+"Role refresh". The 10,000-user run first failed, because the SCIM client
+discarded its connection after each compressed response. That is fixed.
 
 ## Alternatives considered
 
