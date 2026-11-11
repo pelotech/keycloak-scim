@@ -1,5 +1,9 @@
 package sh.libre.scim.core;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
+import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,8 +20,12 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import java.util.HashMap;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -172,6 +180,82 @@ class UserAdapterTest {
         when(realm.getRole("typo-role")).thenReturn(null);
 
         assertTrue(adapter.skippedByPropagationRole(mock(UserModel.class)));
+    }
+
+    /** Index the PATCH body's operations by path. */
+    private Map<String, JsonNode> patchOpsByPath() throws Exception {
+        var requestBuilder = new ScimRequestBuilder(
+            "https://scim.example/scim/v2", ScimClientConfig.builder().build());
+        var body = adapter.toPatchBuilder(requestBuilder, "Users/ext-1").getResource();
+        var byPath = new HashMap<String, JsonNode>();
+        for (JsonNode op : new ObjectMapper().readTree(body).get("Operations")) {
+            byPath.put(op.get("path").asText(), op);
+        }
+        return byPath;
+    }
+
+    private static JsonNode value(JsonNode op) {
+        assertNotNull(op);
+        return op.get("value");
+    }
+
+    @Test
+    void patchSendsActiveAsJsonBoolean() throws Exception {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        adapter.setUsername("alice");
+
+        // RFC 7643: active is a single boolean, not "true" and not [true].
+        var active = value(patchOpsByPath().get("active"));
+        assertTrue(active.isBoolean(), "active must be a JSON boolean, was: " + active);
+        assertTrue(active.booleanValue());
+    }
+
+    @Test
+    void patchCoversTheSameAttributesAsPut() throws Exception {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        adapter.setId("kc-1");
+        adapter.setUsername("alice");
+        adapter.setDisplayName("Alice Liddell");
+        adapter.setGivenName("Alice");
+        adapter.setFamilyName("Liddell");
+        adapter.setEmail("alice@example.com");
+
+        var ops = patchOpsByPath();
+        assertEquals("kc-1", value(ops.get("externalId")).asText());
+        assertEquals("alice", value(ops.get("userName")).asText());
+        assertEquals("Alice Liddell", value(ops.get("displayName")).asText());
+        assertEquals("Alice", value(ops.get("name.givenName")).asText());
+        assertEquals("Liddell", value(ops.get("name.familyName")).asText());
+        var emails = value(ops.get("emails"));
+        assertEquals(1, emails.size());
+        var email = emails.get(0);
+        assertEquals("alice@example.com", email.get("value").asText());
+        assertEquals("work", email.get("type").asText());
+        assertTrue(email.get("primary").asBoolean());
+        for (var op : ops.values()) {
+            assertEquals("replace", op.get("op").asText());
+        }
+    }
+
+    @Test
+    void patchUserNameFollowsUsernameSource() throws Exception {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get("username-source")).thenReturn("email");
+        adapter.setUsername("alice");
+        adapter.setEmail("alice@example.com");
+
+        assertEquals("alice@example.com", value(patchOpsByPath().get("userName")).asText());
+    }
+
+    @Test
+    void patchLeavesOutAttributesThatHaveNoValue() throws Exception {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        adapter.setUsername("alice");
+
+        var ops = patchOpsByPath();
+        assertFalse(ops.containsKey("name.givenName"));
+        assertFalse(ops.containsKey("name.familyName"));
+        assertFalse(ops.containsKey("emails"));
     }
 
 }

@@ -222,4 +222,70 @@ class ScimStorageProviderFactoryValidationTest {
         assertThat(ScimStorageProviderFactory.positiveIntSetting(
             model, ScimStorageProviderFactory.SYNC_PAGE_SIZE, 50)).isEqualTo(5);
     }
+
+    // --- delete-mode ---
+
+    private ComponentModel modelWithDeleteMode(String deleteMode) {
+        var model = modelWith(List.of());
+        model.getConfig().putSingle(ScimStorageProviderFactory.DELETE_MODE, deleteMode);
+        return model;
+    }
+
+    @Test
+    void deleteModeUnset_passes() {
+        assertThatCode(() -> validate(modelWith(List.of()))).doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "deactivate"})
+    void deleteModeKnownValue_passes(String value) {
+        assertThatCode(() -> validate(modelWithDeleteMode(value))).doesNotThrowAnyException();
+    }
+
+    /**
+     * The client reads any value other than "deactivate" as delete. So a typo
+     * would hard-delete users when the operator asked for deactivation.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "  ", "Deactivate", "DELETE", "deactivated", " deactivate", "deactivate\n", "disable"})
+    void deleteModeUnknownValue_isRejected(String value) {
+        assertThatThrownBy(() -> validate(modelWithDeleteMode(value)))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("delete-mode");
+    }
+
+    @Test
+    void deleteModeControlCharacterInValue_isNotInMessage() {
+        assertThatThrownBy(() -> validate(modelWithDeleteMode("deactivate\n")))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageNotContaining("\n");
+    }
+
+    // --- reading delete-mode, which validation cannot guarantee ---
+
+    @Test
+    void anUnsetDeleteModeReadsAsDeactivate() {
+        assertThat(ScimStorageProviderFactory.deleteMode(modelWith(List.of()))).isEqualTo("deactivate");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "deactivate"})
+    void aKnownDeleteModeIsRead(String value) {
+        assertThat(ScimStorageProviderFactory.deleteMode(modelWithDeleteMode(value))).isEqualTo(value);
+    }
+
+    /** A realm import skips the validator. A bad value must not hard-delete users. */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "Delete", "DELETE", " delete", "deleted"})
+    void anUnknownDeleteModeReadsAsDeactivate(String value) {
+        assertThat(ScimStorageProviderFactory.deleteMode(modelWithDeleteMode(value))).isEqualTo("deactivate");
+    }
+
+    @Test
+    void theAdminConsoleDefaultIsDeactivate() {
+        var property = new ScimStorageProviderFactory().getConfigProperties().stream()
+            .filter(p -> ScimStorageProviderFactory.DELETE_MODE.equals(p.getName()))
+            .findFirst().orElseThrow();
+        assertThat(property.getDefaultValue()).isEqualTo("deactivate");
+    }
 }

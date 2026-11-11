@@ -165,11 +165,6 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
     }
 
     @Override
-    public Boolean skipRefresh() {
-        return false;
-    }
-
-    @Override
     public PatchBuilder<Group> toPatchBuilder(ScimRequestBuilder scimRequestBuilder, String url) {
         // A group UPDATE (rename / sync-refresh) carries only the group's own
         // attributes — never the member list. Membership is maintained

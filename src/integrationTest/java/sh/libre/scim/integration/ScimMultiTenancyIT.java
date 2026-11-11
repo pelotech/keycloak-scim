@@ -128,6 +128,8 @@ class ScimMultiTenancyIT extends IntegrationTestBase {
 
         // Start with reconciler disabled.
         var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            // This test checks the DELETE path, not the default.
+            cfg.putSingle("delete-mode", "delete");
             cfg.putSingle("reconciler-enabled", "false");
         });
 

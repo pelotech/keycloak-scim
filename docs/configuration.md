@@ -63,14 +63,17 @@ imports (when the `scim-ldap-sync` mapper is attached), and sync.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `delete-mode` | enum | `delete` | How user deprovisioning reaches the SCIM server. Options: `delete`, `deactivate`. |
+| `delete-mode` | enum | `deactivate` | How user deprovisioning reaches the SCIM server. Options: `deactivate`, `delete`. Values are case-sensitive. The admin console and the admin REST API reject any other value. A realm import does not check the value. The plugin reads any value other than `delete` as `deactivate`, and logs a warning once for each component. |
 
-With `delete` (the default), the plugin sends `DELETE /Users/{id}` and
-drops the local mapping. This is the original, unchanged behaviour. With
-`deactivate`, the plugin never hard-deletes users. Every deprovisioning
+With `deactivate` (the default), the plugin never hard-deletes users.
+A deactivated user can come back under the same remote id. A deleted
+user cannot, so only an exact `delete` deletes. Every deprovisioning
 path (admin user deletion, account self-deletion, and the LDAP-deletion
 reconciler) instead marks the remote user inactive and keeps the local
 mapping.
+
+With `delete`, the plugin sends `DELETE /Users/{id}` and drops the local
+mapping. This was the default in version 1.8.0 and earlier.
 
 By default (`user-patchOp=false`), deactivation sends a `GET /Users/{id}`,
 then a `PUT /Users/{id}` of the fetched resource with `active: false`. If
@@ -78,6 +81,11 @@ the GET already shows the user as inactive, the plugin sends no PUT. With
 `user-patchOp=true`, it sends a single `PATCH` that replaces `active`. A
 404 on any call means the resource is already gone from the SCIM server,
 so the plugin treats the deprovision as complete.
+
+The GET-then-PUT path sends back only what the GET returned. If your SCIM
+server leaves stored attributes out of its GET response, the PUT can
+clear them. Such a server should use `user-patchOp=true`, so that
+deactivation changes only `active`.
 
 The plugin records each deactivation locally, in the `DEACTIVATED_AT`
 column on the mapping row. Because of this record:
@@ -310,19 +318,52 @@ without any configuration change:
 ### PATCH vs PUT preferences
 
 To update an existing SCIM resource, the plugin can issue either PUT
-(full replace) or PATCH (selective). PUT is the default. Some SCIM
-servers (notably Databricks) require PATCH for groups.
+(full replace) or PATCH (selective). Users use PUT by default. Groups use
+PATCH by default.
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
-| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. |
-| `group-patchOp` | bool | `false` | When true, group updates use PATCH instead of PUT. When false (default), the plugin still falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. Most operators do not need to turn this on. |
+| `user-patchOp` | bool | `false` | When true, user updates use PATCH instead of PUT. The PATCH replaces the same attributes that the PUT sends: `externalId`, `userName`, `displayName`, `name.givenName`, `name.familyName`, `emails`, `active`, and the extension mappings. An attribute with no value is left out. `roles` is not sent, so a component that sends [SCIM roles](#scim-roles) must keep this `false`. |
+| `group-patchOp` | bool | `true` | When true (default), group updates use PATCH, and each membership change is one PATCH that adds or removes one member. When false, group updates and membership changes PUT the whole group, and the plugin falls back to PATCH automatically on a 405 Method Not Allowed response from PUT. With `false`, the plugin does not send group membership from a federated (LDAP) provider. See [`ldap-federation-support.md`](ldap-federation-support.md). |
 
 ### User identity mapping
 
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `username-source` | enum | `username` | Which Keycloak attribute fills the SCIM `userName` field. Options: `username`, `email`. Use `email` if the SCIM server expects email-style identifiers. Falls back to the user's `username` if you select `email` but the user has no email set. |
+
+### SCIM roles
+
+The plugin fills the SCIM `roles` attribute of a user from Keycloak
+roles. This is not a component setting. To send a role, set the role
+attribute `scim` to `"true"` on that role. The marker applies to every
+SCIM component in the realm.
+
+- The plugin sends each marked role as `{"value": "<role name>"}`. It
+  does not send `type`, `display`, or `primary`.
+- The plugin collects marked roles from the user's direct role mappings
+  and from the role mappings of the user's direct groups. It does not
+  expand composite roles, and it does not read the roles of parent
+  groups. A role that a user gets only in one of these ways is not sent.
+- The plugin sends `roles` only in a PUT. A PUT replaces the whole user,
+  so a role that is removed in Keycloak is also removed on the server.
+  With `user-patchOp=true`, the plugin does not send `roles`.
+
+These changes send a user PUT at once:
+
+- A realm role is granted to or removed from the user.
+- A realm role is granted to or removed from a group. The plugin sends
+  a PUT for each member of the group.
+- The user is added to or removed from a group that has a marked role.
+
+These changes do not send a PUT. The server gets the change at the next
+user write or the next `sync-refresh`:
+
+- A client role is granted to or removed from a user or group. The
+  plugin includes marked client roles in `roles`, but it does not act on
+  client role-mapping events. Use realm roles if a change must reach the
+  server at once.
+- The `scim` attribute is added to or removed from an existing role.
 
 ### Group filtering
 

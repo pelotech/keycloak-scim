@@ -28,7 +28,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.storage.user.SynchronizationResult;
 import sh.libre.scim.jpa.ScimResource;
 
-/** The delete-mode gate: deactivate applies to Users only, delete stays the default. */
+/** The delete-mode gate: deactivate applies to Users only, and is the default. */
 class ScimClientDeactivateTest {
 
     private static ComponentModel model(String deleteMode) {
@@ -61,8 +61,14 @@ class ScimClientDeactivateTest {
     }
 
     @Test
-    void absentMode_defaultsToDelete() {
-        assertThat(ScimClient.shouldDeactivate(model(null), "User")).isFalse();
+    void absentMode_defaultsToDeactivate() {
+        assertThat(ScimClient.shouldDeactivate(model(null), "User")).isTrue();
+    }
+
+    /** A value the validator would reject must not hard-delete users. */
+    @Test
+    void unknownMode_deactivates() {
+        assertThat(ScimClient.shouldDeactivate(model("Delete"), "User")).isTrue();
     }
 
     private static ScimClient newClient(String deleteMode) {
@@ -172,7 +178,6 @@ class ScimClientDeactivateTest {
         Adapter<TestModel, User> adapter = mock(Adapter.class);
         when(adapter.getType()).thenReturn("User");
         when(adapter.getId()).thenReturn("user-1");
-        when(adapter.skipRefresh()).thenReturn(false);
         var kcModel = mock(TestModel.class);
         when(adapter.getResourceStream()).thenReturn(Stream.of(kcModel));
         when(adapter.getMapping()).thenReturn(tombstone);
@@ -197,7 +202,6 @@ class ScimClientDeactivateTest {
         Adapter<TestModel, User> adapter = mock(Adapter.class);
         when(adapter.getType()).thenReturn("User");
         when(adapter.getId()).thenReturn("user-1");
-        when(adapter.skipRefresh()).thenReturn(false);
         var kcModel = mock(TestModel.class);
         when(adapter.getResourceStream()).thenReturn(Stream.of(kcModel));
         var live = new ScimResource();

@@ -219,7 +219,8 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
         // Closes the scenario-4 gap via the reconciler endpoint.
         stubScimUserCreateOk();
         stubScimUserDeleteOk();
-        var r = newRealmWithScimAndLdap();
+        // This test checks the DELETE path, not the default.
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.putSingle("delete-mode", "delete"));
 
         // Lazy-import alice; this stamps ldap-federation-last-seen and creates
         // her SCIM mapping via onImportUserFromLDAP.
@@ -269,6 +270,8 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
         stubScimUserCreateOk();
         stubScimUserDeleteOk();
         var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            // This test checks the DELETE path, not the default.
+            cfg.putSingle("delete-mode", "delete");
             cfg.putSingle("reconciler-enabled", "true");
             cfg.putSingle("reconciler-interval-seconds", "2");
             cfg.putSingle("reconciler-stale-threshold-seconds", "4");
@@ -365,7 +368,8 @@ class ScimPropagationFromLdapIT extends IntegrationTestBase {
         // it no longer NPEs trying to re-fetch the deleted user.
         stubScimUserCreateOk();
         stubScimUserDeleteOk();
-        var r = newRealmWithScimAndLdap();
+        // This test checks the DELETE path, not the default.
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> cfg.putSingle("delete-mode", "delete"));
         enableScimEventListener(r.realm());
 
         String userId = createAdminUser(r.realm(), "frank", "frank@test.local");

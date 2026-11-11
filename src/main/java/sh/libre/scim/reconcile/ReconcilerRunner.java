@@ -69,7 +69,7 @@ public class ReconcilerRunner {
         );
 
         boolean deactivateMode = "deactivate".equals(
-            scimProvider.get(ScimStorageProviderFactory.DELETE_MODE, "delete"));
+            ScimStorageProviderFactory.deleteMode(scimProvider));
 
         // Iterate our own mappings rather than Keycloak's user list. Walking
         // Keycloak's users triggers federation enumeration, which can silently

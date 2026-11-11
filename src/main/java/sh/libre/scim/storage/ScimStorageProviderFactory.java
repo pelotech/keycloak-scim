@@ -3,6 +3,8 @@ package sh.libre.scim.storage;
 import java.net.URI;
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import jakarta.ws.rs.core.MediaType;
 
@@ -37,6 +39,16 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
     public static final String DELETE_MODE = "delete-mode";
+    /** The values {@link #DELETE_MODE} accepts. */
+    static final List<String> DELETE_MODES = List.of("delete", "deactivate");
+    /**
+     * Deactivate is the default because it can be undone. A deactivated user
+     * can be reactivated under the same remote id. A deleted user cannot come
+     * back.
+     */
+    public static final String DEFAULT_DELETE_MODE = "deactivate";
+    /** Components and bad values already reported, so a sync logs each once. */
+    private static final Set<String> WARNED_DELETE_MODES = ConcurrentHashMap.newKeySet();
     public static final String SYNC_PAGE_SIZE = "sync-page-size";
     public static final String SYNC_PAGE_MAX_SECONDS = "sync-page-max-seconds";
     public static final int DEFAULT_SYNC_PAGE_SIZE = 50;
@@ -69,6 +81,24 @@ public class ScimStorageProviderFactory
         LOGGER.warnf("Component %s has an unusable %s of '%s'; using %d instead",
             model.getId(), name, forMessage(value), fallback);
         return fallback;
+    }
+
+    /**
+     * Reads {@link #DELETE_MODE}. Only the exact value {@code delete} deletes
+     * users. An unset value, and any value the validator rejects, reads as
+     * {@code deactivate}: a realm import skips the validator, and a typo must
+     * not hard-delete users.
+     */
+    public static String deleteMode(ComponentModel model) {
+        String value = model.get(DELETE_MODE);
+        if (value == null || DELETE_MODES.contains(value)) {
+            return value == null ? DEFAULT_DELETE_MODE : value;
+        }
+        if (WARNED_DELETE_MODES.add(model.getId() + "\0" + value)) {
+            LOGGER.warnf("Component %s has an unknown %s of '%s'; using %s instead",
+                model.getId(), DELETE_MODE, forMessage(value), DEFAULT_DELETE_MODE);
+        }
+        return DEFAULT_DELETE_MODE;
     }
 
     public static String reconcilerTaskName(String componentId) {
@@ -176,12 +206,12 @@ public class ScimStorageProviderFactory
                 .name(DELETE_MODE)
                 .type(ProviderConfigProperty.LIST_TYPE)
                 .label("User deprovisioning mode")
-                .helpText("delete (default) sends DELETE /Users/{id} and drops the local mapping. "
-                    + "deactivate sets active:false on the remote user and keeps the mapping, so a "
-                    + "returning user reactivates under the same remote id. Users only; groups are "
+                .helpText("deactivate (default) sets active:false on the remote user and keeps the "
+                    + "mapping, so a returning user reactivates under the same remote id. delete "
+                    + "sends DELETE /Users/{id} and drops the local mapping. Users only; groups are "
                     + "always deleted with DELETE /Groups/{id}.")
-                .options("delete", "deactivate")
-                .defaultValue("delete")
+                .options(DELETE_MODES)
+                .defaultValue(DEFAULT_DELETE_MODE)
                 .add()
                 .property()
                 .name("sync-import")
@@ -236,8 +266,8 @@ public class ScimStorageProviderFactory
                 .name("group-patchOp")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Use PATCH for groups")
-                .helpText("When enabled, use PATCH operations for groups. When disabled, use PUT (with automatic PATCH fallback on 405).")
-                .defaultValue(false)
+                .helpText("When enabled (the default), use PATCH operations for groups, and send one PATCH per membership change. When disabled, use PUT (with automatic PATCH fallback on 405). Group membership from a federated (LDAP) provider is sent only when enabled.")
+                .defaultValue(true)
                 .add()
                 .property()
                 .name("user-patchOp")
@@ -334,6 +364,14 @@ public class ScimStorageProviderFactory
 
         requirePositiveIntIfSet(model, SYNC_PAGE_SIZE);
         requirePositiveIntIfSet(model, SYNC_PAGE_MAX_SECONDS);
+
+        // The client reads any value other than "deactivate" as delete, so a
+        // typo would hard-delete users. Accept only the exact option values.
+        String deleteMode = model.get(DELETE_MODE);
+        if (deleteMode != null && !DELETE_MODES.contains(deleteMode)) {
+            throw new ComponentValidationException(
+                DELETE_MODE + " must be one of " + DELETE_MODES + " (got '" + forMessage(deleteMode) + "')");
+        }
 
         try {
             // Map.get rather than MultivaluedMap.getList — see UserAdapter.apply.

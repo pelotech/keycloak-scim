@@ -9,14 +9,16 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+
 import de.captaingoldfish.scim.sdk.client.ScimClientConfig;
 import de.captaingoldfish.scim.sdk.client.ScimRequestBuilder;
 import de.captaingoldfish.scim.sdk.client.builder.BulkBuilder;
 import de.captaingoldfish.scim.sdk.client.exceptions.IORuntimeException;
 import de.captaingoldfish.scim.sdk.client.response.ServerResponse;
 import de.captaingoldfish.scim.sdk.common.constants.enums.HttpMethod;
-import de.captaingoldfish.scim.sdk.common.constants.enums.PatchOp;
 import de.captaingoldfish.scim.sdk.common.exceptions.ResponseException;
+import de.captaingoldfish.scim.sdk.common.request.PatchOpRequest;
 import de.captaingoldfish.scim.sdk.common.resources.Group;
 import de.captaingoldfish.scim.sdk.common.resources.ResourceNode;
 import de.captaingoldfish.scim.sdk.common.resources.User;
@@ -48,7 +50,6 @@ public class ScimClient {
     private static final ScimTracingBridge TRACING = ScimTracingBridge.create();
     private static final String GROUP_PATCH_OP_KEY = "group-patchOp";
     private static final String USER_PATCH_OP_KEY = "user-patchOp";
-    private static final String DELETE_MODE_KEY = ScimStorageProviderFactory.DELETE_MODE;
 
     // Every other caller uses these. They have no page to fit inside, and a
     // slow endpoint should not fail a user's login.
@@ -223,7 +224,37 @@ public class ScimClient {
      * therefore only runs when this is true (see ScimLdapStorageMapper).
      */
     public boolean isGroupMembershipDeltaEnabled() {
-        return this.model.get(GROUP_PATCH_OP_KEY, false);
+        return usesPatch(this.model, "Group");
+    }
+
+    /**
+     * Whether a replace of this resource type goes out as PATCH. Groups use
+     * PATCH by default ({@code group-patchOp=true}); users use PUT by default
+     * ({@code user-patchOp=false}).
+     */
+    static boolean usesPatch(ComponentModel model, String type) {
+        if ("Group".equals(type)) {
+            return model.get(GROUP_PATCH_OP_KEY, true);
+        }
+        if ("User".equals(type)) {
+            return model.get(USER_PATCH_OP_KEY, false);
+        }
+        return false;
+    }
+
+    /**
+     * Whether a failed replace re-creates the resource. Only a 404 means the
+     * remote resource is gone. A 400 means the server rejected the body, so a
+     * create would not fix it.
+     */
+    static boolean recreatesAfterFailedReplace(int status) {
+        return status == 404;
+    }
+
+    /** The PATCH that deactivates a user. RFC 7643 defines active as a boolean. */
+    static PatchOpRequest deactivatePatch() {
+        return new PatchOpRequest(List.of(
+            ScimPatchOps.replace("active", JsonNodeFactory.instance.booleanNode(false))));
     }
 
     protected ScimClientConfig genScimClientConfig() {
@@ -284,10 +315,10 @@ public class ScimClient {
     /**
      * True when deprovisioning should set active:false instead of DELETE.
      * Only Users can deactivate (RFC 7643 Groups have no {@code active}
-     * attribute); the default mode is {@code delete}. Package-private for tests.
+     * attribute); the default mode is {@code deactivate}. Package-private for tests.
      */
     static boolean shouldDeactivate(ComponentModel model, String adapterType) {
-        return "deactivate".equals(model.get(DELETE_MODE_KEY, "delete")) && "User".equals(adapterType);
+        return "deactivate".equals(ScimStorageProviderFactory.deleteMode(model)) && "User".equals(adapterType);
     }
 
     /** Whether the sole findById row for this KC id is a retained deactivation tombstone. */
@@ -607,6 +638,46 @@ public class ScimClient {
     }
 
     /**
+     * Records a successful re-create. The server gave the resource a new
+     * remote id, and the adapter still holds the old one. So this sets the
+     * new id on purpose, drops the old mapping row and saves a new one. The
+     * remote id is part of the row key, so the row cannot be updated in
+     * place. Only the id is read from the response, so a partial response
+     * cannot stop the row from moving to the new id.
+     *
+     * @throws InvalidResponseFromScimEndpointException if the response has no id
+     */
+    // package-private for tests
+    <S extends ResourceNode> void applyRecreate(
+            Adapter<?, S> adapter, ScimResource oldRow, ServerResponse<S> createResponse) {
+        var created = createResponse.getResource();
+        var newId = created == null ? null : created.getId().orElse(null);
+        if (newId == null || newId.isBlank()) {
+            throw new InvalidResponseFromScimEndpointException(
+                createResponse.getHttpStatus(),
+                "re-create " + adapter.getId() + ": the response has no id");
+        }
+        var oldId = adapter.getExternalId();
+        if (oldRow != null && newId.equals(oldRow.getExternalId())) {
+            // The server gave the same id back. The row is still right.
+            oldRow.setDeactivatedAt(null);
+            LOGGER.infof("Re-created %s %s: the remote id is the same, %s",
+                adapter.getType(), adapter.getId(), newId);
+            return;
+        }
+        // The response is not applied to the adapter. Only the id is needed,
+        // and a partial response must not stop the new id from being kept.
+        adapter.replaceExternalId(newId);
+        if (oldRow != null) {
+            // remove() needs a managed entity, so merge a detached row first.
+            getEM().remove(getEM().contains(oldRow) ? oldRow : getEM().merge(oldRow));
+        }
+        adapter.saveMapping();
+        LOGGER.infof("Re-created %s %s: remote id changed from %s to %s",
+            adapter.getType(), adapter.getId(), oldId, newId);
+    }
+
+    /**
      * The body of a replace. {@code applyModel} carries the work the public
      * entry point must still do, so both entry points share one span and one
      * set of error handlers. An applied adapter passes an empty step.
@@ -638,12 +709,11 @@ public class ScimClient {
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
                 ServerResponse<S> response;
+                boolean recreated = false;
                 try {
                     response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                         try {
-                            LOGGER.info(adapter.getType());
-                            if ((adapter.getType() == "Group" && this.model.get(GROUP_PATCH_OP_KEY, false))
-                                 || (adapter.getType() == "User" && this.model.get(USER_PATCH_OP_KEY, false))) {
+                            if (usesPatch(this.model, adapter.getType())) {
                                 return adapter.toPatchBuilder(scimRequestBuilder, url)
                                               .sendRequest();
                             }
@@ -663,27 +733,21 @@ public class ScimClient {
                 }
                 if (!response.isSuccess()) {
                     int statusCode = response.getHttpStatus();
-                    if (statusCode == 405 && adapter.getType().equals("Group") && !this.model.get(GROUP_PATCH_OP_KEY, false)) {
+                    if (statusCode == 405 && "Group".equals(adapter.getType()) && !usesPatch(this.model, "Group")) {
                         LOGGER.infof("PUT not supported (405) for group %s, falling back to PATCH", adapter.getId());
                         response = adapter.toPatchBuilder(scimRequestBuilder, url).sendRequest();
                     }
                     if (!response.isSuccess()) {
                         int currentStatus = response.getHttpStatus();
-                        if (currentStatus == 404 || currentStatus == 400) {
+                        if (recreatesAfterFailedReplace(currentStatus)) {
                             LOGGER.infof("Remote resource %s not found (%d), re-creating", adapter.getId(), currentStatus);
                             ServerResponse<S> createResponse = scimRequestBuilder
                                 .create(adapter.getResourceClass(), ("/" + adapter.getSCIMEndpoint()).formatted())
                                 .setResource(adapter.toSCIM(false))
                                 .sendRequest();
                             if (createResponse.isSuccess()) {
-                                adapter.apply(createResponse.getResource());
-                                var existingMapping = adapter.getMapping();
-                                if (existingMapping != null) {
-                                    existingMapping.setExternalId(adapter.getExternalId());
-                                    getEM().merge(existingMapping);
-                                } else {
-                                    adapter.saveMapping();
-                                }
+                                applyRecreate(adapter, resource, createResponse);
+                                recreated = true;
                             }
                             response = createResponse;
                         }
@@ -694,7 +758,8 @@ public class ScimClient {
                             "replace " + adapter.getId() + ": " + response.getResponseBody());
                     }
                 }
-                if (resource.getDeactivatedAt() != null) {
+                // A re-create removed the old row. The new row has no flag.
+                if (!recreated && resource.getDeactivatedAt() != null) {
                     // A successful replace means the user is back (re-import or
                     // an explicit admin action). Sync-refresh skips flagged
                     // rows, so it never lands here.
@@ -800,16 +865,12 @@ public class ScimClient {
 
                 ServerResponse<User> response;
                 try {
-                    if (this.model.get(USER_PATCH_OP_KEY, false)) {
+                    if (usesPatch(this.model, "User")) {
                         response = auth.sendWithAuthRefresh(() -> retry.executeSupplier(() -> {
                             try {
-                                var patch = scimRequestBuilder.patch(url, User.class);
-                                patch.addOperation()
-                                    .path("active")
-                                    .op(PatchOp.REPLACE)
-                                    .value("false")
-                                    .build();
-                                return patch.sendRequest();
+                                return scimRequestBuilder.patch(url, User.class)
+                                    .setPatchResource(deactivatePatch())
+                                    .sendRequest();
                             } catch (ResponseException e) {
                                 throw new RuntimeException(e);
                             }
@@ -903,7 +964,7 @@ public class ScimClient {
             AdapterFactory<GroupModel, Group, GroupAdapter> factory,
             String groupId, String userId, boolean isAdd) {
 
-        if (!this.model.get(GROUP_PATCH_OP_KEY, false)) {
+        if (!isGroupMembershipDeltaEnabled()) {
             var group = session.groups().getGroupById(
                     session.getContext().getRealm(), groupId);
             // group-patchOp=false propagates a membership change via a full-group
@@ -1034,7 +1095,7 @@ public class ScimClient {
             LOGGER.infof("Skipping membership ensure: group %s not found locally", groupId);
             return false;
         }
-        if (this.model.get(GROUP_PATCH_OP_KEY, false)) {
+        if (isGroupMembershipDeltaEnabled()) {
             provisionGroupForMembership(factory, group);
         }
         return this.patchGroupMembership(factory, groupId, userId, true);
@@ -1118,7 +1179,7 @@ public class ScimClient {
             // initializers, so it's null (not the real default of false) on a
             // mock. Read it via Boolean.TRUE.equals rather than unboxing it
             // directly, or a mocked adapter with no explicit skip would NPE.
-            if (adapter.skipRefresh() || Boolean.TRUE.equals(adapter.skip)) {
+            if (Boolean.TRUE.equals(adapter.skip)) {
                 LOGGER.debugf("Skipping refresh for excluded resource %s", adapter.getId());
                 return RefreshOutcome.CONTINUE;
             }

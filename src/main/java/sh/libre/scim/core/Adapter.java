@@ -66,6 +66,10 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
         }
     }
 
+    public void replaceExternalId(String externalId) {
+        this.externalId = externalId;
+    }
+
     public String getSCIMEndpoint() {
         return type + "s";
     }
@@ -141,8 +145,6 @@ public abstract class Adapter<M extends RoleMapperModel, S extends ResourceNode>
     public abstract void createEntity() throws Exception;
 
     public abstract Stream<M> getResourceStream();
-
-    public abstract Boolean skipRefresh();
 
     protected ComponentModel getModel() {
         return realm.getComponent(componentId);

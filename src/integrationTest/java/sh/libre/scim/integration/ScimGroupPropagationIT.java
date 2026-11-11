@@ -29,9 +29,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ScimGroupPropagationIT extends IntegrationTestBase {
 
+    /**
+     * Group PUT path: group-patchOp=false, so a group write is a full PUT.
+     * See {@link #setupRealmWithGroupPatchOp} for the PATCH path, the default.
+     */
     private TestRealm setupRealmWithGroupPropagation() {
-        var r = newRealmWithScimAndLdapAndConfig(cfg ->
-            cfg.putSingle("propagation-group", "true"));
+        var r = newRealmWithScimAndLdapAndConfig(cfg -> {
+            cfg.putSingle("propagation-group", "true");
+            cfg.putSingle("group-patchOp", "false");
+        });
         enableScimEventListener(r.realm());
         return r;
     }
