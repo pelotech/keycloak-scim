@@ -78,6 +78,15 @@ public final class KeepAliveConfigManipulator implements ConfigManipulator {
         // endpoints. Raise to give the workers headroom.
         clientBuilder.setMaxConnPerRoute(MAX_CONN_PER_ROUTE);
         clientBuilder.setMaxConnTotal(MAX_CONN_TOTAL);
+
+        // Do not ask for compressed responses. The SDK reads a gzip body to
+        // the end of the gzip data and then closes the response. In the
+        // Keycloak JVM, that close often comes before the end of the HTTP
+        // body, so Apache discards the connection instead of pooling it.
+        // Every request then opened a new connection (and a TLS handshake),
+        // and a fast sync could run out of local ports. SCIM bodies are
+        // small, so compression saves little.
+        clientBuilder.disableContentCompression();
     }
 
     @Override
