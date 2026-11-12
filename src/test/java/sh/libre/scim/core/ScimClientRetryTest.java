@@ -154,6 +154,33 @@ class ScimClientRetryTest {
         }
     }
 
+    /**
+     * A person waits for an interactive call, so it gets the sync page's
+     * budget: three attempts and short timeouts. Against a server that
+     * answers 5xx, it gives up after about 1.3 seconds, not about 37.
+     */
+    @Test
+    void forInteractiveUsesTheSmallBudget() {
+        var model = new ComponentModel();
+        var config = new MultivaluedHashMap<String, String>();
+        config.putSingle("auth-mode", "NONE");
+        config.putSingle("endpoint", "https://scim.example/scim/v2");
+        config.putSingle("content-type", "application/scim+json");
+        model.setConfig(config);
+        model.setId("comp-interactive");
+
+        var client = ScimClient.forInteractive(model, mock(KeycloakSession.class));
+        try {
+            assertThat(client.registry.getDefaultConfig().getMaxAttempts()).isEqualTo(3);
+            var scimClientConfig = client.genScimClientConfig();
+            assertThat(scimClientConfig.getRequestTimeout()).isEqualTo(1);
+            assertThat(scimClientConfig.getConnectTimeout()).isEqualTo(3);
+            assertThat(scimClientConfig.getSocketTimeout()).isEqualTo(10);
+        } finally {
+            client.close();
+        }
+    }
+
     @Test
     void forBatchSyncCapsTheAttemptsButKeepsTheDefaultHttpTimeouts() {
         var model = new ComponentModel();

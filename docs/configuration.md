@@ -162,13 +162,16 @@ Know these three things before you enable it:
   Check whether the user exists. Do not trust the status code alone.
   Account and self-service flows do surface an error. The 201 issue is
   specific to the Admin REST path.
-- **Latency when the SCIM server is down.** Rollback needs synchronous
-  propagation. So an interactive create or update against a slow or
-  unreachable SCIM server blocks first. It uses the whole retry
-  budget, about 38 seconds at the current hardcoded 10-attempt
-  backoff. Only then does it roll back and return. The `never`
-  default avoids this delay, because propagation is asynchronous. A
-  proxy in front of Keycloak may return a `504` first.
+- **Latency when the SCIM server is down.** Admin and account events
+  send to the SCIM server inside the person's request, under every
+  `rollback-strategy`, including `never`. So the person waits for the
+  retries. These calls make up to 3 attempts, with a 3-second connect
+  timeout and a 10-second read timeout. Against a server that answers
+  5xx, the request waits about 1.3 seconds before it fails. Against a
+  server that does not answer, it can wait about 43 seconds. Then the
+  strategy decides: `never` keeps the change, and the other strategies
+  roll it back. A SCIM server that takes more than 10 seconds for one
+  write fails the call.
 
 ### Sync behavior
 
@@ -270,8 +273,8 @@ keep their SCIM mappings, so a re-run repeats work instead of starting from
 nothing.
 
 **Retry and timeouts during a sync.** Every part of a sync retries a failed
-call up to 3 times, not the 10 attempts an interactive event gets. Backoff
-starts at 500 ms and grows to a 5 second cap.
+call up to 3 times, as an interactive event does. Background calls make
+10 attempts. Backoff starts at 500 ms and grows to a 5 second cap.
 
 Only the `sync-refresh` pages that push users use shorter HTTP timeouts:
 
@@ -827,19 +830,21 @@ runtime. Set them with `-D…` JVM flags on the Keycloak process.
 
 - **Retry policy.** `ScimClient` retries `ProcessingException` and
   `IORuntimeException` (network-level errors), plus 429 and 5xx
-  responses. Calls outside a sync make up to 10 attempts, with
-  exponential backoff that starts at 500 ms and has no cap. This
-  covers events, the LDAP mapper, the bulk lane, and the reconciler.
-  Every part of a sync makes up to 3 attempts instead. This covers
-  import, `sync-refresh` pages, and group refresh. Its backoff also
-  starts at 500 ms, but is capped at 5 s. The smaller budget keeps one
-  failing resource from holding a sync transaction open for minutes.
+  responses. Background calls make up to 10 attempts, with exponential
+  backoff that starts at 500 ms and has no cap. This covers the LDAP
+  mapper, the bulk lane, and the reconciler. No person waits for them.
+  Every part of a sync, and every admin or account event, makes up to 3
+  attempts instead. Its backoff also starts at 500 ms, but is capped at
+  5 s. The smaller budget keeps one failing resource from holding a sync
+  transaction open for minutes, and keeps a person from waiting for
+  minutes on a failing SCIM server.
   This value is hardcoded. A tunable setting here would invite
   per-deployment drift, without a clear benefit.
-- **HTTP timeouts.** Interactive calls, import, and group refresh use 30 s
+- **HTTP timeouts.** Background calls, import, and group refresh use 30 s
   for connect, request, and socket, in `ScimClient.genScimClientConfig`. A
-  `sync-refresh` page uses shorter timeouts instead. See "How sync-refresh
-  pages through users" above for the values.
+  `sync-refresh` page and an admin or account event use shorter timeouts
+  instead: 1 s to get a pooled connection, 3 s to connect, and 10 s to
+  read.
 - **`/Bulk` scope.** SCIM `/Bulk` batching is available only for the
   federation-sync user **create** path (opt-in through the
   `bulk-enabled` component flag, see above). Replace, delete, and

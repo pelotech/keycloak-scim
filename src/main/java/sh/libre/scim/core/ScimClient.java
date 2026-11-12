@@ -56,8 +56,10 @@ public class ScimClient {
     private static final String GROUP_PATCH_OP_KEY = "group-patchOp";
     private static final String USER_PATCH_OP_KEY = "user-patchOp";
 
-    // Every other caller uses these. They have no page to fit inside, and a
-    // slow endpoint should not fail a user's login.
+    // The background callers use these: the LDAP mapper's workers, the bulk
+    // lane and the reconciler. No person waits for them, and they have no
+    // page to fit inside. A call inside a person's request uses
+    // forInteractive instead.
     private static final int DEFAULT_REQUEST_TIMEOUT_SECONDS = 30;
     private static final int DEFAULT_CONNECT_TIMEOUT_SECONDS = 30;
     private static final int DEFAULT_SOCKET_TIMEOUT_SECONDS = 30;
@@ -147,6 +149,29 @@ public class ScimClient {
     }
 
     /**
+     * A client for a call made inside a person's request: an admin or account
+     * event. The person waits for the call, so it gets the sync page's small
+     * budget: three attempts, two backoff waits (500ms + 750ms), a 1-second
+     * pool-lease wait, a 3-second connect and a 10-second read.
+     *
+     * <p>Against a server that answers 5xx, the call gives up after about 1.3
+     * seconds. Against a server that does not answer, the normal worst case is
+     * about 43 seconds; see {@link #forSyncPage} for what can push it further.
+     * The 10 attempts and 30-second timeouts of the default client would make
+     * the person wait about 37 seconds, or several minutes.
+     *
+     * <p>A server slower than 10 seconds per write now fails the call. Under
+     * {@code rollback-strategy=never} the change still saves, and the next sync
+     * sends it. Under {@code always} or {@code critical-only}, such a failure
+     * rolls the person's change back.
+     */
+    static ScimClient forInteractive(ComponentModel model, KeycloakSession session) {
+        return new ScimClient(model, session, new ScimAuthHeaders(model), syncRetryConfig(),
+            SYNC_PAGE_REQUEST_TIMEOUT_SECONDS, SYNC_PAGE_CONNECT_TIMEOUT_SECONDS,
+            SYNC_PAGE_SOCKET_TIMEOUT_SECONDS);
+    }
+
+    /**
      * A client for the parts of a sync that run as one unit: the import and the
      * group refresh. It shares the sync page's three-attempt budget, so one
      * failing resource cannot hold the transaction for minutes.
@@ -174,7 +199,7 @@ public class ScimClient {
         }
     }
 
-    /** Retry policy for interactive and event-driven calls. */
+    /** Retry policy for background calls, which no person waits for. */
     static RetryConfig defaultRetryConfig() {
         return retryConfig(10, IntervalFunction.ofExponentialBackoff());
     }

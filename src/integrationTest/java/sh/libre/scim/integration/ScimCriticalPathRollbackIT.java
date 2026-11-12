@@ -91,8 +91,13 @@ class ScimCriticalPathRollbackIT extends IntegrationTestBase {
         });
         enableScimEventListener(r.realm());
 
+        long start = System.nanoTime();
         int status = createUserStatus(r.realm(), "rb-never", "rb-never@test.local");
+        long seconds = (System.nanoTime() - start) / 1_000_000_000L;
 
+        // The admin waits for the SCIM call. With the interactive budget, a
+        // server that answers 503 costs about 1.3 seconds of retries, not 37.
+        assertTrue(seconds < 10, "the admin request waited " + seconds + " s for a failing SCIM server");
         assertTrue(status >= 200 && status < 300,
             "admin create should succeed (2xx) under rollback-strategy=never, got " + status);
         assertEquals(true, userExists(r.realm(), "rb-never"),

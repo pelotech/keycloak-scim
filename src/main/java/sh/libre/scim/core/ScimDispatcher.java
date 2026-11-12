@@ -134,7 +134,8 @@ public class ScimDispatcher implements AutoCloseable {
 
     public void runOne(ComponentModel m, Consumer<ScimClient> f) {
         LOGGER.debugf("%s %s %s %s", m.getId(), m.getName(), m.getProviderId(), m.getProviderType());
-        var client = clients.computeIfAbsent(m.getId(), id -> new ScimClient(m, session));
+        // This runs inside the caller's request, so a person waits for it.
+        var client = clients.computeIfAbsent(m.getId(), id -> ScimClient.forInteractive(m, session));
         try {
             f.accept(client);
         } catch (ScimPropagationException e) {
