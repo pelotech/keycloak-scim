@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.1](https://github.com/pelotech/keycloak-scim/compare/v1.9.0...v1.9.1) (2026-11-12)
+
+
+### Bug fixes
+
+* bound how long an admin waits on a failing SCIM server ([#73](https://github.com/pelotech/keycloak-scim/issues/73)) ([96d3cae](https://github.com/pelotech/keycloak-scim/commit/96d3caec1313edd5914dc06145f576137522ba0b))
+
 ## [1.9.0](https://github.com/pelotech/keycloak-scim/compare/v1.8.0...v1.9.0) (2026-11-11)
 
 
