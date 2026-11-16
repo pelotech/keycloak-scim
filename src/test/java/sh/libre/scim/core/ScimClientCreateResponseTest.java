@@ -58,11 +58,12 @@ class ScimClientCreateResponseTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    void successfulResponse_appliesResourceAndSavesMapping() {
+    void successfulPartialResponse_capturesIdAndSavesMapping() {
         var client = newClient();
 
         Adapter<?, User> adapter = mock(Adapter.class);
         var created = new User();
+        created.setId("remote-1");
 
         ServerResponse<User> response = mock(ServerResponse.class);
         when(response.isSuccess()).thenReturn(true);
@@ -71,7 +72,36 @@ class ScimClientCreateResponseTest {
         boolean applied = client.handleCreateResponse(adapter, response);
 
         assertThat(applied).isTrue();
-        verify(adapter).apply(created);
+        verify(adapter).setExternalId("remote-1");
+        verify(adapter, never()).apply(any(User.class));
         verify(adapter).saveMapping();
+    }
+    @Test
+    @SuppressWarnings("unchecked")
+    void successfulResponseWithoutResource_doesNotSaveMapping() {
+        var client = newClient();
+        Adapter<?, User> adapter = mock(Adapter.class);
+        ServerResponse<User> response = mock(ServerResponse.class);
+        when(response.isSuccess()).thenReturn(true);
+        assertThatThrownBy(() -> client.handleCreateResponse(adapter, response))
+            .isInstanceOf(InvalidResponseFromScimEndpointException.class);
+        verify(adapter, never()).saveMapping();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.NullAndEmptySource
+    @org.junit.jupiter.params.provider.ValueSource(strings = {" ", "  "})
+    @SuppressWarnings("unchecked")
+    void successfulResponseWithoutValidId_doesNotSaveMapping(String id) {
+        var client = newClient();
+        Adapter<?, User> adapter = mock(Adapter.class);
+        var created = new User();
+        if (id != null) created.setId(id);
+        ServerResponse<User> response = mock(ServerResponse.class);
+        when(response.isSuccess()).thenReturn(true);
+        when(response.getResource()).thenReturn(created);
+        assertThatThrownBy(() -> client.handleCreateResponse(adapter, response))
+            .isInstanceOf(InvalidResponseFromScimEndpointException.class);
+        verify(adapter, never()).saveMapping();
     }
 }

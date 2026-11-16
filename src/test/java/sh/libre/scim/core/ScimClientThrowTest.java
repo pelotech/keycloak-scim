@@ -75,18 +75,20 @@ class ScimClientThrowTest {
     }
 
     /**
-     * replace with no local→external mapping: findById throws {@link NoResultException},
+     * Replace with recovery off (or a group even with recovery on) and no local→external mapping: findById throws {@link NoResultException},
      * which surfaces as a permanent {@link InconsistentScimMappingException}.
      */
-    @Test
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"User", "Group"})
     @SuppressWarnings("unchecked")
-    void replace_missingMapping_throwsInconsistentMapping() {
+    void replace_missingMapping_throwsInconsistentMapping(String type) {
         var client = newClient();
 
         Adapter<TestModel, User> adapter = mock(Adapter.class);
         adapter.skip = false;
         when(adapter.getId()).thenReturn("user-1");
-        when(adapter.getType()).thenReturn("User");
+        when(adapter.getType()).thenReturn(type);
+        if ("Group".equals(type)) client.model.put("user-provision-on-update", "true");
 
         TypedQuery<?> query = mock(TypedQuery.class);
         when(query.getSingleResult()).thenThrow(new NoResultException("no mapping"));

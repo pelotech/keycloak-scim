@@ -17,6 +17,15 @@ import static org.mockito.Mockito.when;
 
 class ScimStorageProviderFactoryTest {
 
+    @Test
+    void userProvisionOnUpdate_isBooleanAndDefaultsOff() {
+        var property = new ScimStorageProviderFactory().getConfigProperties().stream()
+            .filter(p -> "user-provision-on-update".equals(p.getName()))
+            .findFirst().orElseThrow();
+        assertThat(property.getType()).isEqualTo(org.keycloak.provider.ProviderConfigProperty.BOOLEAN_TYPE);
+        assertThat(property.getDefaultValue()).isEqualTo("false");
+    }
+
     // ---------------------------------------------------------------------------
     // Task 12 — config schema
     // ---------------------------------------------------------------------------

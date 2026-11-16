@@ -248,7 +248,9 @@ class ScimClientDeactivateTest {
         when(adapter.getExternalId()).thenReturn("ext-stable-id");
         ServerResponse<User> response = mock(ServerResponse.class);
         when(response.isSuccess()).thenReturn(true);
-        when(response.getResource()).thenReturn(new User());
+        var created = new User();
+        created.setId("ext-stable-id");
+        when(response.getResource()).thenReturn(created);
 
         client.handleCreateResponse(adapter, response);
 
