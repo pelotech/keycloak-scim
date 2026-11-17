@@ -23,6 +23,9 @@ What's added relative to upstream:
   gap in upstream Keycloak (issue
   [#35235](https://github.com/keycloak/keycloak/issues/35235)). Users
   deleted from LDAP no longer linger on the SCIM server.
+- **Optional missing user mapping recovery.** Each destination can opt in
+  to provisioning unmapped users on update, including disabled users.
+  Default off. See [recovery behavior and limits](docs/missing-user-mappings.md).
 - **Performance work for 10k+ user deployments.** Async dispatch on a
   worker pool raises full-sync throughput from about 22 users per
   second to about 245. Reconciler deletion rises from about 22 to

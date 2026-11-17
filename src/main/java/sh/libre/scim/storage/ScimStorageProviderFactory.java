@@ -176,6 +176,16 @@ public class ScimStorageProviderFactory
                 .defaultValue("true")
                 .add()
                 .property()
+                .name("user-provision-on-update")
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .label("Provision unmapped users on update")
+                .helpText("When on, an eligible user update with no mapping attempts POST /Users for this destination, "
+                    + "including disabled users with active=false. Default off: a missing mapping remains an error. "
+                    + "Enable only after reviewing the destination's identity and repeated-create behavior; "
+                    + "an existing remote user may cause a conflict or duplicate. Mapped updates are unchanged.")
+                .defaultValue("false")
+                .add()
+                .property()
                 .name("bulk-enabled")
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Batch user creates via SCIM /Bulk")

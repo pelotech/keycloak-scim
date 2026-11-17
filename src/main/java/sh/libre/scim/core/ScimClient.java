@@ -420,24 +420,41 @@ public class ScimClient {
      */
     // package-private: the sync path applies the model itself
     <S extends ResourceNode> boolean createApplied(Adapter<?, S> adapter) {
+        return provisionApplied(adapter).stateSent();
+    }
+
+    /** A provisioning attempt either sent the state or found a mapping to update. */
+    private record ProvisioningOutcome(boolean stateSent, ScimResource mapping) {
+        ProvisioningOutcome {
+            if (!stateSent) {
+                Objects.requireNonNull(mapping, "an unsent state requires a mapping to update");
+            }
+        }
+    }
+
+    private <S extends ResourceNode> ProvisioningOutcome provisionApplied(Adapter<?, S> adapter) {
         requireNotSkipped(adapter, "create");
-        // A mapping from a prior import or provision means there is nothing to
-        // create. Unless it's a deactivation tombstone: then the user has come
-        // back, so replace() pushes active from isEnabled() to the same remote
-        // id and clears the flag on success.
         var existing = adapter.query("findById", adapter.getId()).getResultList();
+        if (existing.size() > 1) {
+            throw new InconsistentScimMappingException(
+                "ambiguous SCIM mapping for " + adapter.getType() + " " + adapter.getId() + " on create");
+        }
         if (!existing.isEmpty()) {
+            var mapping = existing.getFirst();
+            // A live mapping needs no create. A tombstone preserves the existing
+            // create behavior: push the local active state to the same remote id.
             if (isDeactivatedTombstone(existing)) {
                 LOGGER.infof("Create for deactivated mapping %s: reactivating via replace", adapter.getId());
                 boolean pushed = replaceApplied(adapter);
                 if (pushed) {
                     clearBodyHash(adapter);
                 }
-                return pushed;
+                return new ProvisioningOutcome(pushed, mapping);
             }
-            return false;
+            return new ProvisioningOutcome(false, mapping);
         }
-        return handleCreateResponse(adapter, postResource(adapter));
+        handleCreateResponse(adapter, postResource(adapter));
+        return new ProvisioningOutcome(true, null);
     }
 
     // POSTs the resource to the SCIM target and returns the raw response. Shared
@@ -554,16 +571,16 @@ public class ScimClient {
 
     /**
      * Persists the SCIM mapping from a create response, but only when the POST
-     * succeeded. A rejected create (e.g. the target returns 400 for a user with
-     * no email) carries no parsed resource: {@code response.getResource()} is
-     * null, so applying it NPEs, and a mapping persisted here would be a phantom
-     * record for a resource the target never created. So a rejected create throws
-     * instead, leaving the user unmapped for a later sync to retry.
+     * succeeded and supplied a nonblank remote id. Only that id is captured:
+     * optional response fields must not overwrite the prepared local model or
+     * prevent a valid mapping from being saved. Rejected or malformed responses
+     * throw instead, leaving the resource unmapped for a later attempt.
      * Also purges any DEACTIVATED_AT tombstone with this resource's external
      * id; see {@link #purgeDeactivatedTombstones}.
      *
      * @return true if the mapping was applied and saved.
-     * @throws InvalidResponseFromScimEndpointException if the POST was rejected.
+     * @throws InvalidResponseFromScimEndpointException if the POST was rejected
+     *     or its successful response has no usable id.
      */
     // package-private for tests
     <S extends ResourceNode> boolean handleCreateResponse(Adapter<?, S> adapter, ServerResponse<S> response) {
@@ -573,8 +590,17 @@ public class ScimClient {
                 "create " + adapter.getId() + ": " + response.getResponseBody());
         }
 
+        var created = response.getResource();
+        var remoteId = created == null ? null : created.getId().orElse(null);
+        if (remoteId == null || remoteId.isBlank()) {
+            throw new InvalidResponseFromScimEndpointException(
+                response.getHttpStatus(), "create " + adapter.getId() + ": the response has no id");
+        }
+
         long t0 = System.nanoTime();
-        adapter.apply(response.getResource());
+        // The local model already supplied the body. Only the server-assigned
+        // id is needed; optional response fields must not prevent mapping it.
+        adapter.setExternalId(remoteId);
         long t1 = System.nanoTime();
         ScimClientMetrics.APPLY_RESPONSE_NANOS.add(t1 - t0);
         adapter.saveMapping();
@@ -582,7 +608,7 @@ public class ScimClient {
         ScimClientMetrics.SAVE_MAPPING_NANOS.add(t2 - t1);
         purgeDeactivatedTombstones(adapter);
         ScimClientMetrics.CREATE_COUNT.increment();
-        warnOnActiveDisagreement(adapter, response.getResource());
+        warnOnActiveDisagreement(adapter, created);
         return true;
     }
 
@@ -756,12 +782,14 @@ public class ScimClient {
                 if (adapter.skip) {
                     return false;
                 }
-                // A missing row means the resource is unmapped, so the catch
-                // below turns it into an inconsistent mapping. A caller that
-                // passes a row has already read it and found it.
-                var resource = knownMapping != null
-                    ? knownMapping
-                    : adapter.query("findById", adapter.getId()).getSingleResult();
+                var resource = knownMapping;
+                if (resource == null) {
+                    var outcome = resolveMappingForUpdate(adapter);
+                    if (outcome.stateSent()) {
+                        return true;
+                    }
+                    resource = outcome.mapping();
+                }
                 adapter.apply(resource);
                 String url = genScimUrl(adapter.getSCIMEndpoint(), adapter.getExternalId());
                 var retry = registry.retry("replace");
@@ -825,11 +853,6 @@ public class ScimClient {
                 }
                 span.setHttpStatus(response.getHttpStatus());
                 return true;
-            } catch (NoResultException e) {
-                span.recordError(e);
-                LOGGER.warnf("failed to replace resource %s, scim mapping not found", adapter.getId());
-                throw new InconsistentScimMappingException(
-                    "no SCIM mapping for " + adapter.getType() + " " + adapter.getId() + " on replace", e);
             } catch (ScimPropagationException e) {
                 // Already classified (e.g. the final-failure throw above) — must
                 // not be caught + downgraded by the generic Exception handler below.
@@ -842,6 +865,81 @@ public class ScimClient {
                 // tells the caller that nothing reached the endpoint.
                 return false;
             }
+        }
+    }
+
+    /**
+     * Resolves an already-applied adapter to a mapping or a completed push.
+     * Called when the caller has no known mapping. Looks it up and, if absent,
+     * attempts provisioning only when the user recovery policy allows it.
+     * A mapping found by provisioning's recheck is returned directly, without
+     * another lookup. The caller must update it unless the state was already sent.
+     *
+     * @return an outcome indicating state already sent, or the mapping to update
+     * @throws ScimPropagationException if lookup or provisioning fails, or a
+     *     missing mapping cannot be recovered under this destination's policy
+     */
+    private <S extends ResourceNode> ProvisioningOutcome resolveMappingForUpdate(Adapter<?, S> adapter) {
+        var mapping = findMappingForReplace(adapter);
+        return mapping != null
+            ? new ProvisioningOutcome(false, mapping)
+            : provisionUnmappedUserOnUpdate(adapter);
+    }
+
+    /**
+     * Applies the recovery policy and returns either state already sent or the
+     * mapping found by provisioning's recheck. Failures remain classified errors.
+     */
+    private <S extends ResourceNode> ProvisioningOutcome provisionUnmappedUserOnUpdate(Adapter<?, S> adapter) {
+        if (!"User".equals(adapter.getType()) || !model.get("user-provision-on-update", false)) {
+            throw missingMappingForReplace(adapter);
+        }
+
+        LOGGER.infof("SCIM mapping recovery started: realm=%s component=%s user=%s",
+            getRealmId(), model.getId(), adapter.getId());
+        try {
+            var outcome = provisionApplied(adapter);
+            if (outcome.stateSent()) {
+                LOGGER.infof("SCIM mapping recovery provisioned: realm=%s component=%s user=%s",
+                    getRealmId(), model.getId(), adapter.getId());
+            }
+            return outcome;
+        } catch (RuntimeException e) {
+            LOGGER.warnf("SCIM mapping recovery failed: realm=%s component=%s user=%s category=%s",
+                getRealmId(), model.getId(), adapter.getId(), e.getClass().getSimpleName());
+            if (e instanceof ScimPropagationException propagation) {
+                throw propagation;
+            }
+            throw new InconsistentScimMappingException(
+                "failed to establish SCIM mapping for User " + adapter.getId(), e);
+        }
+    }
+
+    private InconsistentScimMappingException missingMappingForReplace(Adapter<?, ?> adapter) {
+        return new InconsistentScimMappingException(
+            "no SCIM mapping for " + adapter.getType() + " " + adapter.getId() + " on replace",
+            new NoResultException("mapping absent after provisioning check"));
+    }
+
+    /**
+     * Looks up the adapter's mapping, scoped to its realm, destination, and
+     * resource type. Only an absent row returns null; an ambiguous result or
+     * other lookup failure is raised so it cannot trigger accidental provisioning.
+     * This method does not attempt recovery or send a SCIM request.
+     *
+     * @return the existing mapping, or null when no row exists
+     * @throws InconsistentScimMappingException if the lookup fails for a reason
+     *     other than an absent mapping
+     */
+    private <S extends ResourceNode> ScimResource findMappingForReplace(Adapter<?, S> adapter) {
+        try {
+            return adapter.query("findById", adapter.getId()).getSingleResult();
+        } catch (NoResultException e) {
+            return null;
+        } catch (RuntimeException e) {
+            // A broken/ambiguous lookup is not evidence that provisioning is needed.
+            throw new InconsistentScimMappingException(
+                "cannot read SCIM mapping for " + adapter.getType() + " " + adapter.getId(), e);
         }
     }
 

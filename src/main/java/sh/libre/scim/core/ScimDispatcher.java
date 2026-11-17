@@ -13,9 +13,11 @@ import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.jboss.logging.Logger;
 import org.keycloak.component.ComponentModel;
+import org.keycloak.models.AbstractKeycloakTransaction;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.KeycloakTransaction;
+import org.keycloak.models.ModelException;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
@@ -25,6 +27,7 @@ import sh.libre.scim.storage.ScimStorageProviderFactory;
 public class ScimDispatcher implements AutoCloseable {
     public static final String SCOPE_USER = "user";
     public static final String SCOPE_GROUP = "group";
+    private static final String ROLLBACK_VETO = ScimDispatcher.class.getName() + ".rollback-veto";
 
     final private KeycloakSession session;
     final private Logger LOGGER = Logger.getLogger(ScimDispatcher.class);
@@ -147,15 +150,42 @@ public class ScimDispatcher implements AutoCloseable {
                 default -> false; // "never"
             };
             if (rollback) {
-                LOGGER.errorf(e, "SCIM critical-path failure on component %s (%s); rolling back transaction",
+                LOGGER.errorf(e, "SCIM critical-path failure on component %s (%s); marking rollback-only and vetoing commit",
                     m.getId(), m.getName());
-                session.getTransactionManager().setRollbackOnly();
+                requireRollback(e);
             } else {
                 LOGGER.warnf(e, "SCIM dispatch failed on component %s (%s)", m.getId(), m.getName());
             }
         } catch (Exception e) {
             LOGGER.errorf(e, "SCIM dispatch failed on component %s (%s)", m.getId(), m.getName());
         }
+    }
+
+    /**
+     * Requests normal rollback and prevents endpoints from explicitly committing
+     * the transaction anyway. Keycloak's transaction manager does not consult
+     * its rollback-only flag in commit(), but rolls back all enlisted resources
+     * when a prepare participant fails, before committing the main participants.
+     * One veto is shared by every dispatcher in this request's session.
+     */
+    private void requireRollback(ScimPropagationException failure) {
+        var transactions = session.getTransactionManager();
+        transactions.setRollbackOnly();
+        if (session.getAttribute(ROLLBACK_VETO) != null) {
+            return;
+        }
+        transactions.enlistPrepare(new AbstractKeycloakTransaction() {
+            @Override
+            protected void commitImpl() {
+                throw new ModelException("SCIM propagation failed; refusing to commit the Keycloak change", failure);
+            }
+
+            @Override
+            protected void rollbackImpl() {
+                // Normal rollback already undoes the actual persistence work.
+            }
+        });
+        session.setAttribute(ROLLBACK_VETO, Boolean.TRUE);
     }
 
     /**
