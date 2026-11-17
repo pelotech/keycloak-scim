@@ -56,9 +56,20 @@ class ScimMissingMappingIT extends IntegrationTestBase {
     }
 
     private void touch(Setup setup, String name) {
+        assertEquals(204, touchStatus(setup, name));
+    }
+
+    private int touchStatus(Setup setup, String name) {
         var rep = new UserRepresentation();
         rep.setFirstName(name);
-        setup.realm().users().get(setup.userId()).update(rep);
+        try {
+            setup.realm().users().get(setup.userId()).update(rep);
+            return 204;
+        } catch (jakarta.ws.rs.WebApplicationException e) {
+            try (var response = e.getResponse()) {
+                return response.getStatus();
+            }
+        }
     }
 
     private void acceptCreate(String path, String id) {
@@ -126,13 +137,51 @@ class ScimMissingMappingIT extends IntegrationTestBase {
             .withBody("{\"schemas\":[\"urn:ietf:params:scim:api:messages:2.0:Error\"],\"status\":\"" + status + "\"}")));
         var setup = unmapped(true, cfg -> cfg.putSingle("rollback-strategy", policy));
         enable(setup);
-        touch(setup, "Failed");
+        assertEquals(rollback ? 400 : 204, touchStatus(setup, "Failed"));
         assertEquals(rollback ? "Before" : "Failed",
             setup.realm().users().get(setup.userId()).toRepresentation().getFirstName());
         if (status == 409) wireMock.verify(1, postRequestedFor(urlPathEqualTo("/Users")));
         wireMock.resetRequests();
         acceptCreate("/Users", "retry-id");
         touch(setup, "Retry");
+        wireMock.verify(1, postRequestedFor(urlPathEqualTo("/Users")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"never,409,false,false", "never,503,false,false", "always,409,true,false",
+        "always,503,true,false", "critical-only,409,false,false", "critical-only,503,true,false",
+        "never,409,false,true", "never,503,false,true", "always,409,true,true",
+        "always,503,true,true", "critical-only,409,false,true", "critical-only,503,true,true"})
+    void mappedUpdateFailureUsesRollbackPolicy(String policy, int status, boolean rollback, boolean usePatch) {
+        acceptCreate("/Users", "mapped-id");
+        var setup = unmapped(true, cfg -> {
+            cfg.putSingle("rollback-strategy", policy);
+            cfg.putSingle("user-patchOp", Boolean.toString(usePatch));
+        });
+        enable(setup);
+        touch(setup, "Mapped");
+        wireMock.stubFor(put(urlPathEqualTo("/Users/mapped-id"))
+            .willReturn(aResponse().withStatus(status)));
+        wireMock.stubFor(patch(urlPathEqualTo("/Users/mapped-id"))
+            .willReturn(aResponse().withStatus(status)));
+
+        assertEquals(rollback ? 400 : 204, touchStatus(setup, "Failed"));
+        assertEquals(rollback ? "Mapped" : "Failed",
+            setup.realm().users().get(setup.userId()).toRepresentation().getFirstName());
+        wireMock.verify(1, postRequestedFor(urlPathEqualTo("/Users")));
+        if (status == 409) {
+            if (usePatch) wireMock.verify(1, patchRequestedFor(urlPathEqualTo("/Users/mapped-id")));
+            else wireMock.verify(1, putRequestedFor(urlPathEqualTo("/Users/mapped-id")));
+        }
+
+        wireMock.stubFor(put(urlPathEqualTo("/Users/mapped-id"))
+            .willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/scim+json")
+                .withBody("{\"id\":\"mapped-id\",\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"]}")));
+        wireMock.stubFor(patch(urlPathEqualTo("/Users/mapped-id"))
+            .willReturn(aResponse().withStatus(200).withHeader("Content-Type", "application/scim+json")
+                .withBody("{\"id\":\"mapped-id\",\"schemas\":[\"urn:ietf:params:scim:schemas:core:2.0:User\"]}")));
+        touch(setup, "Retry");
+        assertEquals("Retry", setup.realm().users().get(setup.userId()).toRepresentation().getFirstName());
         wireMock.verify(1, postRequestedFor(urlPathEqualTo("/Users")));
     }
 

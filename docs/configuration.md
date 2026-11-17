@@ -135,8 +135,11 @@ an interactive event roll the Keycloak transaction back instead.
 This setting applies only to the synchronous, pre-commit event path:
 console, admin-REST, and account-console user create, update, and delete,
 handled by the `scim` event listener. It runs on the same transaction as
-the Keycloak operation, so marking that transaction rollback-only undoes
-the change. It does not apply to LDAP-federation imports, which propagate
+the Keycloak operation. When policy requires rollback, the plugin marks
+that transaction rollback-only and registers a prepare-phase veto. The veto
+also prevents endpoints that explicitly call commit from persisting the
+change; setting the manager's rollback-only flag alone is insufficient on
+those paths. It does not apply to LDAP-federation imports, which propagate
 after the import commits and leave nothing to roll back. It also does not
 apply to batch sync, governed by `sync-on-error` below. Both of these stay
 fail-open regardless of this setting.
@@ -157,8 +160,11 @@ Know these three things before you enable it:
   transaction. This leaves an orphan: a SCIM resource with no Keycloak
   mapping, that nothing cleans up. Point `rollback-strategy` at a
   single-server deployment only.
-- **Admin REST still returns 201.** Keycloak builds the `201 Created`
-  response before commit. So a rolled-back admin user-create still returns
+- **Admin REST responses depend on the endpoint.** Admin user updates
+  explicitly commit before returning. If SCIM policy vetoes that commit,
+  Keycloak returns HTTP 400 and the profile edit is rolled back. User-create
+  responses have a different lifecycle: Keycloak builds the `201 Created`
+  response before commit. A rolled-back admin user-create can still return
   201 with a `Location` header, even though the user does not persist.
   Check whether the user exists. Do not trust the status code alone.
   Account and self-service flows do surface an error. The 201 issue is
