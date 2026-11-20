@@ -41,6 +41,7 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
     public static final String GROUP_FILTER = "group-filter";
+    public static final String GROUP_SUBGROUP_OF = "group-subgroup-of";
     public static final String DELETE_MODE = "delete-mode";
     /** The values {@link #DELETE_MODE} accepts. */
     static final List<String> DELETE_MODES = List.of("delete", "deactivate");
@@ -220,6 +221,23 @@ public class ScimStorageProviderFactory
                     + "skipped while the filter is active are not backfilled automatically; "
                     + "trigger a sync-refresh after removing or changing the filter to "
                     + "reconcile missing memberships.")
+                .add()
+                .property()
+                .name(GROUP_SUBGROUP_OF)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Group sub-group-of filter")
+                .helpText("Optional group display name. When set, only groups that are a direct "
+                    + "or indirect descendant of a group with this exact display name are "
+                    + "propagated to SCIM. The check walks the full ancestor chain upward "
+                    + "(unlimited depth). The named container group itself is NOT propagated "
+                    + "— only its children, grandchildren, and deeper descendants are. Leave "
+                    + "empty (default) to propagate all groups regardless of their position "
+                    + "in the hierarchy. When both this setting and 'group-filter' are set, "
+                    + "a group must satisfy both conditions to be propagated. Applied on all "
+                    + "paths: admin-REST events, LDAP federation import, group membership "
+                    + "changes, and sync. Memberships skipped while the filter is active are "
+                    + "not backfilled automatically; trigger a sync-refresh after removing or "
+                    + "changing the filter to reconcile missing memberships.")
                 .add()
                 .property()
                 .name(DELETE_MODE)

@@ -47,6 +47,13 @@ What's added relative to upstream:
   not match are silently skipped, including their membership changes.
   See [`docs/configuration.md`](docs/configuration.md#group-name-filter)
   for full semantics and examples.
+- **Group hierarchy filter.** An optional group display name
+  (`group-subgroup-of`) limits SCIM propagation to groups that are
+  direct or indirect descendants of a named container group. The
+  container group itself is not propagated. Can be combined with
+  `group-filter`. See
+  [`docs/configuration.md`](docs/configuration.md#sub-group-of-filter)
+  for full semantics and examples.
 - **Comprehensive test coverage.** 43 unit tests and 24 integration
   tests, run with Testcontainers against real Keycloak, OpenLDAP, and
   WireMock. A performance-test harness covers scale work.
@@ -393,6 +400,55 @@ subsequent admin deletion of that group still propagates as `DELETE
 
 Full reference, more examples, and the delete and backfill semantics are in
 [`docs/configuration.md`](docs/configuration.md#group-name-filter).
+
+## Sub-group-of filter (opt-in)
+
+Limit SCIM propagation to groups that sit under a specific container group in
+the Keycloak group hierarchy. Set `group-subgroup-of` on a SCIM provider
+component to the **exact display name** of the container group.
+
+**Turning it on.** Per SCIM provider component, set `group-subgroup-of`
+(*Admin Console → your SCIM provider → config*, or the component API):
+
+```
+group-subgroup-of = JSM-Customers
+```
+
+This propagates only groups that are children, grandchildren, or deeper
+descendants of the group named `JSM-Customers`. The `JSM-Customers` group
+itself is **not** propagated — only its descendants are. Leave the field empty
+(the default) to propagate all groups regardless of hierarchy position.
+
+**Hierarchy examples** (setting value: `JSM-Customers`):
+
+| Group | Parent | Result |
+| --- | --- | --- |
+| `JSM-Customers` | _(top-level)_ | skipped — container itself |
+| `acme-corp` | `JSM-Customers` | propagated |
+| `acme-corp-admins` | `acme-corp` | propagated — grandchild |
+| `rbac-admins` | `RBAC-Groups` | skipped — wrong branch |
+| `standalone` | _(top-level)_ | skipped — no ancestor |
+
+**Combining with `group-filter`.** Both filters can be set at the same time. A
+group must satisfy both to be propagated:
+
+```
+# Only descendants of JSM-Customers whose name starts with "customer-"
+group-subgroup-of = JSM-Customers
+group-filter      = customer-.*
+```
+
+**Where the filter applies.** All propagation paths check the filter:
+admin-REST group events, group membership changes, LDAP federation import, and
+sync refresh.
+
+**Membership suppression and backfill.** The same rules as `group-filter`
+apply: membership changes for filtered-out groups are suppressed, and skipped
+memberships are not backfilled automatically. Trigger a `sync-refresh` to
+reconcile after changing the filter.
+
+Full reference and additional examples are in
+[`docs/configuration.md`](docs/configuration.md#sub-group-of-filter).
 
 ## Documentation
 

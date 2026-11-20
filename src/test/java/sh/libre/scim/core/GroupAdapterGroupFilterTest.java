@@ -267,6 +267,200 @@ class GroupAdapterGroupFilterTest {
     }
 
     // -----------------------------------------------------------------------
+    // skippedBySubgroupOf — filter absent or blank
+    // -----------------------------------------------------------------------
+
+    @Test
+    void subgroupOf_noSettingNull_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn(null);
+
+        assertThat(adapter.skippedBySubgroupOf(groupNamed("any-group"))).isFalse();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void subgroupOf_blankOrWhitespace_doesNotSkip(String blank) {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn(blank);
+
+        assertThat(adapter.skippedBySubgroupOf(groupNamed("any-group"))).isFalse();
+    }
+
+    @Test
+    void subgroupOf_nullComponent_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(null);
+
+        assertThat(adapter.skippedBySubgroupOf(groupNamed("any-group"))).isFalse();
+    }
+
+    // -----------------------------------------------------------------------
+    // skippedBySubgroupOf — ancestry matching
+    // -----------------------------------------------------------------------
+
+    @Test
+    void subgroupOf_directChild_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var parent = groupNamed("JSM-Customers");
+        var child = groupNamedWithParent("acme-corp", parent);
+
+        assertThat(adapter.skippedBySubgroupOf(child)).isFalse();
+    }
+
+    @Test
+    void subgroupOf_grandchild_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var grandparent = groupNamed("JSM-Customers");
+        var parent = groupNamedWithParent("acme-corp", grandparent);
+        var grandchild = groupNamedWithParent("acme-corp-admins", parent);
+
+        assertThat(adapter.skippedBySubgroupOf(grandchild)).isFalse();
+    }
+
+    @Test
+    void subgroupOf_deepDescendant_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var root = groupNamed("JSM-Customers");
+        var level1 = groupNamedWithParent("acme-corp", root);
+        var level2 = groupNamedWithParent("acme-corp-eu", level1);
+        var level3 = groupNamedWithParent("acme-corp-eu-admins", level2);
+
+        assertThat(adapter.skippedBySubgroupOf(level3)).isFalse();
+    }
+
+    @Test
+    void subgroupOf_noMatchingAncestor_skips() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var parent = groupNamed("RBAC-Groups");
+        var child = groupNamedWithParent("rbac-admins", parent);
+
+        assertThat(adapter.skippedBySubgroupOf(child)).isTrue();
+    }
+
+    @Test
+    void subgroupOf_topLevelGroupWithNoParent_skips() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        // groupNamed() does not stub getParent() → Mockito default is null → top-level
+        assertThat(adapter.skippedBySubgroupOf(groupNamed("some-top-level-group"))).isTrue();
+    }
+
+    @Test
+    void subgroupOf_containerGroupItself_skips() {
+        // The named container group itself must NOT be propagated; traversal
+        // starts from getParent(), so the group's own name is never checked.
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        // Group's own name matches the setting, but it has no parent → skipped.
+        assertThat(adapter.skippedBySubgroupOf(groupNamed("JSM-Customers"))).isTrue();
+    }
+
+    @Test
+    void subgroupOf_whitespaceIsTrimmed_doesNotSkip() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("  JSM-Customers  ");
+
+        var parent = groupNamed("JSM-Customers");
+        var child = groupNamedWithParent("acme-corp", parent);
+
+        assertThat(adapter.skippedBySubgroupOf(child)).isFalse();
+    }
+
+    // -----------------------------------------------------------------------
+    // apply/applyForProvisioning — subgroup-of integrated with group-filter
+    // -----------------------------------------------------------------------
+
+    @Test
+    void apply_descendantPassesBothFilters_skipIsFalse() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_FILTER)).thenReturn("acme-.*");
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var parent = groupNamed("JSM-Customers");
+        var child = groupNamedWithParentAndSkip("acme-corp", parent, null);
+
+        when(session.users()).thenReturn(org.mockito.Mockito.mock(org.keycloak.models.UserProvider.class));
+        when(session.users().getGroupMembersStream(realm, child)).thenReturn(java.util.stream.Stream.empty());
+
+        adapter.apply(child);
+
+        assertThat(adapter.skip).isFalse();
+    }
+
+    @Test
+    void apply_descendantPassesSubgroupButFailsNameFilter_skipIsTrue() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_FILTER)).thenReturn("acme-.*");
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var parent = groupNamed("JSM-Customers");
+        // Name does not match "acme-.*"
+        var child = groupNamedWithParentAndSkip("globex-corp", parent, null);
+
+        when(session.users()).thenReturn(org.mockito.Mockito.mock(org.keycloak.models.UserProvider.class));
+        when(session.users().getGroupMembersStream(realm, child)).thenReturn(java.util.stream.Stream.empty());
+
+        adapter.apply(child);
+
+        assertThat(adapter.skip).isTrue();
+    }
+
+    @Test
+    void apply_notDescendant_skipIsTrue_evenWhenNameFilterMatches() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_FILTER)).thenReturn("acme-.*");
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        // name matches "acme-.*" but is under RBAC-Groups, not JSM-Customers
+        var parent = groupNamed("RBAC-Groups");
+        var child = groupNamedWithParentAndSkip("acme-rbac", parent, null);
+
+        when(session.users()).thenReturn(org.mockito.Mockito.mock(org.keycloak.models.UserProvider.class));
+        when(session.users().getGroupMembersStream(realm, child)).thenReturn(java.util.stream.Stream.empty());
+
+        adapter.apply(child);
+
+        assertThat(adapter.skip).isTrue();
+    }
+
+    @Test
+    void applyForProvisioning_descendant_skipIsFalse() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_FILTER)).thenReturn(null);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var parent = groupNamed("JSM-Customers");
+        var child = groupNamedWithParentAndSkip("acme-corp", parent, null);
+
+        adapter.applyForProvisioning(child);
+
+        assertThat(adapter.skip).isFalse();
+    }
+
+    @Test
+    void applyForProvisioning_notDescendant_skipIsTrue() {
+        when(realm.getComponent(COMPONENT_ID)).thenReturn(component);
+        when(component.get(ScimStorageProviderFactory.GROUP_FILTER)).thenReturn(null);
+        when(component.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF)).thenReturn("JSM-Customers");
+
+        var child = groupNamedWithParentAndSkip("rbac-admins", groupNamed("RBAC-Groups"), null);
+
+        adapter.applyForProvisioning(child);
+
+        assertThat(adapter.skip).isTrue();
+    }
+
+    // -----------------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------------
 
@@ -279,6 +473,20 @@ class GroupAdapterGroupFilterTest {
         when(group.getId()).thenReturn("grp-" + name);
         when(group.getName()).thenReturn(name);
         when(group.getFirstAttribute("scim-skip")).thenReturn(scimSkip);
+        // getParent() left unstubbed → Mockito default null → top-level group
+        return group;
+    }
+
+    private GroupModel groupNamedWithParent(String name, GroupModel parent) {
+        return groupNamedWithParentAndSkip(name, parent, null);
+    }
+
+    private GroupModel groupNamedWithParentAndSkip(String name, GroupModel parent, String scimSkip) {
+        var group = org.mockito.Mockito.mock(GroupModel.class);
+        when(group.getId()).thenReturn("grp-" + name);
+        when(group.getName()).thenReturn(name);
+        when(group.getFirstAttribute("scim-skip")).thenReturn(scimSkip);
+        when(group.getParent()).thenReturn(parent);
         return group;
     }
 }
