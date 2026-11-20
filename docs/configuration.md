@@ -60,6 +60,7 @@ Both toggles apply to every path: admin REST events, LDAP-federation
 imports (when the `scim-ldap-sync` mapper is attached), and sync.
 
 ### Replication filtering
+
 | `group-filter` | string | — | Optional Java regular expression (full match). When set, only groups whose display name matches are propagated to SCIM. Leave empty (default) to propagate all groups. See [Group name filter](#group-name-filter) below. |
 | `group-subgroup-of` | string | — | Optional group display name. When set, only groups that are a direct or indirect descendant of a group with this exact display name are propagated. The named container group itself is not propagated. Leave empty (default) to propagate all groups regardless of hierarchy position. Can be combined with `group-filter`. See [Sub-group-of filter](#sub-group-of-filter) below. |
 
@@ -480,25 +481,16 @@ operations are suppressed.
 backfilled automatically. If you remove or widen the filter later, run a
 `sync-refresh` to push any missing membership state to the SCIM server.
 
-**Examples.**
+**Examples:**
 
 Propagate only groups in the `team-` namespace:
-
-```
-group-filter = team-.*
-```
+`group-filter = team-.*`
 
 Propagate groups named exactly `engineering` or `operations`:
-
-```
-group-filter = engineering|operations
-```
+`group-filter = engineering|operations`
 
 Propagate all groups (the default; leave the field empty):
-
-```
-group-filter =
-```
+`group-filter =`
 
 ### Sub-group-of filter
 
@@ -528,7 +520,7 @@ sync — identical to `group-filter`.
 must satisfy **both** conditions to be propagated. Each check contributes
 independently to the skip decision:
 
-```
+```text
 # Propagate only groups under JSM-Customers whose name starts with "acme-"
 group-subgroup-of = JSM-Customers
 group-filter      = acme-.*
@@ -546,23 +538,17 @@ filter to reconcile missing membership state.
 **Examples.**
 
 Propagate only groups that are descendants of `JSM-Customers`:
-
-```
-group-subgroup-of = JSM-Customers
-```
+`group-subgroup-of = JSM-Customers`
 
 Propagate only groups under `JSM-Customers` whose name starts with `customer-`:
 
-```
+```text
 group-subgroup-of = JSM-Customers
 group-filter      = customer-.*
 ```
 
 Propagate all groups (the default; leave the field empty):
-
-```
-group-subgroup-of =
-```
+`group-subgroup-of =`
 
 ### User extension attributes
 
