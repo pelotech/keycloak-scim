@@ -20,6 +20,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jboss.logging.Logger;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 public class GroupAdapter extends Adapter<GroupModel, Group> {
 
@@ -45,6 +46,41 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         return Group.class;
     }
 
+    /**
+     * Returns {@code true} when this group's display name does not match the
+     * configured {@code group-filter} regular expression, meaning the group
+     * should be excluded from SCIM propagation.
+     *
+     * <p>The pattern uses <em>full-match</em> semantics ({@link String#matches}),
+     * so the expression must cover the entire display name, not just a substring.
+     * For example, the pattern {@code engineering} matches only a group named
+     * exactly {@code engineering}; use {@code engineering.*} to match all groups
+     * whose name starts with that prefix.
+     *
+     * <p>When no pattern is configured (setting absent, {@code null}, or blank),
+     * this method always returns {@code false} and all groups are propagated.
+     *
+     * <p><strong>Membership note:</strong> when a group is excluded by this
+     * filter, its membership changes (user join / leave events) are also
+     * suppressed on all paths — admin-REST events, LDAP federation import, and
+     * sync. Memberships skipped while the filter is active are <em>not</em>
+     * backfilled automatically when the filter is later removed or changed; a
+     * {@code sync-refresh} must be triggered manually to reconcile missing
+     * memberships.
+     *
+     * @param group the Keycloak group model being evaluated
+     * @return {@code true} if the group should be skipped, {@code false} if it
+     *         should be propagated
+     */
+    boolean skippedByGroupFilter(GroupModel group) {
+        var model = getModel();
+        String pattern = model == null ? null : model.get(ScimStorageProviderFactory.GROUP_FILTER);
+        if (pattern == null || pattern.isBlank()) {
+            return false;
+        }
+        return !group.getName().matches(pattern.trim());
+    }
+
     @Override
     public void apply(GroupModel group) {
         setId(group.getId());
@@ -53,7 +89,8 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
                 .getGroupMembersStream(session.getContext().getRealm(), group)
                 .map(x -> x.getId())
                 .collect(Collectors.toSet());
-        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true")
+                || skippedByGroupFilter(group);
     }
 
     /**
@@ -68,7 +105,8 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
     public void applyForProvisioning(GroupModel group) {
         setId(group.getId());
         setDisplayName(group.getName());
-        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true")
+                || skippedByGroupFilter(group);
     }
 
     @Override

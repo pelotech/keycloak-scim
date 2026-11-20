@@ -5,6 +5,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import jakarta.ws.rs.core.MediaType;
 
@@ -38,6 +40,7 @@ public class ScimStorageProviderFactory
     public static final String RECONCILER_ENABLED = "reconciler-enabled";
     public static final String RECONCILER_INTERVAL_SECONDS = "reconciler-interval-seconds";
     public static final String RECONCILER_STALE_THRESHOLD_SECONDS = "reconciler-stale-threshold-seconds";
+    public static final String GROUP_FILTER = "group-filter";
     public static final String DELETE_MODE = "delete-mode";
     /** The values {@link #DELETE_MODE} accepts. */
     static final List<String> DELETE_MODES = List.of("delete", "deactivate");
@@ -201,6 +204,22 @@ public class ScimStorageProviderFactory
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .label("Enable group propagation")
                 .defaultValue("true")
+                .add()
+                .property()
+                .name(GROUP_FILTER)
+                .type(ProviderConfigProperty.STRING_TYPE)
+                .label("Group filter (regex)")
+                .helpText("Optional Java regular expression (full match). When set, only groups "
+                    + "whose display name matches this pattern are propagated to SCIM. Leave "
+                    + "empty (default) to propagate all groups. The pattern must match the "
+                    + "entire group name: 'engineering' matches only a group named exactly "
+                    + "'engineering'. Use 'engineering.*' to match any name that starts with "
+                    + "that prefix. Applied on all paths: admin-REST events, LDAP federation "
+                    + "import, group membership changes, and sync. Groups that do not match "
+                    + "are silently skipped, including their membership changes. Memberships "
+                    + "skipped while the filter is active are not backfilled automatically; "
+                    + "trigger a sync-refresh after removing or changing the filter to "
+                    + "reconcile missing memberships.")
                 .add()
                 .property()
                 .name(DELETE_MODE)
@@ -380,6 +399,16 @@ public class ScimStorageProviderFactory
         } catch (IllegalArgumentException e) {
             throw new ComponentValidationException(
                 "Invalid user-extension-mappings: " + e.getMessage(), e);
+        }
+
+        String groupFilter = model.get(GROUP_FILTER);
+        if (groupFilter != null && !groupFilter.isBlank()) {
+            try {
+                Pattern.compile(groupFilter.trim());
+            } catch (PatternSyntaxException e) {
+                throw new ComponentValidationException(
+                    GROUP_FILTER + " is not a valid Java regular expression: " + e.getMessage(), e);
+            }
         }
 
         String rollback = model.get("rollback-strategy", "never");
