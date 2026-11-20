@@ -20,6 +20,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.jboss.logging.Logger;
 import org.keycloak.models.GroupModel;
 import org.keycloak.models.KeycloakSession;
+import sh.libre.scim.storage.ScimStorageProviderFactory;
 
 public class GroupAdapter extends Adapter<GroupModel, Group> {
 
@@ -45,6 +46,87 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
         return Group.class;
     }
 
+    /**
+     * Returns {@code true} when the group is not a descendant of the group
+     * named by the {@code group-subgroup-of} configuration setting, meaning the
+     * group should be excluded from SCIM propagation.
+     *
+     * <p>The check walks the ancestor chain upward from the group's immediate
+     * parent via repeated calls to {@link GroupModel#getParent()} until a
+     * matching ancestor is found or the root is reached. The named container
+     * group itself is <em>not</em> propagated — only its children,
+     * grandchildren, and deeper descendants are.
+     *
+     * <p>When no setting is configured (absent, {@code null}, or blank), this
+     * method always returns {@code false} and all groups are propagated.
+     *
+     * <p><strong>Interaction with {@code group-filter}:</strong> when both
+     * {@code group-subgroup-of} and {@code group-filter} are set, a group must
+     * satisfy <em>both</em> conditions to be propagated. Each check contributes
+     * independently to the {@code skip} flag via a logical OR.
+     *
+     * <p><strong>Membership note:</strong> when a group is excluded by this
+     * filter, its membership changes are also suppressed on all paths.
+     * Memberships skipped while the filter is active are <em>not</em>
+     * backfilled automatically; a {@code sync-refresh} must be triggered
+     * manually to reconcile missing memberships after the filter is changed.
+     *
+     * @param group the Keycloak group model being evaluated
+     * @return {@code true} if the group should be skipped, {@code false} if it
+     *         should be propagated
+     */
+    boolean skippedBySubgroupOf(GroupModel group) {
+        var model = getModel();
+        String containerName = model == null ? null : model.get(ScimStorageProviderFactory.GROUP_SUBGROUP_OF);
+        if (containerName == null || containerName.isBlank()) {
+            return false;
+        }
+        containerName = containerName.trim();
+        // Walk from the immediate parent up to the root. The group itself is
+        // never the container — descendants only.
+        for (var ancestor = group.getParent(); ancestor != null; ancestor = ancestor.getParent()) {
+            if (containerName.equals(ancestor.getName())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns {@code true} when this group's display name does not match the
+     * configured {@code group-filter} regular expression, meaning the group
+     * should be excluded from SCIM propagation.
+     *
+     * <p>The pattern uses <em>full-match</em> semantics ({@link String#matches}),
+     * so the expression must cover the entire display name, not just a substring.
+     * For example, the pattern {@code engineering} matches only a group named
+     * exactly {@code engineering}; use {@code engineering.*} to match all groups
+     * whose name starts with that prefix.
+     *
+     * <p>When no pattern is configured (setting absent, {@code null}, or blank),
+     * this method always returns {@code false} and all groups are propagated.
+     *
+     * <p><strong>Membership note:</strong> when a group is excluded by this
+     * filter, its membership changes (user join / leave events) are also
+     * suppressed on all paths — admin-REST events, LDAP federation import, and
+     * sync. Memberships skipped while the filter is active are <em>not</em>
+     * backfilled automatically when the filter is later removed or changed; a
+     * {@code sync-refresh} must be triggered manually to reconcile missing
+     * memberships.
+     *
+     * @param group the Keycloak group model being evaluated
+     * @return {@code true} if the group should be skipped, {@code false} if it
+     *         should be propagated
+     */
+    boolean skippedByGroupFilter(GroupModel group) {
+        var model = getModel();
+        String pattern = model == null ? null : model.get(ScimStorageProviderFactory.GROUP_FILTER);
+        if (pattern == null || pattern.isBlank()) {
+            return false;
+        }
+        return !group.getName().matches(pattern.trim());
+    }
+
     @Override
     public void apply(GroupModel group) {
         setId(group.getId());
@@ -53,7 +135,9 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
                 .getGroupMembersStream(session.getContext().getRealm(), group)
                 .map(x -> x.getId())
                 .collect(Collectors.toSet());
-        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true")
+                || skippedByGroupFilter(group)
+                || skippedBySubgroupOf(group);
     }
 
     /**
@@ -68,7 +152,9 @@ public class GroupAdapter extends Adapter<GroupModel, Group> {
     public void applyForProvisioning(GroupModel group) {
         setId(group.getId());
         setDisplayName(group.getName());
-        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true");
+        this.skip = StringUtils.equals(group.getFirstAttribute("scim-skip"), "true")
+                || skippedByGroupFilter(group)
+                || skippedBySubgroupOf(group);
     }
 
     @Override

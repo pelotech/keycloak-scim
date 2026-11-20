@@ -40,6 +40,20 @@ What's added relative to upstream:
 - **OCI image for Kubernetes ImageVolume mounting.** Add the plugin to
   a Keycloak pod without building a custom image. See
   [Quick start](#quick-start) below.
+- **Group name filter.** An optional Java regular expression
+  (`group-filter`) limits SCIM propagation to groups whose display name
+  matches the pattern. Applied on every path: admin-REST events, LDAP
+  federation import, group membership changes, and sync. Groups that do
+  not match are silently skipped, including their membership changes.
+  See [`docs/configuration.md`](docs/configuration.md#group-name-filter)
+  for full semantics and examples.
+- **Group hierarchy filter.** An optional group display name
+  (`group-subgroup-of`) limits SCIM propagation to groups that are
+  direct or indirect descendants of a named container group. The
+  container group itself is not propagated. Can be combined with
+  `group-filter`. See
+  [`docs/configuration.md`](docs/configuration.md#sub-group-of-filter)
+  for full semantics and examples.
 - **Comprehensive test coverage.** 43 unit tests and 24 integration
   tests, run with Testcontainers against real Keycloak, OpenLDAP, and
   WireMock. A performance-test harness covers scale work.
@@ -339,6 +353,102 @@ validation error. Leave the setting empty (the default) to send no
 extension attributes. The full grammar, all type tokens, and the
 Enterprise User field constraints are in
 [`docs/configuration.md`](docs/configuration.md#user-extension-attributes).
+
+## Group name filter (opt-in)
+
+Limit SCIM propagation to a subset of groups by setting `group-filter` on a
+SCIM provider component. The value is a Java regular expression evaluated
+against each group's display name using **full-match** semantics: the pattern
+must cover the entire name.
+
+**Turning it on.** Per SCIM provider component, set `group-filter` (*Admin
+Console → your SCIM provider → config*, or the component API):
+
+```
+group-filter = team-.*
+```
+
+This propagates only groups whose display name starts with `team-`. Leave the
+field empty (the default) to propagate all groups.
+
+**Pattern examples:**
+
+| Pattern | Effect |
+| --- | --- |
+| `engineering` | Only the group named exactly `engineering` |
+| `engineering.*` | Any group whose name starts with `engineering` |
+| `.*engineering.*` | Any group whose name contains `engineering` |
+| `^(eng\|ops).*` | Any group starting with `eng` or `ops` |
+
+The pattern is validated at save time. An invalid expression is rejected before
+the component is stored.
+
+**Where the filter applies.** All propagation paths check the filter:
+admin-REST group create/update events, group membership changes (user join /
+leave), LDAP federation import, and sync refresh. A group that does not match
+is silently skipped on every path.
+
+**Membership suppression.** When a group is filtered out, membership changes for
+that group (user join or leave events) are also suppressed. If the filter is
+later removed or widened, skipped memberships are **not** backfilled
+automatically. Trigger a `sync-refresh` to reconcile.
+
+**Delete behavior.** The filter gates new outbound state, not existing mappings.
+If a group was synced before the filter was set, its mapping still exists. A
+subsequent admin deletion of that group still propagates as `DELETE
+/Groups/{id}`, because the mapping is the signal that the group was pushed.
+
+Full reference, more examples, and the delete and backfill semantics are in
+[`docs/configuration.md`](docs/configuration.md#group-name-filter).
+
+## Sub-group-of filter (opt-in)
+
+Limit SCIM propagation to groups that sit under a specific container group in
+the Keycloak group hierarchy. Set `group-subgroup-of` on a SCIM provider
+component to the **exact display name** of the container group.
+
+**Turning it on.** Per SCIM provider component, set `group-subgroup-of`
+(*Admin Console → your SCIM provider → config*, or the component API):
+
+```
+group-subgroup-of = JSM-Customers
+```
+
+This propagates only groups that are children, grandchildren, or deeper
+descendants of the group named `JSM-Customers`. The `JSM-Customers` group
+itself is **not** propagated — only its descendants are. Leave the field empty
+(the default) to propagate all groups regardless of hierarchy position.
+
+**Hierarchy examples** (setting value: `JSM-Customers`):
+
+| Group | Parent | Result |
+| --- | --- | --- |
+| `JSM-Customers` | _(top-level)_ | skipped — container itself |
+| `acme-corp` | `JSM-Customers` | propagated |
+| `acme-corp-admins` | `acme-corp` | propagated — grandchild |
+| `rbac-admins` | `RBAC-Groups` | skipped — wrong branch |
+| `standalone` | _(top-level)_ | skipped — no ancestor |
+
+**Combining with `group-filter`.** Both filters can be set at the same time. A
+group must satisfy both to be propagated:
+
+```
+# Only descendants of JSM-Customers whose name starts with "customer-"
+group-subgroup-of = JSM-Customers
+group-filter      = customer-.*
+```
+
+**Where the filter applies.** All propagation paths check the filter:
+admin-REST group events, group membership changes, LDAP federation import, and
+sync refresh.
+
+**Membership suppression and backfill.** The same rules as `group-filter`
+apply: membership changes for filtered-out groups are suppressed, and skipped
+memberships are not backfilled automatically. Trigger a `sync-refresh` to
+reconcile after changing the filter.
+
+Full reference and additional examples are in
+[`docs/configuration.md`](docs/configuration.md#sub-group-of-filter).
 
 ## Documentation
 
