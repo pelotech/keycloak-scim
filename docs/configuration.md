@@ -59,6 +59,9 @@ scim*. You can also add it through the admin REST API: send
 Both toggles apply to every path: admin REST events, LDAP-federation
 imports (when the `scim-ldap-sync` mapper is attached), and sync.
 
+### Replication filtering
+| `group-filter` | string | — | Optional Java regular expression (full match). When set, only groups whose display name matches are propagated to SCIM. Leave empty (default) to propagate all groups. See [Group name filter](#group-name-filter) below. |
+
 ### Deprovisioning mode
 
 | Name | Type | Default | Description |
@@ -430,6 +433,71 @@ sync. See [Sync behavior](#sync-behavior) for the daily periodic sync.
 | Name | Type | Default | Description |
 | --- | --- | --- | --- |
 | `propagation-role` | string | — | Realm role name. When set, the plugin propagates only users who have this role, the same way on both events and sync. Leave empty (default) to propagate all users. If the named role does not exist in the realm, the plugin propagates no users (fail-closed), and logs a warning. This setting gates users only. To exclude an individual user or group regardless, use the `scim-skip` attribute. |
+
+### Group name filter
+
+The `group-filter` setting accepts a Java regular expression that limits which
+groups are propagated to the SCIM server. Leave it empty (the default) to
+propagate all groups. When a value is set, only groups whose display name
+matches the pattern are sent.
+
+**Matching semantics.** The pattern uses *full-match* semantics, equivalent to
+`String.matches(pattern)` in Java, which anchors the expression to the entire
+display name. The pattern must therefore cover the whole string:
+
+| Pattern | Matches | Does not match |
+| --- | --- | --- |
+| `engineering` | `engineering` | `engineering-leads`, `uk-engineering` |
+| `engineering.*` | `engineering`, `engineering-leads` | `uk-engineering` |
+| `.*engineering.*` | `engineering`, `engineering-leads`, `uk-engineering` | `ops` |
+| `^(eng\|ops).*` | `engineering`, `ops-leads` | `finance` |
+
+The plugin validates the pattern at component save time. An invalid regular
+expression (such as `[unclosed`) is rejected with a `ComponentValidationException`
+before the component is stored.
+
+**Where the filter is applied.** The filter runs on every propagation path:
+
+- **Admin-REST events** — group create and update events check the group name
+  before pushing to the SCIM server.
+- **Group membership changes** — when a user joins or leaves a group, the
+  membership PATCH is also checked against the filter. If the group does not
+  match, the PATCH is suppressed.
+- **LDAP federation import** — group provisioning during LDAP user import
+  (`scim-ldap-sync` mapper) checks the filter before each group operation.
+- **Sync (sync-refresh)** — the group refresh stage skips any group whose name
+  does not match.
+
+**Delete behavior.** The filter gates *new outbound state*. If a group was
+already synced before the filter was introduced (or before it was tightened),
+its `SCIM_RESOURCE` mapping still exists. A subsequent admin delete of that
+group propagates as `DELETE /Groups/{id}` regardless of the filter, because the
+mapping is the signal that the group was pushed. Only create and update
+operations are suppressed.
+
+**Membership backfill.** Memberships skipped while the filter is active are not
+backfilled automatically. If you remove or widen the filter later, run a
+`sync-refresh` to push any missing membership state to the SCIM server.
+
+**Examples.**
+
+Propagate only groups in the `team-` namespace:
+
+```
+group-filter = team-.*
+```
+
+Propagate groups named exactly `engineering` or `operations`:
+
+```
+group-filter = engineering|operations
+```
+
+Propagate all groups (the default; leave the field empty):
+
+```
+group-filter =
+```
 
 ### User extension attributes
 

@@ -288,4 +288,62 @@ class ScimStorageProviderFactoryValidationTest {
             .findFirst().orElseThrow();
         assertThat(property.getDefaultValue()).isEqualTo("deactivate");
     }
+
+    // --- group-filter validation ---
+
+    private ComponentModel modelWithGroupFilter(String pattern) {
+        var model = modelWith(List.of());
+        if (pattern != null) {
+            model.getConfig().putSingle(ScimStorageProviderFactory.GROUP_FILTER, pattern);
+        }
+        return model;
+    }
+
+    @Test
+    void groupFilterAbsent_passes() {
+        assertThatCode(() -> validate(modelWithGroupFilter(null)))
+            .doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "   "})
+    void groupFilterBlankOrWhitespace_passes(String blank) {
+        assertThatCode(() -> validate(modelWithGroupFilter(blank)))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
+    void groupFilterValidRegex_passes() {
+        assertThatCode(() -> validate(modelWithGroupFilter("engineering.*")))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
+    void groupFilterValidAlternation_passes() {
+        assertThatCode(() -> validate(modelWithGroupFilter("^(eng|ops).*")))
+            .doesNotThrowAnyException();
+    }
+
+    @Test
+    void groupFilterInvalidRegex_throwsComponentValidationException() {
+        assertThatThrownBy(() -> validate(modelWithGroupFilter("[unclosed")))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining(ScimStorageProviderFactory.GROUP_FILTER);
+    }
+
+    @Test
+    void groupFilterInvalidRegex_messageContainsPatternSyntaxDetail() {
+        assertThatThrownBy(() -> validate(modelWithGroupFilter("(*invalid)")))
+            .isInstanceOf(ComponentValidationException.class)
+            .hasMessageContaining("valid Java regular expression");
+    }
+
+    @Test
+    void groupFilterPropertyIsRegistered() {
+        var property = new ScimStorageProviderFactory().getConfigProperties().stream()
+            .filter(p -> ScimStorageProviderFactory.GROUP_FILTER.equals(p.getName()))
+            .findFirst();
+        assertThat(property).isPresent();
+        assertThat(property.get().getType()).isEqualTo(org.keycloak.provider.ProviderConfigProperty.STRING_TYPE);
+    }
 }
